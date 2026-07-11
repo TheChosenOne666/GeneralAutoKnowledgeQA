@@ -11,6 +11,8 @@ import java.util.List;
 
 /**
  * CORS 跨域配置。
+ *
+ * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
 @Configuration
 public class CorsConfig {
@@ -20,14 +22,14 @@ public class CorsConfig {
 
     @Bean
     public CorsFilter corsFilter() {
-        var config = new CorsConfiguration();
+        CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(List.of(corsOrigins.split(",")));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
 
-        var source = new UrlBasedCorsConfigurationSource();
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return new CorsFilter(source);
     }

@@ -47,16 +47,21 @@
 |---|---|---|
 | 前端 | React + TypeScript | SPA 单页应用 |
 | UI 框架 | TailwindCSS | 原子化 CSS，浅绿主题 |
-| **后端** | **Java + Spring Boot 3** | 业务逻辑、认证、CRUD |
-| 后端 ORM | Spring Data JPA (Hibernate) | |
-| 后端安全 | Spring Security + JWT | RBAC 角色鉴权 |
+| **后端** | **Java 17 + Spring Boot 3.4** | 业务逻辑、认证、CRUD |
+| 后端 ORM | **MyBatis-Plus 3.5** | BaseMapper + ServiceImpl + 分页插件 |
+| 后端安全 | **JWT + @AuthCheck AOP** | 自定义注解 + 切面鉴权（非 Spring Security） |
 | 后端 HTTP 客户端 | WebFlux (WebClient) | 调用 Python AI 服务 + SSE 透传 |
+| 后端文档 | Knife4j (OpenAPI 3) | API 文档 |
+| ID 策略 | **Long（雪花算法 ASSIGN_ID）** | 非 UUID |
+| 密码加密 | **MD5 + 盐值** | 非 BCrypt |
+| 逻辑删除 | **@TableLogic isDelete** | 0 未删 / 1 已删 |
+| 统一响应 | **BaseResponse + ResultUtils + ErrorCode** | code/data/message |
+| 异常处理 | **BusinessException + ThrowUtils + GlobalExceptionHandler** | 全局兜底 |
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
 | 缓存 | Redis | 会话缓存 |
 | **AI 服务** | **Python + FastAPI + LangChain** | RAG 检索、Agent 推理、文档处理 |
 | 向量数据库 | Milvus | 文档向量存储与检索 |
 | 文档解析 | PyMuPDF / python-docx / unstructured | |
-| 认证 | JWT + Spring Security | 无状态鉴权 |
 
 ---
 
@@ -67,31 +72,37 @@
 采用 **共享数据库 + 行级隔离**：
 
 ```sql
--- 每张业务表都带 tenant_id
-CREATE TABLE knowledge_bases (
-    id          UUID PRIMARY KEY,
-    tenant_id   UUID NOT NULL,
-    name        VARCHAR(200),
-    scope       VARCHAR(20) NOT NULL DEFAULT 'shared',  -- shared / personal
-    owner_id    UUID,
-    created_at  TIMESTAMPTZ DEFAULT NOW(),
-    ...
+-- 每张业务表都带 tenant_id，MyBatis-Plus @TableName 映射
+-- 表名用单数形式（tenant / user / knowledge_base / document ...）
+-- 字段名用驼峰（map_underscore_to_camel_case: false）
+CREATE TABLE knowledge_base (
+    id              BIGINT PRIMARY KEY,       -- 雪花算法 ASSIGN_ID
+    tenant_id       BIGINT NOT NULL,
+    name            VARCHAR(200),
+    scope           VARCHAR(20) DEFAULT 'personal',  -- shared / personal
+    owner_id        BIGINT,
+    document_count  INTEGER DEFAULT 0,
+    create_time     TIMESTAMP DEFAULT NOW(),
+    update_time     TIMESTAMP DEFAULT NOW(),
+    is_delete       INTEGER DEFAULT 0         -- 逻辑删除 0/1
 );
 ```
 
 ### 2.2 租户上下文
 
-```python
-# 每次请求注入 tenant_id
-async def get_tenant_id(request: Request) -> UUID:
-    token = request.headers["Authorization"]
-    payload = jwt_decode(token)
-    return payload["tenant_id"]
+```java
+// UserService.getLoginUser() 从 JWT 解析 tenant_id
+public User getLoginUser(HttpServletRequest request) {
+    String token = request.getHeader("Authorization").substring(7);
+    Claims claims = jwtUtil.parseToken(token);
+    Long userId = jwtUtil.getUserId(claims);
+    return userMapper.selectById(userId); // 自动带 tenant_id
+}
 
-# 查询自动过滤
-@router.get("/knowledge-bases")
-async def list_kb(tenant_id: UUID = Depends(get_tenant_id)):
-    return await kb_service.list_by_tenant(tenant_id)
+// 查询时手动过滤 tenant_id（MyBatis-Plus QueryWrapper）
+QueryWrapper<KnowledgeBase> queryWrapper = new QueryWrapper<>();
+queryWrapper.eq("tenant_id", tenantId);
+List<KnowledgeBase> kbs = knowledgeBaseService.list(queryWrapper);
 ```
 
 ---
@@ -110,20 +121,32 @@ super_admin ── 平台级
 
 ### 3.2 权限控制
 
-```python
-class Role(str, Enum):
-    SUPER_ADMIN = "super_admin"
-    TENANT_ADMIN = "tenant_admin"
-    MEMBER = "member"
+```java
+// 角色枚举
+public enum UserRoleEnum {
+    MEMBER("member", "普通成员"),
+    TENANT_ADMIN("tenant_admin", "租户管理员"),
+    SUPER_ADMIN("super_admin", "平台超管");
+}
 
-# 装饰器鉴权
-@require_role(Role.TENANT_ADMIN)
-async def manage_members(...):
-    ...
+// 自定义注解 + AOP 切面鉴权
+@AuthCheck(mustRole = {UserConstant.TENANT_ADMIN_ROLE})
+@PostMapping("/update")
+public BaseResponse<Boolean> updateUser(@RequestBody UserUpdateRequest request, HttpServletRequest request) {
+    // ...
+}
 
-# 数据级权限：共享知识库
-# member → 只读
-# tenant_admin → 读写
+// AOP 切面拦截 @AuthCheck
+@Around("@annotation(authCheck)")
+public Object doInterceptor(ProceedingJoinPoint joinPoint, AuthCheck authCheck) throws Throwable {
+    String[] mustRoles = authCheck.mustRole();
+    User loginUser = userService.getLoginUser(request);
+    // 校验角色...
+}
+
+// 数据级权限：共享知识库
+// member → 只读（前端隐藏上传/删除按钮）
+// tenant_admin → 读写
 ```
 
 ### 3.3 菜单动态渲染
@@ -148,22 +171,25 @@ const menuItems = [
 ### 4.1 共享 vs 个人
 
 ```sql
-CREATE TABLE knowledge_bases (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id),
-    name        VARCHAR(200) NOT NULL,
-    scope       VARCHAR(20) NOT NULL DEFAULT 'shared',
+-- 表名单数，字段驼峰，BIGINT 雪花ID，逻辑删除
+CREATE TABLE knowledge_base (
+    id              BIGINT PRIMARY KEY,
+    tenant_id       BIGINT NOT NULL,
+    name            VARCHAR(200) NOT NULL,
+    scope           VARCHAR(20) DEFAULT 'personal',
     -- shared: 租户管理员维护，全员可问答
     -- personal: 个人维护，仅自己可问答
-    owner_id    UUID REFERENCES users(id),
-    created_at  TIMESTAMPTZ DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ DEFAULT NOW()
+    owner_id        BIGINT NOT NULL,
+    document_count  INTEGER DEFAULT 0,
+    create_time     TIMESTAMP DEFAULT NOW(),
+    update_time     TIMESTAMP DEFAULT NOW(),
+    is_delete       INTEGER DEFAULT 0
 );
 
-CREATE TABLE documents (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kb_id       UUID NOT NULL REFERENCES knowledge_bases(id),
-    tenant_id   UUID NOT NULL,
+CREATE TABLE document (
+    id          BIGINT PRIMARY KEY,
+    kb_id       BIGINT NOT NULL,
+    tenant_id   BIGINT NOT NULL,
     filename    VARCHAR(500) NOT NULL,
     file_type   VARCHAR(20),     -- pdf / docx / md / txt
     file_size   BIGINT,
@@ -171,7 +197,10 @@ CREATE TABLE documents (
     -- pending → parsing → embedding → ready / failed
     chunk_count INTEGER DEFAULT 0,
     error_msg   TEXT,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    uploaded_by BIGINT NOT NULL,
+    create_time TIMESTAMP DEFAULT NOW(),
+    update_time TIMESTAMP DEFAULT NOW(),
+    is_delete   INTEGER DEFAULT 0
 );
 ```
 
@@ -260,18 +289,20 @@ Final Answer: 年假...病假...区别...
 ### 6.1 接口设计
 
 ```
-POST /api/chat/messages
+POST /api/chat/message/stream
 Authorization: Bearer <token>
 Content-Type: application/json
 
 {
-  "conversation_id": "uuid",
+  "conversationId": 1234567890,
   "content": "公司年假政策是什么？",
-  "kb_ids": ["uuid1", "uuid2"],
+  "kbIds": [111, 222],
   "model": "deepseek-v3.2",
-  "mode": "rag"  // rag / search
+  "mode": "rag"
 }
 ```
+
+> 返回 `Flux<String>` SSE 流，Java 透传 Python AI 服务的流式响应。
 
 ### 6.2 SSE 响应格式
 
@@ -288,11 +319,8 @@ data: {"content": "根"}
 event: token
 data: {"content": "据"}
 
-event: token
-data: {"content": "员工手册"}
-
 event: done
-data: {"conversation_id": "uuid", "message_id": "uuid"}
+data: {"conversation_id": "1234567890"}
 ```
 
 ---
@@ -301,17 +329,18 @@ data: {"conversation_id": "uuid", "message_id": "uuid"}
 
 ### 7.1 核心表
 
-| 表名 | 说明 |
-|---|---|
-| `tenants` | 租户表 |
-| `users` | 用户表（含 role 字段） |
-| `knowledge_bases` | 知识库表（含 scope 字段） |
-| `documents` | 文档表 |
-| `document_chunks` | 文档分块表（关联向量库） |
-| `conversations` | 会话表 |
-| `messages` | 消息表 |
-| `ai_configs` | AI 模型配置表 |
-| `audit_logs` | 审计日志表 |
+| 表名 | 说明 | MyBatis-Plus 实体 |
+|---|---|---|
+| `tenant` | 租户表 | Tenant.java |
+| `user` | 用户表（含 role 字段） | User.java |
+| `knowledge_base` | 知识库表（含 scope 字段） | KnowledgeBase.java |
+| `document` | 文档表（含 status 状态机） | Document.java |
+| `conversation` | 会话表 | Conversation.java |
+| `message` | 消息表（含 sources JSON） | Message.java |
+| `ai_config` | AI 模型配置表（LLM/Embedding/Rerank） | AiConfig.java |
+| `audit_log` | 审计日志表 | AuditLog.java |
+
+> 所有表使用 **BIGINT 雪花ID**（@TableId ASSIGN_ID）、**create_time/update_time 自动填充**（MetaObjectHandler）、**is_delete 逻辑删除**（@TableLogic）。
 
 ### 7.2 ER 关系
 
@@ -333,33 +362,70 @@ tenants 1──N audit_logs
 
 ```
 multi-rag-employee/
-├── backend/                        # Java Spring Boot 后端
-│   ├── pom.xml
+├── backend/                        # Java Spring Boot 3.4 后端
+│   ├── pom.xml                     # MyBatis-Plus + JWT + WebFlux + Knife4j
 │   ├── src/main/java/com/xiongda/
-│   │   ├── XiongdaApplication.java
-│   │   ├── config/                 # CorsConfig, SecurityConfig
-│   │   ├── controller/             # Auth, Chat, Knowledge, Member, AiConfig, Audit
-│   │   ├── service/                # AuthService
-│   │   ├── entity/                 # JPA 实体 (7 张表)
-│   │   ├── repository/             # Spring Data JPA Repository
-│   │   ├── dto/                    # 请求/响应 DTO
-│   │   ├── security/               # JWT 工具、过滤器、上下文
-│   │   └── client/                 # AiServiceClient (HTTP 调用 Python)
+│   │   ├── MainApplication.java    # @MapperScan @EnableAsync
+│   │   ├── annotation/
+│   │   │   └── AuthCheck.java      # @AuthCheck(mustRole={}) 权限注解
+│   │   ├── aop/
+│   │   │   ├── AuthInterceptor.java    # @AuthCheck AOP 切面
+│   │   │   └── LogInterceptor.java     # 请求日志 AOP
+│   │   ├── common/
+│   │   │   ├── BaseResponse.java       # 统一响应 {code, data, message}
+│   │   │   ├── ResultUtils.java        # success() / error()
+│   │   │   ├── ErrorCode.java          # 错误码枚举
+│   │   │   ├── PageRequest.java        # 分页基类
+│   │   │   └── DeleteRequest.java      # 通用删除请求
+│   │   ├── config/
+│   │   │   ├── MyBatisPlusConfig.java  # 分页插件
+│   │   │   ├── MyMetaObjectHandler.java # 自动填充 createTime/updateTime
+│   │   │   ├── CorsConfig.java         # 跨域
+│   │   │   ├── JsonConfig.java         # Long→String 序列化
+│   │   │   └── Knife4jConfig.java      # API 文档
+│   │   ├── constant/
+│   │   │   ├── CommonConstant.java     # 通用常量
+│   │   │   └── UserConstant.java       # 用户角色常量
+│   │   ├── controller/
+│   │   │   ├── HealthController.java
+│   │   │   ├── UserController.java     # 登录/注册/成员管理
+│   │   │   ├── ChatController.java     # 会话 + SSE 透传
+│   │   │   ├── KnowledgeBaseController.java
+│   │   │   ├── AiConfigController.java
+│   │   │   └── AuditLogController.java
+│   │   ├── exception/
+│   │   │   ├── BusinessException.java  # 自定义业务异常
+│   │   │   ├── ThrowUtils.java         # throwIf() 工具
+│   │   │   └── GlobalExceptionHandler.java
+│   │   ├── mapper/                     # MyBatis-Plus BaseMapper (8个)
+│   │   ├── model/
+│   │   │   ├── entity/                 # @TableName 实体 (8个)
+│   │   │   ├── enums/                  # UserRoleEnum / DocStatusEnum / KbScopeEnum
+│   │   │   ├── vo/                     # 视图对象 (脱敏)
+│   │   │   └── dto/                    # 请求对象 (按模块分包)
+│   │   ├── service/                    # 接口 + impl/ 实现类
+│   │   │   └── impl/
+│   │   ├── client/
+│   │   │   └── AiServiceClient.java    # WebClient 调 Python AI 服务
+│   │   └── utils/
+│   │       ├── JwtUtil.java            # JWT 生成/解析
+│   │       ├── NetUtils.java           # 获取 IP
+│   │       └── SpringContextUtils.java
 │   └── src/main/resources/
-│       └── application.yml
+│       └── application.yml             # MyBatis-Plus + PG + Redis + JWT
 ├── ai-service/                     # Python AI 服务 (FastAPI + LangChain)
-│   ├── main.py                     # 入口
+│   ├── main.py
 │   ├── requirements.txt
-│   ├── core/config.py              # 配置
+│   ├── core/config.py
 │   ├── routers/
-│   │   ├── chat.py                 # SSE 流式问答
-│   │   └── document.py             # 文档处理
+│   │   ├── chat.py                 # /ai/chat/stream SSE
+│   │   └── document.py             # /ai/document/process
 │   └── services/
-│       ├── llm.py                  # LangChain LLM 流式生成
-│       ├── embedding.py            # 文本向量化
-│       ├── vector_store.py         # Milvus 向量检索
+│       ├── llm.py                  # LangChain LLM 流式
+│       ├── embedding.py
+│       ├── vector_store.py         # Milvus
 │       ├── rag.py                  # 混合检索 + Rerank
-│       └── document_processor.py   # 文档解析 + 分块
+│       └── document_processor.py
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
@@ -369,9 +435,11 @@ multi-rag-employee/
 │   │   └── App.tsx
 │   ├── package.json
 │   └── tailwind.config.js
+├── docker-compose.yml              # PostgreSQL + Redis
 └── docs/
-    ├── requirements.md             # 需求文档
-    ├── design.md                   # 方案设计
-    ├── ui-design-guide.md          # UI设计规范
-    └── ui-design/                  # UI设计稿
+    ├── requirements.md
+    ├── design.md
+    ├── ui-design-guide.md
+    ├── task-breakdown.md
+    └── ui-design/
 ```

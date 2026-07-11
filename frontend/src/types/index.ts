@@ -1,5 +1,12 @@
 /** 全局类型定义。*/
 
+/** 后端统一响应封装。*/
+export interface BaseResponse<T> {
+  code: number
+  data: T
+  message: string
+}
+
 export type Role = 'super_admin' | 'tenant_admin' | 'member'
 
 export interface User {
@@ -7,12 +14,23 @@ export interface User {
   name: string
   email: string
   role: Role
-  tenant_id: string | null
-  avatar_url: string | null
+  tenantId: string | null
+  avatarUrl: string | null
 }
 
-export interface TokenResponse {
-  access_token: string
+/** 登录返回 VO（含 token）。*/
+export interface LoginUserVO {
+  id: string
+  name: string
+  email: string
+  role: Role
+  tenantId: string | null
+  avatarUrl: string | null
+  token: string
+}
+
+/** 兼容旧引用。*/
+export type TokenResponse = LoginUserVO
   token_type: string
   user: User
 }

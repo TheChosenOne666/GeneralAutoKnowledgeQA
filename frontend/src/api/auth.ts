@@ -1,14 +1,15 @@
-/** 认证 API。*/
+/** 认证 API — 对接 Java 后端模板风格接口。*/
 
 import { api } from './client'
-import type { TokenResponse, User } from '@/types'
+import type { BaseResponse, TokenResponse, User } from '@/types'
 
 export const authApi = {
-  login: (email: string, password: string) =>
-    api.post<TokenResponse>('/auth/login', { email, password }).then((r) => r.data),
+  login: (email: string, userPassword: string) =>
+    api.post<BaseResponse<TokenResponse>>('/user/login', { email, userPassword }).then((r) => r.data.data),
 
-  register: (name: string, email: string, password: string) =>
-    api.post<TokenResponse>('/auth/register', { name, email, password }).then((r) => r.data),
+  register: (name: string, email: string, userPassword: string) =>
+    api.post<BaseResponse<string>>('/user/register', { name, email, userPassword }).then((r) => r.data.data),
 
-  me: () => api.get<User>('/auth/me').then((r) => r.data),
+  getLoginUser: () =>
+    api.get<BaseResponse<TokenResponse>>('/user/get/login').then((r) => r.data.data),
 }

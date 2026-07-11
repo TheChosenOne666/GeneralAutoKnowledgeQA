@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { authApi } from '@/api/auth'
 import { clearToken, getToken, setToken } from '@/api/client'
-import type { User } from '@/types'
+import type { LoginUserVO } from '@/types'
 
 export function useAuth() {
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<LoginUserVO | null>(null)
   const [loading, setLoading] = useState(true)
 
   const fetchUser = useCallback(async () => {
@@ -16,7 +16,7 @@ export function useAuth() {
       return
     }
     try {
-      const me = await authApi.me()
+      const me = await authApi.getLoginUser()
       setUser(me)
     } catch {
       clearToken()
@@ -31,16 +31,18 @@ export function useAuth() {
 
   const login = async (email: string, password: string) => {
     const res = await authApi.login(email, password)
-    setToken(res.access_token)
-    setUser(res.user)
-    return res.user
+    setToken(res.token)
+    setUser(res)
+    return res
   }
 
   const register = async (name: string, email: string, password: string) => {
-    const res = await authApi.register(name, email, password)
-    setToken(res.access_token)
-    setUser(res.user)
-    return res.user
+    await authApi.register(name, email, password)
+    // 注册成功后自动登录
+    const res = await authApi.login(email, password)
+    setToken(res.token)
+    setUser(res)
+    return res
   }
 
   const logout = () => {

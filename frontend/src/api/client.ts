@@ -30,9 +30,26 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// 响应拦截器：401 跳转登录
+// 响应拦截器：统一处理 BaseResponse 错误码
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const data = response.data
+    // 后端统一响应 BaseResponse {code, data, message}
+    if (data && typeof data.code === 'number') {
+      if (data.code === 0) {
+        // 成功：直接返回 data
+        return response
+      }
+      // 未登录
+      if (data.code === 40100) {
+        clearToken()
+        window.location.href = '/login'
+      }
+      // 业务错误：抛出消息
+      return Promise.reject(new Error(data.message || '操作失败'))
+    }
+    return response
+  },
   (error) => {
     if (error.response?.status === 401) {
       clearToken()

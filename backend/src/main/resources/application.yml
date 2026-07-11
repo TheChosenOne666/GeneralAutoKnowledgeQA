@@ -7,18 +7,9 @@ spring:
 
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:xiongda}
-    username: ${DB_USER:xiongda}
-    password: ${DB_PASSWORD:xiongda_secret}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres123!@#}
     driver-class-name: org.postgresql.Driver
-
-  jpa:
-    hibernate:
-      ddl-auto: update
-    show-sql: false
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-        format_sql: true
 
   data:
     redis:
@@ -31,10 +22,30 @@ spring:
       max-file-size: 50MB
       max-request-size: 100MB
 
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+# MyBatis-Plus
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: false
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: isDelete
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      id-type: assign_id
+  mapper-locations: classpath:/mapper/*.xml
+
 # JWT
 jwt:
   secret: ${JWT_SECRET:change-this-to-a-random-secret-key-at-least-32-chars}
-  expiration: 86400000  # 24h (ms)
+  expiration: 86400000
 
 # AI Service (Python)
 ai-service:
@@ -44,7 +55,12 @@ ai-service:
 cors:
   origins: http://localhost:5173,http://localhost:3000
 
+# Knife4j
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
 logging:
   level:
     com.xiongda: DEBUG
-    org.hibernate.SQL: WARN
