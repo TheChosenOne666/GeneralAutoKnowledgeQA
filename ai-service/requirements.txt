@@ -1,0 +1,29 @@
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# LangChain
+langchain==0.3.14
+langchain-core==0.3.29
+langchain-community==0.3.14
+langchain-openai==0.3.0
+
+# AI SDK
+openai==1.59.3
+httpx==0.28.1
+
+# Document Processing
+unstructured==0.16.13
+pymupdf==1.25.2
+python-docx==1.1.2
+markdown==3.7
+
+# Vector DB
+pymilvus==2.5.3
+
+# Utils
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+loguru==0.7.3
+numpy==2.2.1

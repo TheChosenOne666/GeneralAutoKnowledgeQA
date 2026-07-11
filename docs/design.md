@@ -11,23 +11,20 @@
 │                  前端（React）                │
 │         TailwindCSS · SSE · Canvas           │
 └──────────────────┬──────────────────────────┘
-                   │ HTTP / SSE
+                   │ HTTP / SSE (port 5173 → 8080)
 ┌──────────────────▼──────────────────────────┐
-│                API 网关层                     │
-│         鉴权 · 限流 · 路由                     │
-└──────────────────┬──────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────┐
-│               后端服务层                      │
-│  ┌─────────┐ ┌─────────┐ ┌──────────────┐   │
-│  │ 认证服务 │ │ 问答服务 │ │ 知识库服务    │   │
-│  └─────────┘ └─────────┘ └──────────────┘   │
-│  ┌─────────┐ ┌─────────┐ ┌──────────────┐   │
-│  │ 成员服务 │ │ 审计服务 │ │ AI配置服务    │   │
-│  └─────────┘ └─────────┘ └──────────────┘   │
-└──────────────────┬──────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────┐
+│           Java 后端（Spring Boot）            │
+│    鉴权 · CRUD · 业务逻辑 · SSE 透传          │
+└──────────────┬───────────────┬──────────────┘
+               │               │ HTTP (port 8080 → 8001)
+               │   ┌───────────▼──────────────┐
+               │   │   Python AI 服务          │
+               │   │   FastAPI + LangChain     │
+               │   │   RAG检索 · Agent推理     │
+               │   │   文档处理 · 向量化       │
+               │   └───────────┬──────────────┘
+               │               │
+┌──────────────▼───────────────▼──────────────┐
 │               数据存储层                      │
 │  ┌────────┐ ┌────────┐ ┌─────────────────┐  │
 │  │PostgreSQL│ │ Redis  │ │ 向量数据库       │  │
@@ -50,13 +47,16 @@
 |---|---|---|
 | 前端 | React + TypeScript | SPA 单页应用 |
 | UI 框架 | TailwindCSS | 原子化 CSS，浅绿主题 |
-| 后端 | Python + FastAPI | 异步 API，适合 SSE 流式 |
-| ORM | SQLAlchemy 2.0 | 异步 ORM |
+| **后端** | **Java + Spring Boot 3** | 业务逻辑、认证、CRUD |
+| 后端 ORM | Spring Data JPA (Hibernate) | |
+| 后端安全 | Spring Security + JWT | RBAC 角色鉴权 |
+| 后端 HTTP 客户端 | WebFlux (WebClient) | 调用 Python AI 服务 + SSE 透传 |
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
-| 缓存/队列 | Redis | 会话缓存、异步任务队列 |
-| 向量数据库 | Milvus / Qdrant | 文档向量存储与检索 |
-| 文档解析 | Unstructured / PyMuPDF | PDF/Word/Markdown 文本提取 |
-| 认证 | JWT + RBAC | 无状态鉴权 |
+| 缓存 | Redis | 会话缓存 |
+| **AI 服务** | **Python + FastAPI + LangChain** | RAG 检索、Agent 推理、文档处理 |
+| 向量数据库 | Milvus | 文档向量存储与检索 |
+| 文档解析 | PyMuPDF / python-docx / unstructured | |
+| 认证 | JWT + Spring Security | 无状态鉴权 |
 
 ---
 
@@ -333,30 +333,33 @@ tenants 1──N audit_logs
 
 ```
 multi-rag-employee/
-├── backend/
-│   ├── app/
-│   │   ├── api/            # 路由层
-│   │   │   ├── auth.py
-│   │   │   ├── chat.py
-│   │   │   ├── knowledge.py
-│   │   │   ├── members.py
-│   │   │   ├── ai_config.py
-│   │   │   └── audit.py
-│   │   ├── core/           # 核心配置
-│   │   │   ├── config.py
-│   │   │   ├── security.py
-│   │   │   └── deps.py
-│   │   ├── models/         # 数据模型
-│   │   ├── schemas/        # Pydantic Schema
-│   │   ├── services/       # 业务逻辑
-│   │   │   ├── rag.py      # RAG 检索
-│   │   │   ├── agent.py    # Agent 推理
-│   │   │   └── document.py # 文档处理
-│   │   └── main.py
-│   ├── alembic/            # 数据库迁移
-│   ├── tests/
+├── backend/                        # Java Spring Boot 后端
+│   ├── pom.xml
+│   ├── src/main/java/com/xiongda/
+│   │   ├── XiongdaApplication.java
+│   │   ├── config/                 # CorsConfig, SecurityConfig
+│   │   ├── controller/             # Auth, Chat, Knowledge, Member, AiConfig, Audit
+│   │   ├── service/                # AuthService
+│   │   ├── entity/                 # JPA 实体 (7 张表)
+│   │   ├── repository/             # Spring Data JPA Repository
+│   │   ├── dto/                    # 请求/响应 DTO
+│   │   ├── security/               # JWT 工具、过滤器、上下文
+│   │   └── client/                 # AiServiceClient (HTTP 调用 Python)
+│   └── src/main/resources/
+│       └── application.yml
+├── ai-service/                     # Python AI 服务 (FastAPI + LangChain)
+│   ├── main.py                     # 入口
 │   ├── requirements.txt
-│   └── .env
+│   ├── core/config.py              # 配置
+│   ├── routers/
+│   │   ├── chat.py                 # SSE 流式问答
+│   │   └── document.py             # 文档处理
+│   └── services/
+│       ├── llm.py                  # LangChain LLM 流式生成
+│       ├── embedding.py            # 文本向量化
+│       ├── vector_store.py         # Milvus 向量检索
+│       ├── rag.py                  # 混合检索 + Rerank
+│       └── document_processor.py   # 文档解析 + 分块
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
@@ -367,8 +370,8 @@ multi-rag-employee/
 │   ├── package.json
 │   └── tailwind.config.js
 └── docs/
-    ├── requirements.md     # 需求文档
-    ├── design.md           # 方案设计
-    ├── ui-design-guide.md  # UI设计规范
-    └── ui-design/          # UI设计稿
+    ├── requirements.md             # 需求文档
+    ├── design.md                   # 方案设计
+    ├── ui-design-guide.md          # UI设计规范
+    └── ui-design/                  # UI设计稿
 ```

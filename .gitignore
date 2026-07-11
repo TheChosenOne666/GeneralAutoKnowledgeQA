@@ -31,3 +31,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Uploads
+backend/uploads/
+
+# Java
+backend/target/
+*.class
+
