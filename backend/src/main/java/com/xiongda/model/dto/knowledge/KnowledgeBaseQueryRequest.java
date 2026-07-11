@@ -4,8 +4,6 @@ import com.xiongda.common.PageRequest;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-import java.io.Serializable;
-
 /**
  * 知识库查询请求。
  *
@@ -13,7 +11,7 @@ import java.io.Serializable;
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
-public class KnowledgeBaseQueryRequest extends PageRequest implements Serializable {
+public class KnowledgeBaseQueryRequest extends PageRequest {
 
     /**
      * shared / personal

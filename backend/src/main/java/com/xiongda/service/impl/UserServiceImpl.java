@@ -20,7 +20,6 @@ import com.xiongda.model.vo.LoginUserVO;
 import com.xiongda.model.vo.UserVO;
 import com.xiongda.service.UserService;
 import com.xiongda.utils.JwtUtil;
-import com.xiongda.utils.NetUtils;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -120,17 +119,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         ThrowUtils.throwIf(StringUtils.isBlank(authorization), ErrorCode.NOT_LOGIN_ERROR);
 
         String token = authorization.substring(CommonConstant.TOKEN_PREFIX.length());
-        // 解析 token
-        com.xiongda.model.entity.User loginUser = null;
+        // 解析 token（仅 JWT 解析异常视为未登录）
+        com.xiongda.model.entity.User loginUser;
         try {
             io.jsonwebtoken.Claims claims = jwtUtil.parseToken(token);
             Long userId = jwtUtil.getUserId(claims);
             loginUser = this.baseMapper.selectById(userId);
-            ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
-            ThrowUtils.throwIf(loginUser.getIsActive() == 0, ErrorCode.FORBIDDEN_ERROR, "用户已被停用");
         } catch (Exception e) {
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
+        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
+        ThrowUtils.throwIf(loginUser.getIsActive() == 0, ErrorCode.FORBIDDEN_ERROR, "用户已被停用");
         return loginUser;
     }
 

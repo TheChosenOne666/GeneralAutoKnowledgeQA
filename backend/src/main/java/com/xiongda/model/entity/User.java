@@ -11,7 +11,7 @@ import java.util.Date;
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
-@TableName(value = "user")
+@TableName(value = "app_user")
 @Data
 public class User implements Serializable {
 

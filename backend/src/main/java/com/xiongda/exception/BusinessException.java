@@ -3,15 +3,13 @@ package com.xiongda.exception;
 import com.xiongda.common.ErrorCode;
 import lombok.Getter;
 
-import java.io.Serializable;
-
 /**
  * 自定义业务异常。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
 @Getter
-public class BusinessException extends RuntimeException implements Serializable {
+public class BusinessException extends RuntimeException {
 
     private final int code;
 

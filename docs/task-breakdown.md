@@ -50,29 +50,74 @@
 
 ---
 
-### M1-2 认证服务 [后端/Java] P0 · 1d
+### M1-2 认证服务 [后端/Java] P0 · 1d ✅ 已完成
 
-- 登录接口 `/api/user/login`（邮箱+密码 → JWT）
-- 注册接口 `/api/user/register`（自动创建租户 + tenant_admin）
-- 获取当前用户 `/api/user/get/login`
-- JWT 过期/无效处理（GlobalExceptionHandler 拦截）
-- 密码 MD5 + 盐值加密
+- ~~登录接口 `/api/user/login`（邮箱+密码 → JWT）~~
+- ~~注册接口 `/api/user/register`（自动创建租户 + tenant_admin）~~
+- ~~获取当前用户 `/api/user/get/login`~~
+- ~~JWT 过期/无效处理（GlobalExceptionHandler 拦截）~~
+- ~~密码 MD5 + 盐值加密~~
 - **依赖**: M1-1 ✅
 - **产出**: Postman 可调通注册/登录/get/login
 
 > 注：接口路径按模板风格（/api/user/login 而非 /api/auth/login）
 
+**实际完成内容：**
+- ✅ 后端接口全部实现（UserController / UserServiceImpl）
+  - 注册：自动创建租户 + tenant_admin 角色，邮箱查重，MD5+盐值加密
+  - 登录：邮箱+密码校验，用户状态校验，生成 JWT Token
+  - 获取当前用户：解析 Authorization Header → JWT → 查库 → 状态校验
+- ✅ JwtUtil 工具类（生成/解析/过期/无效 Token 处理）
+- ✅ GlobalExceptionHandler 统一异常处理（BusinessException / RuntimeException / 参数校验）
+- ✅ @AuthCheck AOP 权限切面
+- ✅ 单元测试编写并全部通过（18 个用例）
+  - `JwtUtilTest`：4 个（Token生成解析、tenantId为空、过期、无效）
+  - `UserServiceImplTest`：14 个（注册成功/邮箱重复、登录成功/用户不存在/密码错误/停用、获取登录用户成功/无Token/无效Token/用户不存在/停用、VO转换）
+
+**Bug 修复（单元测试发现）：**
+- `UserServiceImpl.getLoginUser` 中 `catch (Exception e)` 误吞了 `BusinessException`，导致用户被停用时返回 `NOT_LOGIN_ERROR(40100)` 而非 `FORBIDDEN_ERROR(40300)`
+- 修复：将用户状态校验移出 try-catch，仅 JWT 解析异常走 catch
+
+**代码清理：**
+- 删除 4 处 WARNING：未使用 import（AuditLog.Map、UserServiceImpl.NetUtils）、冗余 implements Serializable（BusinessException、KnowledgeBaseQueryRequest）
+
+**验证结果：**
+- `mvn test -Dtest=JwtUtilTest,UserServiceImplTest` → Tests run: 18, Failures: 0, Errors: 0 ✅
+
 ---
 
-### M1-3 认证页面 [前端] P0 · 1d
+### M1-3 认证页面 [前端] P0 · 1d ✅ 已完成
 
-- 登录/注册 Tab 切换
-- 表单验证（邮箱格式、密码长度）
-- 调用后端 API，存储 JWT 到 localStorage
-- 登录成功跳转 /chat
-- 401 自动跳转登录页
-- **依赖**: M1-2
+- ~~登录/注册 Tab 切换~~
+- ~~表单验证（邮箱格式、密码长度）~~
+- ~~调用后端 API，存储 JWT 到 localStorage~~
+- ~~登录成功跳转 /chat~~
+- ~~401 自动跳转登录页~~
+- **依赖**: M1-2 ✅
 - **产出**: 浏览器可注册登录
+
+**实际完成内容：**
+- ✅ 前端骨架已有 AuthPage（登录/注册 Tab 切换、邮箱+密码表单、错误提示、loading 状态）
+- ✅ useAuth Hook（login/register/logout，注册成功自动登录，JWT 存 localStorage）
+- ✅ API 客户端（Axios 拦截器：请求注入 Bearer Token，响应 40100 自动跳转 /login）
+- ✅ AuthGuard 路由守卫（无 Token 跳转 /login）
+- ✅ 修复 `types/index.ts` TokenResponse 类型定义语法错误
+- ✅ 密码输入框增加 `minLength={6}` 前端验证（与后端 6-128 位一致）
+- ✅ 前后端联调测试通过
+
+**联调时发现并修复的 M1-1 遗留问题（数据库表结构不匹配）：**
+- 问题：数据库表是旧 JPA 遗留结构（uuid 主键、`hashed_password` 列名、无 `is_delete` 列、复数表名），与 MyBatis-Plus 实体完全不匹配，导致所有数据库操作失败
+- 修复 1：重建 8 张表（`schema.sql`），按实体结构：bigint 雪花 ID、下划线列名、`is_delete` 逻辑删除列、外键约束、索引
+- 修复 2：`application.yml` 开启 `map-underscore-to-camel-case: true`（驼峰字段↔下划线列名自动映射）
+- 修复 3：`User` 实体 `@TableName("app_user")`（避开 PostgreSQL 保留字 `user`）
+- 修复 4：清理占用 8080 端口的旧后端进程（`com.xiongda.XiongdaApplication` 旧类名）
+
+**验证结果：**
+- 注册 `POST /api/user/register` → code:0, 返回 userId ✅
+- 登录 `POST /api/user/login` → code:0, 返回 LoginUserVO(含 JWT token) ✅
+- 获取当前用户 `GET /api/user/get/login` → code:0, 返回用户信息 ✅
+- 前端 `tsc --noEmit` 编译通过 ✅
+- 浏览器 localhost:5173/login 页面可正常访问 ✅
 
 ---
 

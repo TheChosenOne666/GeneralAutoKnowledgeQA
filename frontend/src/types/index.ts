@@ -31,9 +31,6 @@ export interface LoginUserVO {
 
 /** 兼容旧引用。*/
 export type TokenResponse = LoginUserVO
-  token_type: string
-  user: User
-}
 
 export interface KnowledgeBase {
   id: string
