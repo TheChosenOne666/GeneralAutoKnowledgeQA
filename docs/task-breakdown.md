@@ -155,17 +155,29 @@
 
 ---
 
-### M1-5 AI 服务基础 [Python] P0 · 1d
+### M1-5 AI 服务基础 [Python] P0 · 1d ✅ 已完成
 
-- FastAPI 服务启动（port 8001）
-- `/health` 健康检查
-- 文档处理接口 `/ai/document/process`（提取文本 → 分块）
-  - PDF: PyMuPDF
-  - DOCX: python-docx
-  - MD/TXT: 直接读取
-  - RecursiveCharacterTextSplitter 分块
+- ~~FastAPI 服务启动（port 8001）~~
+- ~~`/health` 健康检查~~
+- ~~文档处理接口 `/ai/document/process`（提取文本 → 分块）~~
+  - ~~PDF: PyMuPDF~~
+  - ~~DOCX: python-docx~~
+  - ~~MD/TXT: 直接读取~~
+  - ~~RecursiveCharacterTextSplitter 分块~~
 - **依赖**: 无（独立服务）
 - **产出**: 可处理文档返回分块
+
+**实际完成内容：**
+- ✅ FastAPI 服务启动（port 8001），健康检查 `GET /health` → `{"status":"ok","service":"ai-service"}`
+- ✅ 文档处理接口 `POST /ai/document/process` 实现
+  - `extract_text()`：PDF（PyMuPDF）/ DOCX（python-docx）/ MD/TXT（直接读取）
+  - `chunk_text()`：LangChain RecursiveCharacterTextSplitter（chunk_size=512, overlap=50）
+  - `process()`：提取 → 分块 → 返回分块数量（向量化/存储在 M2 接入，当前跳过）
+- ✅ Python 虚拟环境 `.venv` 创建，安装最小依赖（fastapi/uvicorn/pydantic/loguru/pymupdf/python-docx/langchain-text-splitters）
+
+**验证结果：**
+- `GET /health` → `{"status":"ok","service":"ai-service"}` ✅
+- `POST /ai/document/process`（txt 文件）→ `{"doc_id":"test-1","status":"ready","chunk_count":3}` ✅
 
 ---
 
