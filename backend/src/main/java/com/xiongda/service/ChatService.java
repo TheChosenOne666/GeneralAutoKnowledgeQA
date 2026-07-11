@@ -30,6 +30,16 @@ public interface ChatService extends IService<Conversation> {
     List<MessageVO> listMessages(Long conversationId);
 
     /**
+     * 重命名会话（校验归属）。
+     */
+    void renameConversation(Long id, Long userId, String title);
+
+    /**
+     * 删除会话（含其消息，校验归属）。
+     */
+    void deleteConversation(Long id, Long userId);
+
+    /**
      * 保存用户消息。
      */
     void saveUserMessage(Long conversationId, String content);

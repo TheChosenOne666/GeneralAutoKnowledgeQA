@@ -19,6 +19,7 @@ class LlmService:
         question: str,
         context: str = "",
         model: str | None = None,
+        history: list[dict] | None = None,
     ) -> AsyncGenerator[str, None]:
         """流式生成回答，逐 token yield。
 
@@ -26,6 +27,7 @@ class LlmService:
             question: 用户问题
             context: RAG 检索到的上下文（M1-8 无 RAG 时为空）
             model: 模型名称（可选，默认用配置）
+            history: 多轮对话历史（可选，[{role, content}]，不含当前问题）
         """
         if not settings.llm_api_key:
             # 无 API Key：模拟流式输出
@@ -39,16 +41,20 @@ class LlmService:
             return
 
         # 有 API Key：调用 OpenAI 兼容 API
-        messages = [
+        messages: list[dict] = [
             {
                 "role": "system",
                 "content": "你是熊答，一个企业知识问答助手。请简洁准确地回答问题。",
             },
-            {
-                "role": "user",
-                "content": f"参考信息:\n{context}\n\n问题: {question}" if context else question,
-            },
         ]
+        for h in history or []:
+            role = h.get("role")
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": h.get("content", "")})
+        user_content = (
+            f"参考信息:\n{context}\n\n问题: {question}" if context else question
+        )
+        messages.append({"role": "user", "content": user_content})
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream(

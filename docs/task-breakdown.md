@@ -307,79 +307,114 @@
 
 ## M2 — RAG 核心检索
 
-### M2-1 Embedding 服务 [Python] P0 · 1d
+### M2-1 Embedding 服务 [Python] P0 · 1d ✅ 已完成
 
-- 接入 LangChain OpenAIEmbeddings（兼容火山方舟）
-- 文本向量化 `embed_text()`
-- 批量向量化 `embed_batch()`
-- 配置 API Key / Base URL
-- **依赖**: M1-5
-- **产出**: 可调用 Embedding API
+- 接入 OpenAI 兼容 Embedding 接口（httpx 直调 `/embeddings`，兼容火山方舟）
+- 文本向量化 `embed_text()` / 批量 `embed_batch()`
+- 未配置 `embedding_api_key` 时降级为确定性伪向量（字符级 bigram + L2 归一化），保证开发/单测/演示链路可跑通
+- 配置 API Key / Base URL（`core/config.py`）
+- **依赖**: M1-5 ✅
+- **产出**: 可调用 Embedding（真实/降级双路径）
 
----
-
-### M2-2 Milvus 向量存储 [Python] P0 · 1.5d
-
-- Docker 启动 Milvus
-- LangChain Milvus VectorStore 集成
-- 存储文档分块向量（含元数据：doc_id, kb_id, tenant_id, page）
-- 向量检索 `similarity_search_by_vector()`
-- 按 tenant_id + kb_id 过滤
-- 删除文档向量 `delete_by_doc()`
-- **依赖**: M2-1
-- **产出**: 文档可入库检索
+**实际完成内容：**
+- ✅ `services/embedding.py` 重写：真实路径 `_embed_remote` 用 httpx 调 `{embedding_base_url}/embeddings`；降级 `_embed_fallback` 用字符级 bigram 哈希伪向量
+- ✅ 不引入 langchain-openai 重依赖，与 `llm.py` httpx 风格一致
+- ✅ 单元测试 `tests/test_embedding.py`（维度/确定性/归一化/异步）6 个全通过
 
 ---
 
-### M2-3 文档处理全链路 [Python] P0 · 1d
+### M2-2 Milvus 向量存储 [Python] P0 · 1.5d ✅ 已完成
 
-- 完善 `document_processor.process()`：
-  1. 提取文本
-  2. 分块
-  3. 向量化（Embedding）
-  4. 存储（Milvus）
-- 返回分块数量
-- 错误处理 + 状态回写
-- **依赖**: M2-1, M2-2
+- 内存向量存储（默认，零依赖）：余弦相似度检索 + BM25 关键词检索，tenant_id + kb_id 过滤
+- Milvus 向量存储（可选集成，pymilvus 直接管理，lazy import）
+- 存储文档分块向量（含元数据：doc_id, kb_id, tenant_id, source, page, chunk_index）
+- 向量检索 / 关键词检索 / 删除文档向量 `delete_by_doc()`
+- **依赖**: M2-1 ✅
+- **产出**: 文档可入库检索（默认内存，Milvus 按需启用）
+
+**实际完成内容：**
+- ✅ `services/vector_store.py` 重写：`InMemoryVectorStore`（默认，零依赖）、`MilvusVectorStore`（pymilvus 直接管理，lazy import）
+- ✅ `core/config.py` 增加 `vector_store_type`（默认 memory）/ `milvus_host`/`milvus_port`
+- ✅ 全局单例 `vector_store_service` 通过模块对象访问（修复 `from-import` 别名导致的单例不同步陷阱）
+- ✅ 单元测试 `tests/test_vector_store.py`（检索/租户过滤/知识库过滤/删除/BM25）5 个全通过
+- ⚠️ 真实 Milvus 集成需 `pip install pymilvus` + 启动 Milvus（docker-compose 已加 milvus 服务），本环境未做联调验证（默认内存已完整演示）
+
+---
+
+### M2-3 文档处理全链路 [Python] P0 · 1d ✅ 已完成
+
+- 完善 `document_processor.process()`：提取文本 → 分块 → 向量化（Embedding）→ 存储（VectorStore）
+- 返回分块数量 + 元数据（source 等）写入向量库
+- 错误处理 + 状态回写（Java 端 M1-6 已调用 `POST /ai/document/process`）
+- **依赖**: M2-1, M2-2 ✅
 - **产出**: 上传文档自动向量化入库
 
+**实际完成内容：**
+- ✅ `services/document_processor.py` 完善 process：去掉 M1 阶段的 `NotImplementedError` 跳过，真实向量化 + 入库
+- ✅ `routers/document.py` 移除骨架 `except NotImplementedError` 特判
+- ✅ 集成单测 `tests/test_rag_pipeline.py`：文档入库后 RAG 检索可命中
+
 ---
 
-### M2-4 RAG 检索服务 [Python] P0 · 1.5d
+### M2-4 RAG 检索服务 [Python] P0 · 1.5d ✅ 已完成
 
 - `rag_service.retrieve()` 完整流程：
   1. Query 向量化
   2. 向量检索 Top-K=20
-  3. BM25 关键词检索 Top-K=20（PostgreSQL 全文检索）
-  4. 合并去重
-  5. Rerank 精排 Top-N=5（可选，未配置则跳过）
-- 返回 RetrievalResult（content, source, page, score）
-- **依赖**: M2-2
+  3. BM25 关键词检索 Top-K=20
+  4. RRF 融合去重
+  5. Rerank 精排 Top-N=5（可选，未配置 `rerank_api_key` 则跳过）
+- 返回 RetrievalResult（content, source, page, score, doc_id, kb_id, chunk_index）
+- **依赖**: M2-2 ✅
 - **产出**: 输入问题返回相关文档片段
+
+**实际完成内容：**
+- ✅ `services/rag.py` 重写：混合检索 + RRF 融合 + 可选 Rerank（配置 `rerank_api_key` 时调用 `/rerank`，否则跳过）
+- ✅ 中文降级检索优化：向量 / BM25 均改用字符级 bigram，提升无 API Key 时演示命中率
+- ✅ 集成单测覆盖 process → retrieve 全链路
 
 ---
 
-### M2-5 RAG 流式问答 [全栈] P0 · 1d
+### M2-5 RAG 流式问答 [全栈] P0 · 1d ✅ 已完成
 
 - **Python**: `/ai/chat/stream` 接入 RAG
   - 检索 → 构建 Prompt（系统提示 + 检索上下文 + 问题）→ LLM 流式生成
-  - SSE 推送 sources 事件（引用来源）
-- **Java**: 透传 sources 事件
-- **前端**: 渲染引用来源卡片（文件名 + 页码 + 查看原文）
-- **前端**: Markdown 渲染 AI 回答（代码高亮）
-- **依赖**: M2-4, M1-8
+  - SSE 推送 `sources` 事件（引用来源：文件名 / 页码 / 内容片段）
+- **Java**: `ChatController` 原样透传 SSE 流（含 `sources` 事件），无需改动
+- **前端**: 解析 `event: sources` 渲染引用来源卡片（文件名 + 页码 + 查看原文展开）
+- **前端**: AI 回答用 `react-markdown` + `remark-gfm` + `rehype-highlight` 渲染（代码高亮）
+- **依赖**: M2-4, M1-8 ✅
 - **产出**: 问答有引用来源，回答基于知识库
+
+**实际完成内容：**
+- ✅ `routers/chat.py`：`mode=="rag"` 时先 `rag_service.retrieve` 检索，构建上下文，LLM 流式生成；检索失败降级为无上下文问答；推送 `sources` 事件
+- ✅ 单元测试 `tests/test_chat.py`：验证 `sources`/`token`/`done` 事件与检索命中
+- ✅ 前端 `ChatPage.tsx`：SSE 解析 `event` 类型；`SourceCard` 引用来源卡片；AI 回答 Markdown 渲染 + 代码高亮（新增依赖 react-markdown/remark-gfm/rehype-highlight）
+- ✅ 端到端联调（curl）：`/ai/document/process` 入库 → `/ai/chat/stream` 返回 `sources` 事件，链路跑通
+- ⚠️ 前端"查看原文"当前展开检索片段，原文件在线预览见 M4-4
 
 ---
 
-### M2-6 会话管理完善 [全栈] P1 · 1d
+### M2-6 会话管理完善 [全栈] P1 · 1d ✅ 已完成
 
-- **Java**: 会话列表（按时间分组）、重命名、删除
-- **前端**: 左侧历史会话列表
-- **前端**: 点击会话加载历史消息
-- **前端**: 多轮对话上下文（发送历史消息到后端）
+- **Java**: 会话列表（按时间分组）✅、重命名 ✅、删除 ✅
+- **Python**: 多轮对话上下文（history 字段）✅
+- **前端**: 左侧真实历史会话列表 ✅、点击加载历史消息 ✅、多轮上下文 ✅、重命名/删除 UI ✅
 - **依赖**: M1-8
 - **产出**: 完整的多轮对话体验
+
+**后端已完成：**
+- ✅ `ChatService`/`ChatServiceImpl` 新增 `renameConversation` / `deleteConversation`（校验归属，删除时一并删除消息）
+- ✅ `ChatController` 新增 `POST /api/chat/conversation/rename`、`POST /api/chat/conversation/delete`
+- ✅ 新增 DTO `RenameConversationRequest`
+- ✅ `services/llm.py` 的 `stream_generate` 支持 `history` 多轮上下文；`routers/chat.py` 透传 `history`
+- ✅ Java 单测 `ChatServiceImplTest`（4 个：重命名/删除 + 归属校验）全通过
+- ✅ Python 单测 `test_chat.py` 新增多轮历史场景，全量 14 个通过
+
+**前端已完成（详见文末两节）：**
+- ✅ AppLayout 真实会话列表（接 `listConversations` API）+ ChatPage 加载历史/多轮上下文
+- ✅ 会话持久化增强（`ChatContext` activeId 落 localStorage，刷新后恢复上次会话）
+- ✅ 新建对话交互定稿（点加号仅切空白窗口不落库，发首条消息由后端自动建会话）
 
 ---
 
@@ -556,6 +591,79 @@
 
 ---
 
+## M2-7 三层 Redis 缓存（对齐 WeKnora，2026-07-12）
+
+> 需求：参照腾讯 WeKnora，实现三层 Redis 缓存——先写 Redis 再落库、每个会话带 TTL、重复问题直接走缓存跳过检索与数据库。
+
+**WeKnora 真实架构纠正**：WeKnora 是 **Go 后端 + Python 文档解析微服务**，缓存层（L1/L2/L3）都在 Go 后端内。本项目是 Java 后端持有会话 + Python AI 服务做 RAG 编排/LLM，因此映射为：L1/L2 落 Python，L3 落 Java。其 `session:{sid}:stream`（Redis Stream 存 SSE 事件）属 Go 后端原生能力，跨服务架构下收益低、复杂，**本期不照搬**。
+
+**三层缓存落地**
+
+| 层 | key | 位置 | 缓存内容 | TTL | 命中后跳过 |
+|---|---|---|---|---|---|
+| L1 检索结果 | `retrieval:{tenant_id}:{q_hash}` | Python `rag.py` | 混合检索+Rerank 结果 | 3600s（文档变更主动清） | 向量/BM25/RRF/Rerank |
+| L2 嵌入向量 | `embedding:{text_hash}:{model}` | Python `embedding.py` | 文本向量 | 86400s | Embedding API |
+| L3 会话状态 | `chat:conv:{conv_id}`（Redis List） | Java `ChatServiceImpl` | 最近 50 条消息 | 1800s | DB 历史查询 |
+
+- **L1 跨会话 tenant 级**：同一租户任何人问相同问题命中，跳过检索阶段（仍走 LLM 实时生成，答案不过时，与 WeKnora 一致）。
+- **L3 先写 Redis 再落库**：`saveUserMessage`/`saveAssistantMessage` 先 `rightPush` 到 `chat:conv:{id}` 并刷新 TTL，再 `messageMapper.insert`；`listMessages` 先查 Redis，命中即返回跳过 DB，未命中回源 DB 并回填。
+- **失效**：文档上传处理完成（`DocumentServiceImpl.triggerDocumentProcessing` ready 时）与删除（`deleteDocument`）时，Java 调 Python `POST /ai/cache/invalidate` 清该 tenant 的 `retrieval:{tenant}:*`，下次提问回源重新检索。
+
+**改动文件**
+- Python：`core/config.py`（Redis 配置 + TTL）、`core/redis_client.py`（新增，async 客户端单例）、`services/embedding.py`（L2）、`services/rag.py`（L1）、`routers/cache.py`（失效接口）、`main.py`（注册路由）、`requirements.txt`（redis-py）
+- Java：`ChatServiceImpl.java`（L3 读写 + 删除清缓存）、`AiServiceClient.java`（invalidateCache）、`DocumentServiceImpl.java`（文档变更调失效）、`ChatServiceImplTest.java`（新增单测）
+
+**Bug 修复（单测暴露）**
+- Python `embed_text`/`retrieve`/`embed_batch` 原写成 `await get_redis().get(...)`，但 `get_redis()` 是 async 函数，应先 `await get_redis()` 取客户端再 `.get()`。原写法在 coroutine 上调用 `.get` 抛 `AttributeError` 被 `except` 吞掉，**缓存从未真正生效**。已修正为先取客户端再操作；19 个单测全过（含 4 个缓存测试）。
+
+**测试**
+- Python：19 个单测全过（`test_redis_cache.py`：L2 命中、L1 命中跳过检索、跨 tenant 隔离、失效清 tenant 级）。
+- Java：`ChatServiceImplTest` 9 个全过（先写 Redis 再落库、命中跳过 DB、未命中回源回填、删除清缓存）。
+
+**验证（2026-07-12 重启 Java 8080 后真实联调全过）**：
+- 会话 TTL：发消息后 `chat:conv:{convId}` 写入 Redis，`TTL=1799`（≈1800s/30min），LRANGE 含 user 消息 → L3 先写 Redis 再落库 + TTL 生效。
+- 历史消息走缓存：首次 `listMessages`（Redis 空）查 DB（`SELECT message` 1 次）；发消息写入后二次 `listMessages` 命中 Redis（`SELECT message` 0 次）直接返回缓存消息 → 命中跳过 DB。
+- 文档变更检索失效：写 `retrieval:{tenant}:*` 测试 key 调 `POST /ai/cache/invalidate` 返回 `deleted:1`，key 被清 → 失效清除生效（Java 文档 ready/删除已接通该调用）。
+**依赖**：Python 新增 redis-py（测试用 fakeredis）；Java 复用已有 spring-boot-starter-data-redis。
+
+**关联**：M2 RAG 核心检索；WeKnora 三层缓存。
+
+## 新建对话按钮交互定稿（2026-07-12）
+
+> 诉求：连点不会留一堆空会话；空白对话不立即落库。
+
+**最终方案**
+- `AppLayout.handleNewChat` 仅 `setActiveId(null)`：点加号切到空白窗口，**不**调用后端 `createConversation`，因此不落库、不会产生空会话；连点只是反复回到空白窗口，零副作用。
+- 会话仍在「发第一条消息」时由后端 `chatStream`（`conversationId==null`）自动 `createConversation` 落库并出现在历史栏。即「当前对话记录到历史栏/数据库」在发消息后自然满足。
+- 撤销了上一版的「立即建会话」方案及其 `ChatPage` 的 `conversationId` 竞态同步（该竞态仅存在于已否决的立即建方案下）。
+
+**交互表现**
+- 当前在某会话 A（已落库）：点加号 → 切到空白窗口，A 仍保留在历史栏+DB。
+- 当前已空白：点加号 → 仍是空白（无变化、无新建）。
+- 在空白窗口发消息 → 后端建会话并落库，窗口切到该会话。
+
+**验证**：`npm run build` 通过（仅 chunk 体积告警）；待浏览器实测。
+
+**关联**：M2-6 会话管理；会话持久化增强（2026-07-12）。
+
+## 会话持久化增强（2026-07-12）
+
+> 需求：当前对话窗口在刷新/重进平台后保留；点击「新建对话」时，当前对话落入历史栏并同步数据库。
+
+**背景**
+- 会话已在发送消息时落库：`ChatController.chatStream` 在 `conversationId==null` 时调用 `createConversation` 写入 `Conversation` 表；`listConversations` 读 DB，前端「历史记录」栏即 DB 数据。即「同步数据库/历史栏」原本已满足。
+- 真正缺口：前端 `activeId` 为内存 `useState`，刷新即丢失 → 回到空白窗口，表现为「当前对话没保留、下次进入进度没了」。
+
+**改动（仅前端）**
+- `frontend/src/context/ChatContext.tsx`：`activeId` 初始化从 `localStorage['xiongda_active_conversation']` 读取；`setActiveId` 同步写入/清除该 key；`refresh()` 列表加载后清理已被删除的 activeId。
+- 效果：进入平台自动恢复上次会话并加载其历史消息；「新建对话」清除持久化（当前对话因已落库仍保留在历史栏+DB）。
+
+**验证**
+- `npm run build` 通过（tsc 0 错误，仅 chunk 体积告警）。
+- 待浏览器硬刷新实测。
+
+**关联**：M2-6 会话管理；M2-6 联调 bug（JS 大整数精度丢失，会话/消息 VO 的 id 改 String）已修复并验证。
+
 ## 总览
 
 | 里程碑 | 工时 | 核心交付 |
@@ -578,7 +686,7 @@ M1-1 数据库 ✅
         │
         └─→ M1-8 基础问答 ✅ ──→ M1-8.5 问答UI精细化 ✅ ──→ M2-5 RAG问答
                ↑                                               │
-               │                                               └─→ M2-6 会话管理 ──→ M4-6 问答UI(补全)
+               │                                               └─→ M2-6 会话管理 ✅ ──→ M4-6 问答UI(补全)
 M1-5 AI服务基础 ✅ ─┘
   │
   ├─→ M2-1 Embedding ──→ M2-2 Milvus ──→ M2-3 文档全链路

@@ -61,6 +61,8 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
         ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR);
         // TODO: 删除向量数据库中的数据
+        // 文档删除同样改变检索结果，清该租户 L1 检索缓存
+        aiServiceClient.invalidateCache(tenantId);
         return this.removeById(docId);
     }
 
@@ -114,6 +116,8 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                     Object chunkCountObj = result.get("chunk_count");
                     Integer chunkCount = chunkCountObj instanceof Number ? ((Number) chunkCountObj).intValue() : 0;
                     this.updateDocumentStatus(docId, "ready", chunkCount, null);
+                    // 文档内容已变更，清该租户 L1 检索缓存，下次提问回源重新检索
+                    aiServiceClient.invalidateCache(tenantId);
                     log.info("文档处理完成: docId={}, chunks={}", docId, chunkCount);
                 } else {
                     String error = result.get("error") != null ? result.get("error").toString() : "未知错误";

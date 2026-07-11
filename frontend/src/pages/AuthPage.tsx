@@ -54,7 +54,7 @@ export default function AuthPage() {
         p.y += p.vy
         if (p.x < 0 || p.x > W) p.vx *= -1
         if (p.y < 0 || p.y > H) p.vy *= -1
-        if (mouse.x !== null) {
+        if (mouse.x !== null && mouse.y !== null) {
           const dx = p.x - mouse.x
           const dy = p.y - mouse.y
           const dist = Math.sqrt(dx * dx + dy * dy)
@@ -84,7 +84,7 @@ export default function AuthPage() {
             ctx.stroke()
           }
         }
-        if (mouse.x !== null) {
+        if (mouse.x !== null && mouse.y !== null) {
           const dx = particles[i].x - mouse.x
           const dy = particles[i].y - mouse.y
           const dist = Math.sqrt(dx * dx + dy * dy)

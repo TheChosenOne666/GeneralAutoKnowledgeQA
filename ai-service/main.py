@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from core.config import settings
-from routers import chat, document
+from routers import chat, document, cache
 
 
 @asynccontextmanager
@@ -40,6 +40,7 @@ app.add_middleware(
 
 app.include_router(chat.router, prefix="/ai")
 app.include_router(document.router, prefix="/ai")
+app.include_router(cache.router, prefix="/ai")
 
 
 @app.get("/health")

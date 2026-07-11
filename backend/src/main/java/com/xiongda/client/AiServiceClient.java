@@ -1,5 +1,6 @@
 package com.xiongda.client;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -15,10 +16,12 @@ import java.util.Map;
  * <ul>
  *   <li>RAG 检索 + LLM 流式生成</li>
  *   <li>文档处理（解析 → 分块 → 向量化）</li>
+ *   <li>缓存失效（文档变更后清 L1 检索结果）</li>
  * </ul>
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
+@Slf4j
 @Component
 public class AiServiceClient {
 
@@ -37,7 +40,8 @@ public class AiServiceClient {
             List<Long> kbIds,
             String model,
             String mode,
-            Long tenantId
+            Long tenantId,
+            List<Map<String, String>> history
     ) {
         Map<String, Object> requestBody = Map.of(
                 "question", question,
@@ -45,7 +49,8 @@ public class AiServiceClient {
                 "kb_ids", kbIds != null ? kbIds.stream().map(String::valueOf).toList() : List.of(),
                 "model", model != null ? model : "",
                 "mode", mode != null ? mode : "rag",
-                "tenant_id", tenantId != null ? String.valueOf(tenantId) : ""
+                "tenant_id", tenantId != null ? String.valueOf(tenantId) : "",
+                "history", history != null ? history : List.of()
         );
 
         return webClient.post()
@@ -74,5 +79,26 @@ public class AiServiceClient {
                 .retrieve()
                 .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
                 .block();
+    }
+
+    /**
+     * 清检索结果缓存（L1）— 文档变更后调用，清该租户下 retrieval:{tenant}:*。
+     * Python 服务不可用时忽略，不阻塞文档处理主流程。
+     */
+    public void invalidateCache(Long tenantId) {
+        Map<String, Object> body = Map.of(
+                "tenant_id", tenantId != null ? String.valueOf(tenantId) : "",
+                "scope", "retrieval"
+        );
+        try {
+            webClient.post()
+                    .uri("/ai/cache/invalidate")
+                    .bodyValue(body)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+        } catch (Exception e) {
+            log.warn("清检索缓存失败，忽略: {}", e.getMessage());
+        }
     }
 }

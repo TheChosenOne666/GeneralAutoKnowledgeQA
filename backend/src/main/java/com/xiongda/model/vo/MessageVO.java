@@ -13,7 +13,7 @@ import java.util.Date;
 @Data
 public class MessageVO implements Serializable {
 
-    private Long id;
+    private String id;  // 雪花 ID 超长，用字符串避免前端 JS 精度丢失
 
     private String role;
 

@@ -37,14 +37,6 @@ async def process_document(body: ProcessRequest):
             "status": "ready",
             "chunk_count": chunk_count,
         }
-    except NotImplementedError:
-        # 骨架阶段
-        return {
-            "doc_id": body.doc_id,
-            "status": "ready",
-            "chunk_count": 0,
-            "message": "AI 服务骨架，文档处理待接入",
-        }
     except Exception as e:
         return {
             "doc_id": body.doc_id,

@@ -1,13 +1,15 @@
 """文档处理服务 — 提取 → 分块 → 向量化 → 存储。
 
 使用 LangChain 的文档加载器和文本分割器。
+M2-3：完整链路已接入 Embedding 与 VectorStore（M1-5 阶段仅提取+分块）。
 """
 
+import os
 from dataclasses import dataclass
 
 from core.config import settings
+from services import vector_store as vector_store_module
 from services.embedding import embedding_service
-from services.vector_store import vector_store_service
 
 
 @dataclass
@@ -20,7 +22,7 @@ class DocumentChunk:
 
 
 class DocumentProcessor:
-    """文档处理流水线（骨架）。"""
+    """文档处理流水线。"""
 
     async def extract_text(self, file_path: str, file_type: str) -> str:
         """从文件提取文本。
@@ -77,9 +79,7 @@ class DocumentProcessor:
         doc_id: str,
         tenant_id: str,
     ) -> int:
-        """完整文档处理流水线。
-
-        M1-5：提取文本 + 分块（向量化/存储在 M2 接入）。
+        """完整文档处理流水线：提取 → 分块 → 向量化 → 存储。
 
         Returns:
             分块数量
@@ -90,16 +90,33 @@ class DocumentProcessor:
         # 2. 分块
         chunks = await self.chunk_text(text)
 
-        # 3-4. 向量化 + 存储（M2 实现，暂跳过）
-        try:
-            chunks = await self.embed_chunks(chunks)
-            chunk_dicts = [
-                {"content": c.content, "metadata": c.metadata, "embedding": c.embedding}
-                for c in chunks
-            ]
-            await vector_store_service.store_chunks(chunk_dicts, kb_id, doc_id, tenant_id)
-        except NotImplementedError:
-            pass
+        # 3. 向量化
+        chunks = await self.embed_chunks(chunks)
+
+        # 4. 存储（含元数据：doc_id, kb_id, tenant_id, source, page）
+        source = os.path.basename(file_path)
+        chunk_dicts = []
+        for c in chunks:
+            meta = dict(c.metadata)
+            meta.update(
+                {
+                    "doc_id": doc_id,
+                    "kb_id": kb_id,
+                    "tenant_id": tenant_id,
+                    "source": source,
+                    "page": 0,
+                }
+            )
+            chunk_dicts.append(
+                {
+                    "content": c.content,
+                    "metadata": meta,
+                    "embedding": c.embedding,
+                }
+            )
+        await vector_store_module.vector_store_service.store_chunks(
+            chunk_dicts, kb_id, doc_id, tenant_id
+        )
 
         return len(chunks)
 

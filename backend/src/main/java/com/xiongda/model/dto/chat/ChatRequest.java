@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 问答请求。
@@ -25,4 +26,9 @@ public class ChatRequest implements Serializable {
      * rag / search
      */
     private String mode = "rag";
+
+    /**
+     * 多轮对话历史（不含当前问题），透传给 Python AI 服务。
+     */
+    private List<Map<String, String>> history;
 }

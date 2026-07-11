@@ -39,7 +39,7 @@ export default function KnowledgeBasePage() {
   const [kbList, setKbList] = useState<KnowledgeBase[]>([])
   const [selectedKb, setSelectedKb] = useState<KnowledgeBase | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
-  const [loading, setLoading] = useState(false)
+  const [, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newKbName, setNewKbName] = useState('')

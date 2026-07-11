@@ -61,7 +61,7 @@
 | 缓存 | Redis | 会话缓存 |
 | **AI 服务** | **Python + FastAPI + LangChain** | RAG 检索、Agent 推理、文档处理 |
 | 向量数据库 | Milvus | 文档向量存储与检索 |
-| 文档解析 | PyMuPDF / python-docx / unstructured | |
+| 文档解析 | PyMuPDF（PDF）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
 
 ---
 
@@ -223,19 +223,17 @@ CREATE TABLE document (
 上传文件
   │
   ▼
-文本提取（Unstructured / PyMuPDF）
+文本提取（PyMuPDF / python-docx / MD·TXT 直读）
   │
   ▼
-分块（Chunking）
-  ├── 语义分块：按段落/标题
-  ├── 固定长度：512 tokens，重叠 50
-  └── 表格/代码特殊处理
+分块（LangChain RecursiveCharacterTextSplitter）
+  └── 固定长度：chunk_size=512，重叠 overlap=50
   │
   ▼
-向量化（Embedding API）
+向量化（Embedding，命中 L2 缓存则跳过 API 调用）
   │
   ▼
-存储（向量数据库 + 元数据）
+存储（向量数据库 + 元数据 doc_id / kb_id / tenant_id / source / page）
 ```
 
 ### 5.2 问答检索流程
@@ -435,7 +433,7 @@ multi-rag-employee/
 │   │   └── App.tsx
 │   ├── package.json
 │   └── tailwind.config.js
-├── docker-compose.yml              # PostgreSQL + Redis
+├── docker-compose.yml              # PostgreSQL + Redis + Milvus
 └── docs/
     ├── requirements.md
     ├── design.md
@@ -443,3 +441,157 @@ multi-rag-employee/
     ├── task-breakdown.md
     └── ui-design/
 ```
+
+---
+
+## 9. 功能流程详解
+
+> 本章补全「从用户操作到数据落库」的端到端详细流程，便于通读整个项目。涉及的缓存（L1/L2/L3）详见 §9.5。
+
+### 9.1 端到端主流程（用户视角）
+
+```
+① 注册 / 登录
+   注册 POST /api/user/register → 自动建租户 + tenant_admin 角色
+   登录 POST /api/user/login   → 返回 JWT（前端存 localStorage，后续请求 Authorization: Bearer）
+        │
+② 知识库与文档
+   创建知识库 POST /api/knowledge/add（scope: shared / personal）
+   上传文档  POST /api/knowledge/document/upload（MultipartFile）
+        → Document 状态机：pending → parsing → embedding → ready / failed（前端轮询列表状态）
+        │
+③ 问答
+   进入对话页 → 输入问题 → POST /api/chat/message/stream（SSE 流式）
+        → 前端流式渲染回答 + 引用来源卡片（SourceCard）
+        │
+④ 历史会话
+   侧边栏 GET /api/chat/conversation/list → 点击某会话 → GET /api/chat/message/list 加载历史
+```
+
+### 9.2 文档上传与异步处理全链路
+
+```
+前端 multipart 上传
+   │
+   ▼
+Java KnowledgeBaseController.uploadDocument
+   → DocumentServiceImpl：保存文件（绝对路径）+ 创建 Document(status=pending)
+   │
+   ▼  CompletableFuture.runAsync（异步，不阻塞上传响应）
+Java DocumentServiceImpl.triggerDocumentProcessing
+   → 更新 status=parsing
+   → AiServiceClient.processDocument（HTTP POST → Python）
+   │
+   ▼
+Python POST /ai/document/process → DocumentProcessor.process()
+   1) extract_text：PDF(PyMuPDF) / DOCX(python-docx) / MD·TXT(直读)
+   2) chunk_text：RecursiveCharacterTextSplitter(512 / 50)
+   3) embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
+   4) store_chunks：写入向量库（元数据 doc_id/kb_id/tenant_id/source/page）
+   → 返回 chunk_count
+   │
+   ▼
+Java 更新 status=ready + chunkCount
+   → 调 AiServiceClient.invalidateCache(tenant) 清 L1 检索缓存（见 §9.5）
+        │
+   └─ 失败分支：更新 status=failed + errorMsg（default 异常兜底）
+```
+
+> 文档删除（POST /api/knowledge/document/delete，逻辑删除）同样触发 `invalidateCache`，保证下次提问回源重新检索。
+
+### 9.3 RAG 问答全链路（含三层缓存）
+
+```
+前端 POST /api/chat/message/stream（body: conversationId / content / kbIds / model / mode / history）
+   │
+   ▼
+Java ChatController.chatStream
+   1) conversationId == null → 自动 createConversation（标题取问题前 50 字），id 用 String 避免 JS 大整数精度丢失
+   2) saveUserMessage(convId, content)
+        → 先写 Redis L3（chat:conv:{id}，TTL 1800s）再落库 message 表
+   3) 透传 SSE 流给 Python /ai/chat/stream（WebClient → Flux 原样回传前端）
+   │
+   ▼
+Python event_generator（routers/chat.py）
+   ├─ 发 event: thinking
+   ├─ mode == "rag" → rag_service.retrieve(question, kb_ids, tenant_id)
+   │     ├─【L1 检索缓存】命中 retrieval:{tenant}:{q_hash} → 直接返回，跳过向量/BM25/RRF/Rerank
+   │     └─ 未命中：
+   │           ├─【L2 嵌入缓存】embedding:{text}:{model} 命中 → 复用 query 向量，跳过 Embedding API
+   │           ├─ 向量检索 Top-K=20 + BM25 关键词检索 Top-K=20
+   │           ├─ RRF 融合去重（k=60）
+   │           ├─ Rerank 精排 Top-N=5（仅当配置 rerank_api_key；否则取前 5）
+   │           └─ 写 L1 缓存（TTL 3600s）
+   │     检索失败 → 降级无上下文问答
+   ├─ 有 sources → 发 event: sources（引用来源：文件名 / 页码 / 内容片段）
+   ├─ LLM stream_generate（携带 history 多轮上下文）→ 逐 token 发 event: token
+   └─ 发 event: done（conversation_id, sources）
+```
+
+> ⚠️ **已知缺口（待修复）**：当前 Java 仅调用 `saveUserMessage`，**未在 `done` 事件聚合后调用 `saveAssistantMessage`**。即助手回答已流式推给前端，但**尚未写入 L3 缓存与 message 表**——刷新后历史仅见用户消息。`saveAssistantMessage` 方法已具备，待接入 SSE `done` 的 token 聚合逻辑。
+
+### 9.4 SSE 事件流协议
+
+实际事件类型（见 `routers/chat.py` `_sse`）：`thinking` → `sources`（可选）→ `token`（多个）→ `done`。
+
+```
+event: thinking
+data: {"content": "正在思考..."}
+
+event: sources
+data: {"sources": [{"source": "员工手册.pdf", "page": 0, "content": "年假...", "score": 0.83, ...}]}
+
+event: token
+data: {"content": "根"}
+
+event: token
+data: {"content": "据"}
+
+event: done
+data: {"conversation_id": "1234567890", "sources": [...]}
+```
+
+> 前端按 `event` 类型分发：`sources` → 渲染引用来源卡片；`token` → 追加到当前回答；`done` → 结束流式并刷新会话列表。
+
+### 9.5 三层缓存架构与失效
+
+| 层 | key | 位置 | 缓存内容 | TTL | 命中后跳过 | 失效时机 |
+|---|---|---|---|---|---|---|
+| L1 检索结果 | `retrieval:{tenant_id}:{q_hash}` | Python `rag.py` | 混合检索+Rerank 结果 | 3600s | 向量/BM25/RRF/Rerank | 文档 ready / 删除 → `invalidateCache` 清 `retrieval:{tenant}:*` |
+| L2 嵌入向量 | `embedding:{text_hash}:{model}` | Python `embedding.py` | 文本向量 | 86400s | Embedding API | 长期有效，模型不变即复用 |
+| L3 会话状态 | `chat:conv:{conv_id}`（Redis List） | Java `ChatServiceImpl` | 最近 50 条消息 | 1800s | DB 历史查询 | `deleteConversation` 清 `chat:conv:{id}` |
+
+- **L1 跨会话 tenant 级**：同租户任何人问相同问题（含知识库范围）命中，跳过检索阶段；答案仍由 LLM 实时生成（不过时）。
+- **L3 先写 Redis 再落库**：`saveUserMessage/saveAssistantMessage` 先 `rightPush` 到 `chat:conv:{id}` 并刷新 TTL，再 `messageMapper.insert`；`listMessages` 先查 Redis，命中即返回跳过 DB，未命中回源 DB 并回填。
+- **失效接口**：`POST /ai/cache/invalidate`，body `{ "tenant_id": "...", "scope": "retrieval" }`，清该租户 `retrieval:{tenant}:*`。
+
+### 9.6 会话管理与前端持久化
+
+```
+会话生命周期
+   ├─ 新建对话按钮：仅 setActiveId(null) 切到空白窗口，不调后端（不落库、无空会话副作用；连点无副作用）
+   ├─ 发首条消息：conversationId==null → Java 自动 createConversation 落库 → 出现在历史栏
+   └─ 删除会话：POST /api/chat/conversation/delete（校验归属，删会话+消息+清 L3 缓存）
+
+前端持久化（ChatContext）
+   ├─ activeId 初始化读 localStorage['xiongda_active_conversation'] → 刷新后恢复上次会话并加载历史
+   ├─ setActiveId 同步写入/清除该 key
+   └─ refresh() 列表加载后清理已被删除的 activeId
+
+历史加载（L3）
+   listMessages(conversationId)
+     ├─ Redis 命中 chat:conv:{id} → 直接返回（跳过 DB）
+     └─ 未命中 → 查 DB → 回填 Redis 后返回
+```
+
+### 9.7 跨服务调用一览
+
+| 调用方 | 目标 | 接口 | 方式 |
+|---|---|---|---|
+| 前端 | Java | `/api/chat/message/stream` | SSE（port 5173 → 8080） |
+| 前端 | Java | 会话/知识库/用户 CRUD | REST + JWT |
+| Java | Python | `/ai/chat/stream` | HTTP SSE 透传（WebClient） |
+| Java | Python | `/ai/document/process` | HTTP（异步触发） |
+| Java | Python | `/ai/cache/invalidate` | HTTP（文档变更清 L1） |
+| Python | 外部 AI | `/embeddings`、`/chat/completions`、`/rerank` | OpenAI 兼容（可选，未配则降级） |
+

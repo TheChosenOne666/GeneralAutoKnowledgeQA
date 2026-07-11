@@ -1,0 +1,85 @@
+"""聊天路由单元测试：RAG 模式下推送 sources 事件 + token + done。"""
+
+import asyncio
+import os
+import tempfile
+import unittest
+
+from fastapi.testclient import TestClient
+
+import services.document_processor as dp_mod
+import services.vector_store as vs_mod
+from main import app
+from services.document_processor import document_processor
+from services.vector_store import InMemoryVectorStore
+
+
+class ChatRagTest(unittest.TestCase):
+    def setUp(self):
+        # 注入隔离的内存 store，避免污染全局单例
+        self.store = InMemoryVectorStore()
+        vs_mod.vector_store_service = self.store
+        dp_mod.vector_store_service = self.store
+        self.client = TestClient(app)
+
+    def test_chat_stream_emits_sources_and_tokens(self):
+        text = "熊答是一款企业知识问答助手，支持文档向量化与检索。"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(text)
+            path = f.name
+        asyncio.run(document_processor.process(path, "txt", "kb1", "doc1", "t1"))
+        os.unlink(path)
+
+        with self.client.stream(
+            "POST",
+            "/ai/chat/stream",
+            json={
+                "question": "熊答是什么",
+                "kb_ids": ["kb1"],
+                "tenant_id": "t1",
+                "mode": "rag",
+            },
+        ) as resp:
+            body = "".join(resp.iter_text())
+
+        self.assertIn("event: sources", body)
+        self.assertIn("event: token", body)
+        self.assertIn("event: done", body)
+        self.assertIn("doc1", body)
+        self.assertIn("熊答", body)
+
+    def test_chat_stream_with_history(self):
+        text = "熊答是一款企业知识问答助手。"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(text)
+            path = f.name
+        asyncio.run(document_processor.process(path, "txt", "kb1", "doc1", "t1"))
+        os.unlink(path)
+
+        history = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好！我是熊答。"},
+        ]
+        with self.client.stream(
+            "POST",
+            "/ai/chat/stream",
+            json={
+                "question": "熊答是什么",
+                "kb_ids": ["kb1"],
+                "tenant_id": "t1",
+                "mode": "rag",
+                "history": history,
+            },
+        ) as resp:
+            body = "".join(resp.iter_text())
+
+        self.assertIn("event: token", body)
+        self.assertIn("event: done", body)
+
+
+if __name__ == "__main__":
+    unittest.main()

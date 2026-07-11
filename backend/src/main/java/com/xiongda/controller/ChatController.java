@@ -4,10 +4,12 @@ import com.xiongda.client.AiServiceClient;
 import com.xiongda.common.BaseResponse;
 import com.xiongda.common.ResultUtils;
 import com.xiongda.model.dto.chat.ChatRequest;
+import com.xiongda.model.dto.chat.RenameConversationRequest;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.ConversationVO;
 import com.xiongda.model.vo.MessageVO;
 import com.xiongda.service.ChatService;
+import com.xiongda.service.UserService;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
@@ -34,7 +36,7 @@ public class ChatController {
     private AiServiceClient aiServiceClient;
 
     @Resource
-    private com.xiongda.service.UserService userService;
+    private UserService userService;
 
     /**
      * 获取会话列表。
@@ -54,6 +56,26 @@ public class ChatController {
         User loginUser = userService.getLoginUser(request);
         Long convId = chatService.createConversation(loginUser.getTenantId(), loginUser.getId(), title);
         return ResultUtils.success(convId);
+    }
+
+    /**
+     * 重命名会话（校验归属）。
+     */
+    @PostMapping("/conversation/rename")
+    public BaseResponse<Boolean> renameConversation(@RequestBody RenameConversationRequest req, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        chatService.renameConversation(req.getId(), loginUser.getId(), req.getTitle());
+        return ResultUtils.success(true);
+    }
+
+    /**
+     * 删除会话（含其消息，校验归属）。
+     */
+    @PostMapping("/conversation/delete")
+    public BaseResponse<Boolean> deleteConversation(@RequestParam Long id, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        chatService.deleteConversation(id, loginUser.getId());
+        return ResultUtils.success(true);
     }
 
     /**
@@ -89,7 +111,8 @@ public class ChatController {
                 req.getKbIds(),
                 req.getModel(),
                 req.getMode(),
-                loginUser.getTenantId()
+                loginUser.getTenantId(),
+                req.getHistory()
         );
     }
 }

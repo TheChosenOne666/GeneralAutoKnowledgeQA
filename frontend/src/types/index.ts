@@ -71,6 +71,23 @@ export interface Message {
   createTime: string
 }
 
+/** 引用来源（RAG 检索片段，后端以 JSON 字符串存于 Message.sources）。*/
+export interface SourceItem {
+  content: string
+  source: string
+  page: number
+  score: number
+  doc_id: string
+  kb_id: string
+  chunk_index: number
+}
+
+/** 多轮对话历史项（不含当前问题）。*/
+export interface ChatHistoryItem {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface AIConfig {
   llm_provider: string
   llm_model: string

@@ -1,7 +1,7 @@
 /** 认证 API — 对接 Java 后端模板风格接口。*/
 
 import { api } from './client'
-import type { BaseResponse, TokenResponse, User } from '@/types'
+import type { BaseResponse, TokenResponse } from '@/types'
 
 export const authApi = {
   login: (email: string, userPassword: string) =>
