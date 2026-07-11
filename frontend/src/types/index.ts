@@ -57,18 +57,18 @@ export interface Document {
 export interface Conversation {
   id: string
   title: string
-  message_count: number
-  created_at: string
-  updated_at: string
+  messageCount: number
+  createTime: string
+  updateTime: string
 }
 
 export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources: { filename: string; page: number }[] | null
+  sources: string | null
   model: string | null
-  created_at: string
+  createTime: string
 }
 
 export interface AIConfig {

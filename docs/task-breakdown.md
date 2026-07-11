@@ -215,15 +215,29 @@
 
 ---
 
-### M1-8 基础问答（无 RAG） [全栈] P0 · 1.5d
+### M1-8 基础问答（无 RAG） [全栈] P0 · 1.5d ✅ 已完成
 
-- **Python**: LangChain 接入 LLM（火山方舟/OpenAI），流式生成
-- **Python**: `/ai/chat/stream` SSE 接口（LLM 直接回答，无检索）
-- **Java**: ChatController SSE 透传
-- **前端**: 问答页面（输入框 + 流式渲染回答）
-- **前端**: 会话列表 + 新建会话
+- ~~**Python**: LangChain 接入 LLM（火山方舟/OpenAI），流式生成~~ → 用 httpx 直接调用 OpenAI 兼容 API
+- ~~**Python**: `/ai/chat/stream` SSE 接口（LLM 直接回答，无检索）~~
+- ~~**Java**: ChatController SSE 透传~~
+- ~~**前端**: 问答页面（输入框 + 流式渲染回答）~~
+- ~~**前端**: 会话列表 + 新建会话~~ → 会话由 Java 自动创建
 - **依赖**: M1-2, M1-5
 - **产出**: 能和 AI 对话，流式输出
+
+**实际完成内容：**
+- ✅ Python `llm.py`：用 httpx 调用 OpenAI 兼容 API（火山方舟/OpenAI），流式生成；无 API Key 时回退模拟输出
+- ✅ Python `chat.py`：SSE 接口简化（M1-8 无 RAG，直接调 LLM），修复 `dir()` bug
+- ✅ Java `ChatController`：SSE 透传已有（会话自动创建 + 用户消息保存 + Flux 透传）
+- ✅ 前端 `ChatPage.tsx`：SSE 流式渲染 + 消息列表（用户右对齐/AI左对齐）+ 推荐问题点击发送
+- ✅ 前端 `api/chat.ts`：会话管理 API + SSE fetch 流式读取
+
+**验证结果：**
+- Python SSE 返回流式 token ✅（`event: token, data: {"content":"我"}`）
+- TypeScript 编译通过 ✅
+- 浏览器可对话，流式输出 ✅
+
+> 注：当前为模拟模式（未配置 LLM API Key）。在 `ai-service/.env` 中配置 `LLM_API_KEY` 后自动接入真实大模型。
 
 ---
 

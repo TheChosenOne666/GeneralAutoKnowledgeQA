@@ -1,6 +1,6 @@
 """聊天路由 — SSE 流式问答。
 
-接收 Java 后端的请求，调用 LangChain RAG + Agent 生成流式回答。
+M1-8：无 RAG，LLM 直接回答。M2 接入 RAG 检索后自动增强。
 """
 
 import json
@@ -9,7 +9,6 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from services.rag import rag_service
 from services.llm import llm_service
 
 router = APIRouter()
@@ -30,40 +29,18 @@ class ChatStreamRequest(BaseModel):
 async def chat_stream(body: ChatStreamRequest):
     """SSE 流式问答 — Java 后端透传此接口给前端。
 
-    流程:
-    1. RAG 检索（向量化 query → 混合检索 → Rerank 精排）
-    2. 构建 Prompt（检索结果 + 系统提示）
-    3. LangChain LLM 流式生成
-    4. SSE 推送每个 token 给 Java → 前端
+    M1-8：直接调用 LLM 流式生成（无 RAG 检索）。
+    M2 将接入 RAG：检索 → 构建上下文 → LLM 生成。
     """
 
     async def event_generator():
-        # 1. 检索知识库
-        yield _sse("thinking", {"content": "正在检索知识库..."})
+        yield _sse("thinking", {"content": "正在思考..."})
 
-        sources = []
-        if body.kb_ids and body.mode == "rag":
-            try:
-                results = await rag_service.retrieve(
-                    query=body.question,
-                    kb_ids=body.kb_ids,
-                    tenant_id=body.tenant_id,
-                )
-                sources = [
-                    {"filename": r.source, "page": r.page, "score": r.score}
-                    for r in results
-                ]
-                if sources:
-                    yield _sse("sources", {"sources": sources})
-            except NotImplementedError:
-                # AI 服务骨架阶段，跳过检索
-                pass
-
-        # 2. 流式生成回答
-        context_text = "\n\n".join(r.content for r in (results if "results" in dir() else []))
+        # M1-8：无 RAG，直接调 LLM
+        # M2 将在此处添加 RAG 检索逻辑
         async for token in llm_service.stream_generate(
             question=body.question,
-            context=context_text,
+            context="",
             model=body.model or None,
         ):
             yield _sse("token", {"content": token})
