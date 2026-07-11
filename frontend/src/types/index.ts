@@ -37,21 +37,21 @@ export interface KnowledgeBase {
   name: string
   description: string | null
   scope: 'shared' | 'personal'
-  owner_id: string
-  document_count: number
-  created_at: string
+  ownerId: string
+  documentCount: number
+  createTime: string
 }
 
 export interface Document {
   id: string
-  kb_id: string
+  kbId: string
   filename: string
-  file_type: string
-  file_size: number
+  fileType: string
+  fileSize: number
   status: 'pending' | 'parsing' | 'embedding' | 'ready' | 'failed'
-  chunk_count: number
-  error_msg: string | null
-  created_at: string
+  chunkCount: number
+  errorMsg: string | null
+  createTime: string
 }
 
 export interface Conversation {

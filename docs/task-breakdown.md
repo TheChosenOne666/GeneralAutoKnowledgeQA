@@ -121,15 +121,37 @@
 
 ---
 
-### M1-4 知识库基础 CRUD [后端/Java] P0 · 1d
+### M1-4 知识库基础 CRUD [后端/Java] P0 · 1d ✅ 已完成
 
-- 创建知识库 `/api/knowledge/bases`
-- 知识库列表（按 scope 筛选）
-- 文档上传（MultipartFile → 保存文件 → 创建 Document 记录）
-- 文档列表查询
-- 文档删除
-- **依赖**: M1-2
+- ~~创建知识库 `/api/knowledge/bases`~~ → 实际路径 `/api/knowledge/add`
+- ~~知识库列表（按 scope 筛选）~~
+- ~~文档上传（MultipartFile → 保存文件 → 创建 Document 记录）~~
+- ~~文档列表查询~~
+- ~~文档删除~~
+- **依赖**: M1-2 ✅
 - **产出**: 可上传文件并查看列表
+
+**实际完成内容：**
+- ✅ 后端接口全部实现（KnowledgeBaseController + KnowledgeBaseServiceImpl + DocumentServiceImpl）
+  - 创建知识库 `POST /api/knowledge/add`（名称校验、scope 默认 personal、ownerId 绑定）
+  - 知识库列表 `GET /api/knowledge/list`（按 scope 筛选：shared/personal/all）
+  - 文档上传 `POST /api/knowledge/document/upload`（MultipartFile 保存文件 → 创建 Document 记录）
+  - 文档列表 `GET /api/knowledge/document/list`（按 kbId + tenantId 查询）
+  - 文档删除 `POST /api/knowledge/document/delete`（逻辑删除 + 跨租户校验）
+- ✅ 单元测试 16 个全通过
+  - `KnowledgeBaseServiceImplTest`：8 个（创建成功/默认scope/名称为空、列表查询全部/共享/个人、VO转换/null）
+  - `DocumentServiceImplTest`：8 个（上传成功、列表查询/空列表、删除成功/不存在/跨租户、VO转换/null）
+
+**Bug 修复：**
+- `KnowledgeBaseController.uploadDocument` 文件保存路径从相对路径改为绝对路径（`toAbsolutePath()`），修复 `MultipartFile.transferTo` 对相对路径的处理导致 500 错误
+
+**验证结果：**
+- 创建知识库 → code:0, 返回 kbId ✅
+- 知识库列表 → code:0, 返回列表（含 scope 筛选）✅
+- 文档上传 → code:0, 返回 docId ✅
+- 文档列表 → code:0, 返回文档列表 ✅
+- 文档删除 → code:0, data:true ✅
+- `mvn test` → Tests run: 16, Failures: 0, Errors: 0 ✅
 
 ---
 

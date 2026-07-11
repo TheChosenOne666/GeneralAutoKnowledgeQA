@@ -83,8 +83,8 @@ public class KnowledgeBaseController {
             HttpServletRequest request) throws IOException {
         User loginUser = userService.getLoginUser(request);
 
-        // 保存文件
-        Path uploadDir = Path.of("uploads", String.valueOf(loginUser.getTenantId()));
+        // 保存文件（使用绝对路径，避免 MultipartFile.transferTo 相对路径问题）
+        Path uploadDir = Path.of("uploads", String.valueOf(loginUser.getTenantId())).toAbsolutePath();
         Files.createDirectories(uploadDir);
         String originalFilename = file.getOriginalFilename();
         Path filePath = uploadDir.resolve(UUID.randomUUID() + "_" + originalFilename);
