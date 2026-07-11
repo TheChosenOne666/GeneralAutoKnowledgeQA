@@ -139,16 +139,26 @@ export default function KnowledgeBasePage() {
             </select>
           )}
         </div>
-        <button
-          onClick={() => kbList.length === 0 ? setShowCreate(true) : fileInputRef.current?.click()}
-          disabled={!selectedKb && kbList.length > 0}
-          className="px-4 py-2 bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-[0_8px_32px_rgba(16,185,129,0.3)] hover:opacity-90 transition disabled:opacity-50"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          {kbList.length === 0 ? '新建知识库' : '上传文档'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="px-4 py-2 border border-emerald-200 text-slate-600 text-sm font-semibold rounded-lg flex items-center gap-2 hover:bg-emerald-50 transition"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            新建知识库
+          </button>
+          <button
+            onClick={() => selectedKb ? fileInputRef.current?.click() : alert('请先选择或创建知识库')}
+            className="px-4 py-2 bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-[0_8px_32px_rgba(16,185,129,0.3)] hover:opacity-90 transition"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+            </svg>
+            上传文档
+          </button>
+        </div>
         <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} accept=".pdf,.docx,.md,.txt" />
       </div>
 
