@@ -95,7 +95,9 @@ public class KnowledgeBaseController {
                 kbId, loginUser.getTenantId(), loginUser.getId(),
                 originalFilename, fileType, file.getSize(), filePath.toString());
 
-        // TODO: 异步调用 AiServiceClient.processDocument 触发文档处理
+        // 异步调用 Python AI 服务处理文档（提取文本 → 分块）
+        documentService.triggerDocumentProcessing(
+                docId, filePath.toString(), fileType, kbId, loginUser.getTenantId());
 
         return ResultUtils.success(docId);
     }

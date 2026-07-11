@@ -33,4 +33,27 @@ public interface DocumentService extends IService<Document> {
      * 获取文档 VO。
      */
     DocumentVO getDocumentVO(Document doc);
+
+    /**
+     * 更新文档处理状态。
+     *
+     * @param docId      文档 ID
+     * @param status     新状态（parsing / ready / failed）
+     * @param chunkCount 分块数量（可空）
+     * @param errorMsg   错误信息（可空）
+     */
+    boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg);
+
+    /**
+     * 异步触发文档处理 — 调用 Python AI 服务提取文本并分块。
+     *
+     * <p>流程：更新状态为 parsing → 调用 AI 服务 → 根据结果更新 ready/failed。
+     *
+     * @param docId    文档 ID
+     * @param filePath 文件绝对路径
+     * @param fileType 文件类型
+     * @param kbId     知识库 ID
+     * @param tenantId 租户 ID
+     */
+    void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId);
 }

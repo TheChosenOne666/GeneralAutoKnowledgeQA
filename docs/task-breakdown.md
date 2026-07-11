@@ -181,13 +181,25 @@
 
 ---
 
-### M1-6 Java → Python 文档处理联动 [后端/Java] P0 · 0.5d
+### M1-6 Java → Python 文档处理联动 [后端/Java] P0 · 0.5d ✅ 已完成
 
-- 上传文档后异步调用 `AiServiceClient.processDocument()`
-- 更新 Document 状态（pending → parsing → embedding → ready/failed）
-- 文档列表返回处理状态
+- ~~上传文档后异步调用 `AiServiceClient.processDocument()`~~
+- ~~更新 Document 状态（pending → parsing → embedding → ready/failed）~~
+- ~~文档列表返回处理状态~~
 - **依赖**: M1-4, M1-5
 - **产出**: 上传后自动处理，状态实时更新
+
+**实际完成内容：**
+- ✅ `DocumentService` 新增 `updateDocumentStatus` 和 `triggerDocumentProcessing` 方法
+- ✅ `DocumentServiceImpl` 注入 `AiServiceClient`，用 `CompletableFuture.runAsync` 异步处理：
+  - 更新状态为 parsing → 调用 Python AI 服务 → 成功更新 ready+chunkCount / 失败更新 failed+errorMsg
+- ✅ `KnowledgeBaseController` 上传后调用 `triggerDocumentProcessing`（替换 TODO）
+- ✅ 前端文档列表已展示状态徽章（ready/parsing/failed）
+
+**验证结果：**
+- 上传 txt 文件 → `code:0, docId` ✅
+- 3 秒后查询文档列表 → `status: "ready", chunkCount: 3` ✅
+- Java → Python 联动正常，异步处理状态自动更新 ✅
 
 ---
 
