@@ -109,10 +109,26 @@ export interface Member {
   name: string
   email: string
   role: Role
-  is_active: boolean
-  avatar_url: string | null
-  last_active_at: string | null
-  created_at: string
+  tenantId: string | null
+  avatarUrl: string | null
+  isActive: number
+  lastActiveAt: string | null
+  createTime: string
+}
+
+/** 生成邀请链接结果。*/
+export interface InviteResultVO {
+  token: string
+  inviteUrl: string
+  role: Role
+  expiresAt: string
+}
+
+/** 邀请链接详情（注册页展示）。*/
+export interface InviteInfoVO {
+  inviterName: string
+  tenantName: string
+  role: Role
 }
 
 export interface AuditLog {

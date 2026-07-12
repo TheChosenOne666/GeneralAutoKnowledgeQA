@@ -1,15 +1,25 @@
-/** 登录/注册页 — 按设计稿实现：粒子动效 + 极光光晕 + 毛玻璃 + 左右分栏。 */
+/** 登录/注册页 — 按设计稿实现：粒子动效 + 极光光晕 + 毛玻璃 + 左右分栏。
+ *  支持通过 ?token=xxx 进入「接受邀请」模式（加入现有租户，而非新建租户）。 */
 
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
+import { userApi } from '@/api/user'
+import type { InviteInfoVO } from '@/types'
 
 const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-emerald-500']
 const STRENGTH_LABELS = ['弱', '一般', '较强', '强']
+const ROLE_LABELS: Record<string, string> = {
+  super_admin: '平台超管',
+  tenant_admin: '租户管理员',
+  member: '普通成员',
+}
 
 export default function AuthPage() {
-  const { login, register } = useAuth()
+  const { login, register, acceptInvite } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const inviteToken = searchParams.get('token')
 
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [name, setName] = useState('')
@@ -21,6 +31,10 @@ export default function AuthPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [pwdStrength, setPwdStrength] = useState(0)
+
+  // 邀请注册：加载邀请详情
+  const [inviteInfo, setInviteInfo] = useState<InviteInfoVO | null>(null)
+  const [inviteError, setInviteError] = useState('')
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -125,6 +139,15 @@ export default function AuthPage() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!inviteToken) return
+    setMode('register')
+    userApi
+      .getInviteInfo(inviteToken)
+      .then(setInviteInfo)
+      .catch((err) => setInviteError(err instanceof Error ? err.message : '邀请链接无效或已失效'))
+  }, [inviteToken])
+
   const switchMode = (newMode: 'login' | 'register') => {
     setMode(newMode)
     setConfirmPassword('')
@@ -154,6 +177,8 @@ export default function AuthPage() {
     try {
       if (mode === 'login') {
         await login(email, password)
+      } else if (inviteToken) {
+        await acceptInvite(inviteToken, name, email, password)
       } else {
         await register(name, email, password)
       }
@@ -212,25 +237,44 @@ export default function AuthPage() {
             <span className="text-xl font-extrabold text-slate-800">熊答</span>
           </div>
 
-          {/* Tab 切换 */}
-          <div className="flex gap-8 border-b border-emerald-100 mb-7 relative">
-            <button
-              onClick={() => switchMode('login')}
-              className={`relative pb-3 text-base font-semibold transition ${
-                mode === 'login' ? 'tab-active' : 'text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              登录
-            </button>
-            <button
-              onClick={() => switchMode('register')}
-              className={`relative pb-3 text-base font-semibold transition ${
-                mode === 'register' ? 'tab-active' : 'text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              注册
-            </button>
-          </div>
+          {/* 邀请横幅 */}
+          {inviteToken && (
+            <div className="mb-5 rounded-xl bg-emerald-50 border border-emerald-100 px-4 py-3 text-sm text-slate-600">
+              {inviteError ? (
+                <span className="text-red-600">{inviteError}</span>
+              ) : inviteInfo ? (
+                <span>
+                  <span className="font-semibold text-emerald-700">{inviteInfo.inviterName}</span> 邀请你加入{' '}
+                  <span className="font-semibold text-emerald-700">{inviteInfo.tenantName}</span>
+                  （{ROLE_LABELS[inviteInfo.role] ?? inviteInfo.role}）
+                </span>
+              ) : (
+                <span>正在加载邀请信息…</span>
+              )}
+            </div>
+          )}
+
+          {/* Tab 切换（邀请模式下隐藏） */}
+          {!inviteToken && (
+            <div className="flex gap-8 border-b border-emerald-100 mb-7 relative">
+              <button
+                onClick={() => switchMode('login')}
+                className={`relative pb-3 text-base font-semibold transition ${
+                  mode === 'login' ? 'tab-active' : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                登录
+              </button>
+              <button
+                onClick={() => switchMode('register')}
+                className={`relative pb-3 text-base font-semibold transition ${
+                  mode === 'register' ? 'tab-active' : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                注册
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 px-4 py-2 rounded-lg bg-red-50 text-red-600 text-sm fade-in">{error}</div>
@@ -385,7 +429,7 @@ export default function AuthPage() {
               disabled={loading}
               className="btn-primary w-full py-3.5 rounded-xl text-white font-semibold text-base flex items-center justify-center gap-2"
             >
-              {loading ? '处理中...' : mode === 'login' ? '登录' : '创建账号'}
+              {loading ? '处理中...' : mode === 'login' ? '登录' : inviteToken ? '加入团队' : '创建账号'}
               {!loading && (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
@@ -428,24 +472,26 @@ export default function AuthPage() {
             )}
           </form>
 
-          {/* 底部切换文字 */}
-          <p className="text-center text-sm text-slate-500 mt-6">
-            {mode === 'login' ? (
-              <>
-                还没有账号？
-                <button onClick={() => switchMode('register')} className="text-brand-600 hover:text-brand-700 font-semibold ml-1">
-                  立即注册
-                </button>
-              </>
-            ) : (
-              <>
-                已有账号？
-                <button onClick={() => switchMode('login')} className="text-brand-600 hover:text-brand-700 font-semibold ml-1">
-                  立即登录
-                </button>
-              </>
-            )}
-          </p>
+          {/* 底部切换文字（邀请模式隐藏） */}
+          {!inviteToken && (
+            <p className="text-center text-sm text-slate-500 mt-6">
+              {mode === 'login' ? (
+                <>
+                  还没有账号？
+                  <button onClick={() => switchMode('register')} className="text-brand-600 hover:text-brand-700 font-semibold ml-1">
+                    立即注册
+                  </button>
+                </>
+              ) : (
+                <>
+                  已有账号？
+                  <button onClick={() => switchMode('login')} className="text-brand-600 hover:text-brand-700 font-semibold ml-1">
+                    立即登录
+                  </button>
+                </>
+              )}
+            </p>
+          )}
         </div>
       </div>
     </>

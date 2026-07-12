@@ -5,11 +5,15 @@ import com.xiongda.common.BaseResponse;
 import com.xiongda.common.PageRequest;
 import com.xiongda.common.ResultUtils;
 import com.xiongda.constant.UserConstant;
+import com.xiongda.model.dto.user.UserAcceptInviteRequest;
 import com.xiongda.model.dto.user.UserInviteRequest;
 import com.xiongda.model.dto.user.UserLoginRequest;
 import com.xiongda.model.dto.user.UserRegisterRequest;
+import com.xiongda.model.dto.user.UserRemoveRequest;
 import com.xiongda.model.dto.user.UserUpdateRequest;
 import com.xiongda.model.entity.User;
+import com.xiongda.model.vo.InviteInfoVO;
+import com.xiongda.model.vo.InviteResultVO;
 import com.xiongda.model.vo.LoginUserVO;
 import com.xiongda.model.vo.UserVO;
 import com.xiongda.service.UserService;
@@ -19,7 +23,7 @@ import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
 
 /**
- * 用户控制器 — 登录、注册、成员管理。
+ * 用户控制器 — 登录、注册、成员管理、邀请。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
@@ -78,18 +82,47 @@ public class UserController {
     @AuthCheck(mustRole = {UserConstant.TENANT_ADMIN_ROLE})
     public BaseResponse<Boolean> updateUser(@RequestBody UserUpdateRequest request, HttpServletRequest httpServletRequest) {
         User loginUser = userService.getLoginUser(httpServletRequest);
-        boolean result = userService.updateUser(loginUser.getTenantId(), request);
+        boolean result = userService.updateUser(loginUser.getTenantId(), loginUser.getId(), request);
         return ResultUtils.success(result);
     }
 
     /**
-     * 邀请成员（仅租户管理员）。
+     * 生成邀请链接（仅租户管理员）。
      */
     @PostMapping("/invite")
     @AuthCheck(mustRole = {UserConstant.TENANT_ADMIN_ROLE})
-    public BaseResponse<Long> inviteMember(@Valid @RequestBody UserInviteRequest request, HttpServletRequest httpServletRequest) {
+    public BaseResponse<InviteResultVO> inviteMember(@Valid @RequestBody UserInviteRequest request, HttpServletRequest httpServletRequest) {
         User loginUser = userService.getLoginUser(httpServletRequest);
-        Long result = userService.inviteMember(loginUser.getTenantId(), request);
+        InviteResultVO result = userService.createInvitation(loginUser.getTenantId(), loginUser.getId(), request);
+        return ResultUtils.success(result);
+    }
+
+    /**
+     * 获取邀请链接详情（公开，供注册页预填/展示）。
+     */
+    @GetMapping("/invite/info")
+    public BaseResponse<InviteInfoVO> inviteInfo(@RequestParam String token) {
+        InviteInfoVO result = userService.getInviteInfo(token);
+        return ResultUtils.success(result);
+    }
+
+    /**
+     * 通过邀请链接注册并自动登录（公开）。
+     */
+    @PostMapping("/invite/accept")
+    public BaseResponse<LoginUserVO> acceptInvite(@Valid @RequestBody UserAcceptInviteRequest request) {
+        LoginUserVO result = userService.acceptInvitation(request);
+        return ResultUtils.success(result);
+    }
+
+    /**
+     * 移除成员（软删除，仅租户管理员）。
+     */
+    @PostMapping("/remove")
+    @AuthCheck(mustRole = {UserConstant.TENANT_ADMIN_ROLE})
+    public BaseResponse<Boolean> removeMember(@RequestBody UserRemoveRequest request, HttpServletRequest httpServletRequest) {
+        User loginUser = userService.getLoginUser(httpServletRequest);
+        boolean result = userService.removeMember(loginUser.getTenantId(), loginUser.getId(), request);
         return ResultUtils.success(result);
     }
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { authApi } from '@/api/auth'
+import { userApi } from '@/api/user'
 import { clearToken, getToken, setToken } from '@/api/client'
 import type { LoginUserVO } from '@/types'
 
@@ -50,5 +51,13 @@ export function useAuth() {
     setUser(null)
   }
 
-  return { user, loading, login, register, logout, refresh: fetchUser }
+  /** 通过邀请链接注册并自动登录。*/
+  const acceptInvite = async (token: string, name: string, email: string, password: string) => {
+    const res = await userApi.acceptInvite(token, name, email, password)
+    setToken(res.token)
+    setUser(res)
+    return res
+  }
+
+  return { user, loading, login, register, logout, acceptInvite, refresh: fetchUser }
 }

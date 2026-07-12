@@ -475,6 +475,50 @@
 - **依赖**: M3-1
 - **产出**: 管理员可管理租户成员
 
+**现状盘点（2026-07-12，接手前核对）**
+
+M3-2 **不是从零**：后端接口与实现已就位，前端是静态假数据。新会话应「核对现状 + 补缺口」，勿重写。
+
+- **后端已就位**
+  - `UserController`：`GET /api/user/list`、`POST /api/user/update`、`POST /api/user/invite`，均 `@AuthCheck(mustRole=tenant_admin)`
+  - `UserService/Impl` 三方法已落地：
+    - `listUsersByTenant`：按 `tenant_id` 过滤 ✅（多租户隔离 OK）
+    - `updateUser`：已做 `!tenantId.equals(user.getTenantId())` 跨租户拒绝 ✅，但**缺防护**：① 不能把唯一/自己 `tenant_admin` 降级为 `member`（否则租户无管理员锁死）；② 不能改 `super_admin` 角色；③ 改角色未限范围
+    - `inviteMember`：校验邮箱唯一 → 直接建用户（默认密码 `123456`，有 `TODO` 邀请流程）；注意实现是「直接创建账号」而非设计稿所说的「生成邀请链接」
+  - DTO 已存在：`UserUpdateRequest`、`UserInviteRequest`
+  - **后端缺**：三个方法的单测
+- **前端 `frontend/src/pages/MembersPage.tsx` 是静态假数据**
+  - `MEMBERS` 写死、未接任何 API
+  - 角色用 `admin`/`member` 简写，而非后端枚举 `tenant_admin`/`member`/`super_admin`（需对齐 `UserConstant`）
+  - 「邀请成员」按钮、「设为管理员」、「移除」**均无真实交互**（无 onClick / 未调接口）
+  - 权限矩阵为静态展示（可保留）
+
+**实现记录（2026-07-12）**
+
+两项关键决策已与用户确认：**邀请采用「生成邀请链接」（对齐 WeKnora share-link）** + **移除采用「软删除」（对齐 WeKnora RemoveMember）**。
+
+后端（Java）
+- 新增 `tenant_invitations` 表（schema.sql 追加建表）+ 实体 `TenantInvitation` + `TenantInvitationMapper`；`application.yml` 新增 `app.frontend-base-url`（拼接邀请链接前缀）。
+- `UserController.inviteMember` 改为 `createInvitation`：生成 256-bit base64url 令牌、返回 `InviteResultVO{ token, inviteUrl, role, expiresAt }`（`inviteUrl = ${app.frontend-base-url}/register?token=xxx`，share-link 可多人复用、7 天有效）。
+- 新增公开端点：`GET /user/invite/info?token=`（注册页预填/展示，校验未撤销且未过期）、`POST /user/invite/accept`（接受邀请自设密码注册并自动登录，返回 `LoginUserVO`）。
+- 新增 `POST /user/remove`（`@AuthCheck tenant_admin`）软删除成员（`@TableLogic` 逻辑删除）。
+- `updateUser` 补防护：不能改 `super_admin`、不能把最后一个 `tenant_admin` 降级（last-admin 不变量）、不能修改/停用自己（防自锁）。
+- `removeMember` 防护：不能移除自己、不能移除 `super_admin`、不能移除最后一个 `tenant_admin`。
+- 新增 VO/DTO：`InviteResultVO` / `InviteInfoVO` / `UserAcceptInviteRequest` / `UserRemoveRequest`。
+
+前端（React/TS）
+- 新增 `api/user.ts`（`listMembers / updateMember / removeMember / inviteMember / getInviteInfo / acceptInvite`）；`types/index.ts` 的 `Member` 改为 camelCase 对齐后端 `UserVO`，新增 `InviteResultVO` / `InviteInfoVO`。
+- `MembersPage.tsx` 重写接入真实 API：列表渲染、角色标签、设为管理员/成员、启用/停用、移除（确认弹窗）、邀请弹窗（生成并复制链接）；自己行禁用操作；loading/错误态。
+- `AuthPage.tsx` 支持 `?token=xxx` 进入「接受邀请」模式（隐藏 Tab、展示邀请方/租户、走 `acceptInvite` 自动登录）。
+- `useAuth` 新增 `acceptInvite`。
+
+测试
+- 单测 `UserServiceImplTest` 增量至 **29 例全过**（覆盖 updateUser 防护、createInvitation、acceptInvitation、getInviteInfo、removeMember 关键用例，Mock Mapper/JwtUtil）。
+- 后端联调（PowerShell 脚本模拟前端全链路）全过：注册→邀请→接受→管理员列表见 2 人、改角色、不能停用/移除自己（50001/40000）、移除后列表回到 1 人、非法 token 拒绝（40100）；成员视角调列表被正确拒绝（40101，证明权限校验生效而非 bug）。
+- 前端 `npx tsc --noEmit` 类型检查通过。
+
+**注意**：角色枚举值已对齐 `UserConstant`（`member` / `tenant_admin` / `super_admin`），前端不再使用 `admin`/`member` 简写（改用 `tenant_admin`）。
+
 ---
 
 ### M3-3 AI 模型配置 [全栈] P1 · 1d

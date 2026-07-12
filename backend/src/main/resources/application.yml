@@ -51,6 +51,10 @@ jwt:
 ai-service:
   base-url: ${AI_SERVICE_URL:http://localhost:8001}
 
+# 前端基础地址（用于拼接可分享的邀请链接）
+app:
+  frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:5173}
+
 # CORS
 cors:
   origins: http://localhost:5173,http://localhost:3000

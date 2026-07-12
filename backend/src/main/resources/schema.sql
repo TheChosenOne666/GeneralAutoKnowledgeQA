@@ -135,6 +135,23 @@ CREATE TABLE message (
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 租户邀请表（share-link 模式，可多人复用）
+CREATE TABLE tenant_invitations (
+    id BIGINT PRIMARY KEY,
+    tenant_id BIGINT REFERENCES tenant(id),
+    inviter_id BIGINT,
+    invitee_name VARCHAR(100),
+    invitee_email VARCHAR(255),
+    role VARCHAR(30) DEFAULT 'member',
+    token VARCHAR(100) NOT NULL UNIQUE,
+    status VARCHAR(20) DEFAULT 'pending',
+    accepted_count INTEGER DEFAULT 0,
+    expires_at TIMESTAMP,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_delete SMALLINT DEFAULT 0
+);
+
 -- 索引
 CREATE INDEX idx_user_tenant ON app_user(tenant_id);
 CREATE INDEX idx_user_email ON app_user(email);
