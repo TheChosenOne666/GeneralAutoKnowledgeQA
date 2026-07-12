@@ -58,6 +58,16 @@ public interface DocumentService extends IService<Document> {
             Boolean modelConfigError);
 
     /**
+     * 保存文档提取全文（Python 解析后回填，供前端「查看内容」弹窗展示）。
+     */
+    void saveDocumentContent(Long docId, String content);
+
+    /**
+     * 获取文档提取全文（仅同租户可读，按知识库 scope 鉴权）。
+     */
+    String getDocumentContent(Long docId, Long tenantId, User user);
+
+    /**
      * 异步触发文档处理 — 调用 Python AI 服务提取文本并分块。
      *
      * <p>流程：更新状态为 parsing → 调用 AI 服务 → 根据结果更新 ready/failed。

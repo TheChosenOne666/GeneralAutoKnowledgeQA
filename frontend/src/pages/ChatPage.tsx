@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import 'highlight.js/styles/github.css'
 import { useNavigate } from 'react-router-dom'
+import { useAuth } from '@/hooks/useAuth'
 import { chatApi } from '@/api/chat'
 import { aiConfigApi } from '@/api/aiConfig'
 import { useChat } from '@/context/ChatContext'
@@ -71,6 +72,7 @@ const SUGGESTIONS = [
 
 export default function ChatPage() {
   const { activeId, setActiveId, refresh } = useChat()
+  const { user } = useAuth()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -79,6 +81,21 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const navigate = useNavigate()
+  // 自动滚动：发送后跳到底部、流式回复时跟随底部动态加载
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const atBottomRef = useRef(true)
+  const followRef = useRef(false)
+
+  const handleScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const el = scrollRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior })
+  }
   const [missingModels, setMissingModels] = useState<('llm' | 'embedding')[]>([])
   // 模型配置「填了但填错」（API Key/模型名等运行时错误），由 Python 的 error 事件触发
   const [modelConfigError, setModelConfigError] = useState(false)
@@ -152,12 +169,21 @@ export default function ChatPage() {
           })),
         )
         setConversationId(activeId)
+        atBottomRef.current = true
+        scrollToBottom('auto')
       })
       .catch(() => {
         if (token !== loadToken.current) return
         setMessages([{ role: 'assistant', content: '加载历史消息失败，请稍后重试。' }])
       })
   }, [activeId])
+
+  // AI 回复逐字追加（流式）时，若用户原本在底部或正处于主动跟随，则自动滚动到底部
+  useEffect(() => {
+    if (atBottomRef.current || followRef.current) {
+      scrollToBottom('auto')
+    }
+  }, [messages])
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || streaming) return
@@ -173,7 +199,9 @@ export default function ChatPage() {
     abortRef.current = controller
     setStreaming(true)
     setModelConfigError(false)
+    followRef.current = true // 发送后主动跳到底部并跟随 AI 回复
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
+    scrollToBottom('smooth')
 
     try {
       const reader = await chatApi.streamChat(
@@ -256,6 +284,7 @@ export default function ChatPage() {
       })
     } finally {
       setStreaming(false)
+      followRef.current = false
     }
   }
 
@@ -316,7 +345,7 @@ export default function ChatPage() {
       )}
 
       {/* 主内容区 */}
-      <div className="flex-1 overflow-auto px-6">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-6">
         {messages.length === 0 ? (
           /* 欢迎区 */
           <div className="max-w-3xl mx-auto pt-24 text-center">
@@ -337,36 +366,48 @@ export default function ChatPage() {
         ) : (
           /* 消息列表 */
           <div className="max-w-3xl mx-auto pt-6 space-y-6">
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                {msg.role === 'assistant' && (
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-teal-400 flex items-center justify-center text-white text-sm font-bold mr-3 flex-shrink-0">熊</div>
-                )}
-                <div className={`max-w-[80%] ${msg.role === 'user' ? 'bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-2xl rounded-tr-sm' : 'bg-emerald-50 text-slate-700 rounded-2xl rounded-tl-sm'} px-4 py-3`}>
-                  {msg.role === 'user' ? (
-                    <span className="text-sm whitespace-pre-wrap">{msg.content}</span>
-                  ) : (
-                    <div className="text-sm leading-relaxed break-words">
-                      {msg.content ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                          {msg.content}
-                        </ReactMarkdown>
+            {messages.map((msg, i) => {
+              const isUser = msg.role === 'user'
+              const displayName = isUser ? user?.name || '我' : '熊答AI'
+              return (
+                <div key={i} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                  {!isUser && (
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-teal-400 flex items-center justify-center text-white text-sm font-bold mr-3 flex-shrink-0">熊</div>
+                  )}
+                  <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[80%]`}>
+                    <span className="text-xs text-slate-400 mb-1 px-1">{displayName}</span>
+                    <div className={`${isUser ? 'bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-2xl rounded-tr-sm' : 'bg-emerald-50 text-slate-700 rounded-2xl rounded-tl-sm'} px-4 py-3`}>
+                      {isUser ? (
+                        <span className="text-sm whitespace-pre-wrap">{msg.content}</span>
                       ) : (
-                        streaming && i === messages.length - 1 && '思考中...'
+                        <div className="text-sm leading-relaxed break-words">
+                          {msg.content ? (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                              {msg.content}
+                            </ReactMarkdown>
+                          ) : (
+                            streaming && i === messages.length - 1 && '思考中...'
+                          )}
+                        </div>
+                      )}
+                      {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-emerald-200 space-y-2">
+                          <p className="text-xs font-medium text-slate-400">引用来源（{msg.sources.length}）</p>
+                          {msg.sources.map((s, si) => (
+                            <SourceCard key={si} source={s} />
+                          ))}
+                        </div>
                       )}
                     </div>
-                  )}
-                  {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-emerald-200 space-y-2">
-                      <p className="text-xs font-medium text-slate-400">引用来源（{msg.sources.length}）</p>
-                      {msg.sources.map((s, si) => (
-                        <SourceCard key={si} source={s} />
-                      ))}
+                  </div>
+                  {isUser && (
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-slate-500 flex items-center justify-center text-white text-sm font-bold ml-3 flex-shrink-0">
+                      {displayName.slice(0, 1)}
                     </div>
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>

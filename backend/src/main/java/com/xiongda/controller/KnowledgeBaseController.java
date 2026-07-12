@@ -112,6 +112,16 @@ public class KnowledgeBaseController {
         return ResultUtils.success(result);
     }
 
+    /**
+     * 获取文档提取全文（供前端「查看内容」弹窗展示）。
+     */
+    @GetMapping("/document/content")
+    public BaseResponse<String> getDocumentContent(@RequestParam Long docId, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        String content = documentService.getDocumentContent(docId, loginUser.getTenantId(), loginUser);
+        return ResultUtils.success(content);
+    }
+
     private String getFileExtension(String filename) {
         if (filename == null || !filename.contains(".")) {
             return "unknown";

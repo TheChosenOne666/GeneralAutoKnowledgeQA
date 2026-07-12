@@ -43,6 +43,12 @@ public class Document implements Serializable {
     private String errorMsg;
 
     /**
+     * 文档提取全文（Python 解析后回填，供前端「查看内容」弹窗展示）。
+     */
+    @TableField("content")
+    private String content;
+
+    /**
      * 是否因 AI 模型配置错误导致处理失败（M3-3，引导用户到 /ai-config 重新配置）。
      * 仅当 status=failed 时可能为 true。
      */

@@ -59,6 +59,8 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         doc.setChunkCount(0);
         doc.setUploadedBy(user.getId());
         this.save(doc);
+        // 知识库文档数同步（重新统计，自我校正已有偏差）
+        syncKbDocCount(kbId, tenantId);
         return doc.getId();
     }
 
@@ -82,7 +84,10 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // TODO: 删除向量数据库中的数据
         // 文档删除同样改变检索结果，清该租户 L1 检索缓存
         aiServiceClient.invalidateCache(tenantId);
-        return this.removeById(docId);
+        boolean removed = this.removeById(docId);
+        // 知识库文档数同步
+        syncKbDocCount(doc.getKbId(), tenantId);
+        return removed;
     }
 
     @Override
@@ -130,6 +135,39 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     }
 
     @Override
+    public void saveDocumentContent(Long docId, String content) {
+        Document doc = this.getById(docId);
+        if (doc == null) {
+            return;
+        }
+        doc.setContent(content);
+        this.updateById(doc);
+    }
+
+    @Override
+    public String getDocumentContent(Long docId, Long tenantId, User user) {
+        Document doc = this.getById(docId);
+        ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
+        // 仅同租户可读（与问答权限一致，普通成员亦可查看）
+        ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限查看该文档");
+        return doc.getContent();
+    }
+
+    /**
+     * 重新统计知识库文档数（逻辑删除自动过滤），并写回 knowledge_base.document_count。
+     */
+    private void syncKbDocCount(Long kbId, Long tenantId) {
+        QueryWrapper<Document> queryWrapper = new QueryWrapper<>();
+        queryWrapper.eq("kb_id", kbId).eq("tenant_id", tenantId);
+        long cnt = this.count(queryWrapper);
+        KnowledgeBase kb = knowledgeBaseService.getById(kbId);
+        if (kb != null) {
+            kb.setDocumentCount((int) cnt);
+            knowledgeBaseService.updateById(kb);
+        }
+    }
+
+    @Override
     public void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId,
             Long userId) {
         // M3-3：按上传用户解析其 AI 模型配置（用户级 > 租户级），透传给 Python 真正消费。
@@ -157,6 +195,11 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                     Object chunkCountObj = result.get("chunk_count");
                     Integer chunkCount = chunkCountObj instanceof Number ? ((Number) chunkCountObj).intValue() : 0;
                     this.updateDocumentStatus(docId, "ready", chunkCount, null);
+                    // 保存提取全文，供前端「查看内容」弹窗展示
+                    Object contentObj = result.get("content");
+                    if (contentObj != null) {
+                        this.saveDocumentContent(docId, contentObj.toString());
+                    }
                     // 文档内容已变更，清该租户 L1 检索缓存，下次提问回源重新检索
                     aiServiceClient.invalidateCache(tenantId);
                     log.info("文档处理完成: docId={}, chunks={}", docId, chunkCount);

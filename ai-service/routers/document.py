@@ -44,7 +44,7 @@ async def process_document(body: ProcessRequest):
         else:
             logger.info(f"[文档诊断] ModelConfig已构建 emb={cfg.embedding_provider}/{cfg.embedding_model} "
                         f"has_emb_key={cfg.has_embedding()}")
-        chunk_count = await document_processor.process(
+        result = await document_processor.process(
             file_path=body.file_path,
             file_type=body.file_type,
             kb_id=body.kb_id,
@@ -55,7 +55,8 @@ async def process_document(body: ProcessRequest):
         return {
             "doc_id": body.doc_id,
             "status": "ready",
-            "chunk_count": chunk_count,
+            "chunk_count": result.get("chunk_count", 0),
+            "content": result.get("content", ""),
         }
     except ModelConfigError as e:
         logger.warning(f"模型配置错误（文档处理）：{e}")

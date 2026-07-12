@@ -860,3 +860,56 @@ M1-2 ──→ M3-1 RBAC ──┬─→ M3-2 成员管理
 
 M3 全部 ──→ M4-8 部署
 ```
+
+---
+
+## 文档处理四项修复（2026-07-13）
+
+> 用户反馈：① 解析出的文档有乱码（如 `���`）；② 对话引用来源全部显示「第0页」；③ 已就绪文档希望点文件名弹出小窗看内容；④ 知识库文档个数不随上传/删除同步。
+
+### 1. 解析乱码（问题1）
+**根因**：TXT/MD 分支用 `open(..., encoding="utf-8")` 读取中文 Windows 文件（GBK）会解码异常；提取文本未清洗控制字符与替换符 `U+FFFD`；DOCX 仅取段落、漏掉表格内容。
+**修复**（`ai-service/services/document_processor.py`）：
+- 新增 `_read_text_file`：依次尝试 `utf-8 → gbk → latin-1` 解码，避免中文乱码。
+- 新增 `_clean_text`：去 BOM、去控制字符（保留 `\n\r\t`）、去 `U+FFFD` 替换符。
+- DOCX 提取补充表格内容（`doc.tables`）；PDF/DOCX/TXT/MD 统一经 `_clean_text` 清洗。
+
+### 2. 引用页码全为 0（问题2）
+**根因**：`process` 存储时把 `page` 硬编码为 `0`，检索返回的 `page` 永远是 0，对话引用「第0页」。
+**修复**：重构为「按页分段」——PDF 用 PyMuPDF 逐页真实页码；DOCX/TXT/MD 无真实页码时按 `CHARS_PER_PAGE=1500` 字符估算（仅用于引用展示）。`chunk_text` 每块携带对应 `page`，存储元数据不再写死 0。对话 `chat.py` 的「第{page}页」自动显示真实/估算页码。
+
+### 3. 已就绪文档查看内容弹窗（问题3，新功能）
+- Python `process` 返回值新增 `content`（提取全文）；`routers/document.py` 透传。
+- Java `Document` 实体新增 `content` 字段（`document` 表加 `content TEXT` 列，已 ALTER 现有库）；`DocumentServiceImpl.triggerDocumentProcessing` ready 时回填；新增 `DocumentService.getDocumentContent`（同租户可读）。
+- 新增 `GET /api/knowledge/document/content?docId=` 接口。
+- 前端 `knowledgeApi.getDocumentContent` + `KnowledgeBasePage`：已就绪文档文件名可点击，弹窗展示全文（`whitespace-pre-wrap` 滚动）。
+- **单测**：`tests/test_document_processor.py`（6 个）覆盖乱码清洗、编码回退、页码分配、DOCX 表格提取、chunk 页码保留，全部通过。
+
+### 4. 知识库文档数不同步（问题4）
+**根因**：`knowledge_base.document_count` 建库时置 0 后从未更新。
+**修复**：`DocumentServiceImpl` 新增 `syncKbDocCount`（按 `kb_id+tenant_id` 重新 `count`，逻辑删除自动过滤）并在 `uploadDocument`/`deleteDocument` 后调用；前端 `loadKbList` 刷新时保留当前选中知识库，上传/删除后调用以同步计数显示。已对现有库做一次 SQL 回填校正（0→真实数）。
+
+**验证**
+- Python 单测 6 个全过（`pytest tests/test_document_processor.py`）。
+- 对真实 docx 直接跑 `extract_pages`+`chunk_text`：`含U+FFFD=False`、`含控制字符=False`、页码集合 `[1,2,3]`（分布 `{1:4,2:3,3:1}`），证明问题1/2 修复。
+- Java 8080 / Python 8001 重启 health 均 200，无启动错误。
+- 现有 KB 计数已回填（如「后端」0→2），且后续上传/删除自动同步。
+
+**注意**：本次改动前已 `ready` 的旧文档 `content` 为 NULL（处理早于 content 列），点击会显示「（文档内容为空）」；重新上传该文档（或新上传）即可在弹窗看到内容。
+
+### 5. 问答窗口自动滚动跟随（2026-07-13）
+**问题**：发送消息后窗口不滚动、AI 流式回复时窗口固定在原位置，看不到最新内容。
+**修复**（`frontend/src/pages/ChatPage.tsx`）：
+- 主内容滚动容器加 `ref`/`onScroll`，用 `atBottomRef` 判定用户是否贴底（阈值 80px）。
+- 发送消息：`followRef=true` 并 `scrollToBottom('smooth')` 跳到底部；流式结束 `finally` 中 `followRef=false`。
+- 新增 effect 监听 `messages`：流式回复逐字追加时，若 `atBottomRef || followRef` 为真则 `scrollToBottom('auto')` 跟随到底部（用户在生成中上滑查看历史时不会被迫下拉）。
+- 切换/加载历史会话后 `atBottomRef=true` 并滚到底部（打开即看最新）。
+**验证**：前端 HMR 已热更新，浏览器实测发送与流式跟随即可。
+
+### 6. 问答消息显示昵称（2026-07-13）
+**需求**：AI 回复头像旁显示名称「熊答AI」；用户回复旁显示其注册用户名。
+**实现**（`frontend/src/pages/ChatPage.tsx`）：
+- 引入 `useAuth` 取当前登录用户，`user?.name` 即注册时填写的姓名（与 AppLayout 一致）。
+- 消息渲染重构为「头像 + 名称 + 气泡」：AI 用「熊」头像 + 名称「熊答AI」；用户用首字头像（灰） + 名称 `user.name`（取不到时回退「我」）。
+- 名称以 `text-xs text-slate-400` 显示在气泡上方，左右对齐随角色。
+**验证**：前端 HMR 已热更新，浏览器发消息可见「熊答AI」与当前用户名。
