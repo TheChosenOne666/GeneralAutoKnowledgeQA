@@ -58,7 +58,7 @@
 | 统一响应 | **BaseResponse + ResultUtils + ErrorCode** | code/data/message |
 | 异常处理 | **BusinessException + ThrowUtils + GlobalExceptionHandler** | 全局兜底 |
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
-| 缓存 | Redis | 会话缓存 |
+| 缓存 | Redis | 三层缓存（L3 会话 / L1 检索 / L2 嵌入） |
 | **AI 服务** | **Python + FastAPI + LangChain** | RAG 检索、Agent 推理、文档处理 |
 | 向量数据库 | Milvus | 文档向量存储与检索 |
 | 文档解析 | PyMuPDF（PDF）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
@@ -157,7 +157,6 @@ public Object doInterceptor(ProceedingJoinPoint joinPoint, AuthCheck authCheck) 
 const menuItems = [
   { key: 'chat', label: '对话', roles: ['member', 'tenant_admin', 'super_admin'] },
   { key: 'knowledge', label: '知识库', roles: ['member', 'tenant_admin'] },
-  { key: 'search', label: '搜索', roles: ['member', 'tenant_admin'] },
   { key: 'ai-config', label: 'AI模型配置', roles: ['member', 'tenant_admin'] },
   { key: 'members', label: '成员管理', roles: ['tenant_admin'] },
   { key: 'audit', label: '审计日志', roles: ['tenant_admin', 'super_admin'] },
@@ -444,6 +443,11 @@ multi-rag-employee/
     └── ui-design/
 ```
 
+> **模块结构变更（截至 2026-07-13）**：开发期间新增/调整的模块（详见 task-breakdown.md）：
+> - Python：新增 `core/redis_client.py`（Redis 异步客户端单例）、`routers/cache.py`（`POST /ai/cache/invalidate` 失效接口）、`services/model_config.py`（`ModelConfigError` 模型配置错误类型，M3-3 取消静默降级）。
+> - Java：新增 `service/KbPermission.java`（RBAC 数据级权限集中规则，M3-1）、`TenantInvitation` 实体与 Mapper + 邀请链路（M3-2）；`AiServiceClient` 增加 `toAiConfigMap` + `invalidateCache`（M3-2/M2-7）；`ChatServiceImpl` 增加 L3 会话缓存读写与失效（M2-7）。
+> - 前端：新增 `frontend/src/api/user.ts`、`frontend/src/context/ChatContext.tsx`（会话持久化）、`frontend/src/components/AppLayout.tsx`（历史记录按时间分组 + 7 天以上可折叠）；`MembersPage.tsx` 由静态假数据重写为接真实 API。
+
 ---
 
 ## 9. 功能流程详解
@@ -546,7 +550,7 @@ event: thinking
 data: {"content": "正在思考..."}
 
 event: sources
-data: {"sources": [{"source": "员工手册.pdf", "page": 0, "content": "年假...", "score": 0.83, ...}]}
+data: {"sources": [{"source": "员工手册.pdf", "page": 12, "content": "年假...", "score": 0.83, ...}]}
 
 event: token
 data: {"content": "根"}
