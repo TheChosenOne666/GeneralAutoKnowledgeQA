@@ -39,3 +39,12 @@ backend/uploads/
 backend/target/
 *.class
 
+# Runtime error logs (service stderr redirects)
+*.err
+
+# TypeScript / Vite build artifacts
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+

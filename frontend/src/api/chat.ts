@@ -34,8 +34,13 @@ export const chatApi = {
       .get<BaseResponse<Message[]>>('/chat/message/list', { params: { conversationId } })
       .then((r) => r.data.data),
 
-  /** SSE 流式问答 — 返回 ReadableStream reader。*/
-  streamChat: async (content: string, conversationId?: string, history?: ChatHistoryItem[]) => {
+  /** SSE 流式问答 — 返回 ReadableStream reader。可传 signal 主动中断。*/
+  streamChat: async (
+    content: string,
+    conversationId?: string,
+    history?: ChatHistoryItem[],
+    signal?: AbortSignal,
+  ) => {
     const token = getToken()
     const response = await fetch('/api/chat/message/stream', {
       method: 'POST',
@@ -49,6 +54,7 @@ export const chatApi = {
         mode: 'rag',
         history: history ?? [],
       }),
+      ...(signal ? { signal } : {}),
     })
     if (!response.body) throw new Error('SSE 流式响应不支持')
     return response.body.getReader()

@@ -5,9 +5,25 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import 'highlight.js/styles/github.css'
+import { useNavigate } from 'react-router-dom'
 import { chatApi } from '@/api/chat'
+import { aiConfigApi } from '@/api/aiConfig'
 import { useChat } from '@/context/ChatContext'
-import type { ChatHistoryItem, Message, SourceItem } from '@/types'
+import type { ChatHistoryItem, Message, SourceItem, AIConfig } from '@/types'
+
+/** 模型类型展示名。*/
+const MODEL_LABELS: Record<'llm' | 'embedding', string> = {
+  llm: 'LLM 大语言模型',
+  embedding: 'Embedding 向量化模型',
+}
+
+/** 判定某一模型是否已配置：需同时具备 provider 与 model（API Key 不在前端可见范围内）。*/
+function isModelConfigured(cfg: AIConfig | null, key: 'llm' | 'embedding'): boolean {
+  if (!cfg) return false
+  const provider = key === 'llm' ? cfg.llmProvider : cfg.embeddingProvider
+  const model = key === 'llm' ? cfg.llmModel : cfg.embeddingModel
+  return Boolean(provider && model)
+}
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -60,9 +76,39 @@ export default function ChatPage() {
   const [streaming, setStreaming] = useState(false)
   const [conversationId, setConversationId] = useState<string | null>(null)
   const loadToken = useRef(0)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const navigate = useNavigate()
+  const [missingModels, setMissingModels] = useState<('llm' | 'embedding')[]>([])
+
+  // 进入问答页即拉取 AI 配置，判定 LLM / Embedding 是否缺失并常驻提示
+  useEffect(() => {
+    aiConfigApi
+      .getConfig()
+      .then((cfg) => {
+        const missing: ('llm' | 'embedding')[] = []
+        if (!isModelConfigured(cfg, 'llm')) missing.push('llm')
+        if (!isModelConfigured(cfg, 'embedding')) missing.push('embedding')
+        setMissingModels(missing)
+      })
+      .catch(() => {
+        // 配置接口异常时不打扰对话，静默忽略
+      })
+  }, [])
+
+  /** 输入框随内容自动增高，超过 200px 后改为滚动。*/
+  const autoResize = () => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+  }
 
   // 选中会话变化时加载历史消息
   useEffect(() => {
+    // 切换会话：取消进行中的流式并恢复输入态，避免输入框卡在禁用
+    abortRef.current?.abort()
+    setStreaming(false)
     if (!activeId) {
       setMessages([])
       setConversationId(null)
@@ -92,17 +138,20 @@ export default function ChatPage() {
   const sendMessage = async (text: string) => {
     if (!text.trim() || streaming) return
     setInput('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     // 多轮历史：发送前已有的已完成消息（不含当前问题）
     const history: ChatHistoryItem[] = messages
       .filter((m) => m.content)
       .map((m) => ({ role: m.role, content: m.content }))
 
+    const controller = new AbortController()
+    abortRef.current = controller
     setStreaming(true)
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
 
     try {
-      const reader = await chatApi.streamChat(text, conversationId || undefined, history)
+      const reader = await chatApi.streamChat(text, conversationId || undefined, history, controller.signal)
       const decoder = new TextDecoder()
       let buffer = ''
       let aiContent = ''
@@ -158,6 +207,7 @@ export default function ChatPage() {
         }
       }
     } catch (err) {
+      if ((err as { name?: string })?.name === 'AbortError') return
       setMessages((prev) => {
         const next = [...prev]
         next[next.length - 1] = {
@@ -180,6 +230,33 @@ export default function ChatPage() {
 
   return (
     <div className="h-full flex flex-col relative overflow-hidden bg-white">
+      {/* 未配置模型常驻提示（不随消息滚动） */}
+      {missingModels.length > 0 && (
+        <div className="flex-shrink-0 px-6 pt-3">
+          <div className="max-w-3xl mx-auto flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+            </svg>
+            <div className="flex-1 text-sm text-amber-800 leading-relaxed">
+              尚未配置{' '}
+              {missingModels.map((m, i) => (
+                <span key={m}>
+                  {i > 0 && ' 与 '}
+                  <span className="font-semibold">{MODEL_LABELS[m]}</span>
+                </span>
+              ))}
+              ，AI 问答将无法调用对应能力，请先完成配置。
+            </div>
+            <button
+              onClick={() => navigate('/ai-config')}
+              className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition"
+            >
+              去配置
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 主内容区 */}
       <div className="flex-1 overflow-auto px-6">
         {messages.length === 0 ? (
@@ -257,12 +334,16 @@ export default function ChatPage() {
           {/* 输入框 */}
           <div className="bg-white border border-emerald-200 rounded-2xl shadow-lg shadow-emerald-100/50 overflow-hidden focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-500/20 transition-all">
             <textarea
+              ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value)
+                autoResize()
+              }}
               onKeyDown={handleKeyDown}
               placeholder="输入问题，将基于知识库和网络搜索回答"
-              className="w-full px-5 py-4 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none"
-              rows={2}
+              className="w-full px-5 py-4 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none max-h-[200px] overflow-y-auto"
+              rows={1}
               disabled={streaming}
             />
             <div className="px-3 pb-3 flex items-center justify-between">
@@ -299,17 +380,28 @@ export default function ChatPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
                   </svg>
                 </button>
-                {/* 发送 */}
-                <button
-                  onClick={() => sendMessage(input)}
-                  disabled={streaming || !input.trim()}
-                  className="w-8 h-8 rounded-lg flex items-center justify-center bg-emerald-500 text-white hover:bg-brand-600 cursor-pointer shadow-sm transition disabled:opacity-50"
-                  title="发送"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
-                  </svg>
-                </button>
+                {streaming ? (
+                  <button
+                    onClick={() => abortRef.current?.abort()}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center bg-slate-400 text-white hover:bg-slate-500 cursor-pointer shadow-sm transition"
+                    title="停止生成"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                      <rect x="6" y="6" width="12" height="12" rx="2" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => sendMessage(input)}
+                    disabled={!input.trim()}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center bg-emerald-500 text-white hover:bg-brand-600 cursor-pointer shadow-sm transition disabled:opacity-50"
+                    title="发送"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                    </svg>
+                  </button>
+                )}
               </div>
             </div>
           </div>

@@ -88,19 +88,20 @@ export interface ChatHistoryItem {
   content: string
 }
 
+/** AI 模型配置（对齐后端 AiConfigVO，字段为 camelCase；不含 API Key 明文）。*/
 export interface AIConfig {
-  llm_provider: string
-  llm_model: string
-  llm_base_url: string
-  llm_temperature: number
-  llm_max_tokens: number
-  embedding_provider: string
-  embedding_model: string
-  embedding_base_url: string
-  embedding_dimension: number
-  rerank_provider: string | null
-  rerank_model: string | null
-  has_rerank: boolean
+  llmProvider: string | null
+  llmModel: string | null
+  llmBaseUrl: string | null
+  llmTemperature: number | null
+  llmMaxTokens: number | null
+  embeddingProvider: string | null
+  embeddingModel: string | null
+  embeddingBaseUrl: string | null
+  embeddingDimension: number | null
+  rerankProvider: string | null
+  rerankModel: string | null
+  hasRerank: boolean
 }
 
 export interface Member {
