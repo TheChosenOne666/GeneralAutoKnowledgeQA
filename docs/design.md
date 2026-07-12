@@ -300,7 +300,9 @@ Content-Type: application/json
 }
 ```
 
-> 返回 `Flux<String>` SSE 流，Java 透传 Python AI 服务的流式响应。
+> 返回 `Flux<String>` 流，Java **解析 Python 每个 SSE 事件并重新包装为标准 SSE 帧**（`event: token` / `data: {json}`）回传前端，保留 `thinking`/`sources`/`token`/`done` 事件类型，前端按事件名分发。
+>
+> **注意（已踩坑）**：`produces` 必须为 `MediaType.TEXT_PLAIN_VALUE`。若误用 `TEXT_EVENT_STREAM_VALUE`，Spring MVC 会对 `Flux<String>` 的每个元素自动加 `data: ` 前缀二次包装，破坏手写 `event:` 行（实测出现 `data:event: thinking` / `data:data: {...}` 双包格式，前端无法解析）。前端用 `fetch` + `reader` 手动按行解析，Content-Type 不影响解析。
 
 ### 6.2 SSE 响应格式
 
@@ -509,7 +511,8 @@ Java ChatController.chatStream
    1) conversationId == null → 自动 createConversation（标题取问题前 50 字），id 用 String 避免 JS 大整数精度丢失
    2) saveUserMessage(convId, content)
         → 先写 Redis L3（chat:conv:{id}，TTL 1800s）再落库 message 表
-   3) 透传 SSE 流给 Python /ai/chat/stream（WebClient → Flux 原样回传前端）
+   3) 调用 Python /ai/chat/stream（WebClient → Flux<DataBuffer>），Java 侧将原始 SSE 按 `\n\n` 切帧，逐帧转译为标准 SSE（`event:/data:`）推给前端；
+      ⚠️ produces 用 TEXT_PLAIN 避免 Spring 对 Flux<String> 二次加 data: 前缀
    │
    ▼
 Python event_generator（routers/chat.py）
@@ -528,7 +531,8 @@ Python event_generator（routers/chat.py）
    └─ 发 event: done（conversation_id, sources）
 ```
 
-> ⚠️ **已知缺口（待修复）**：当前 Java 仅调用 `saveUserMessage`，**未在 `done` 事件聚合后调用 `saveAssistantMessage`**。即助手回答已流式推给前端，但**尚未写入 L3 缓存与 message 表**——刷新后历史仅见用户消息。`saveAssistantMessage` 方法已具备，待接入 SSE `done` 的 token 聚合逻辑。
+> **助手回答持久化（已修复）**：Java 在透传 SSE 流时聚合 `token` 事件累积回答文本、捕获 `done` 事件的 `sources`，流结束后调用 `saveAssistantMessage`（先写 L3 缓存再落库），刷新后历史可完整回看。
+> **SSE 封装（已修复）**：Java 不再裸透传 Python 的 `data:` 文本碎片，而是解析每帧后重新包装成带 `event:` 的标准 SSE 发给前端（保留事件类型），前端 `ChatPage.tsx` 按 `event` 名分发（token 追加 / sources 渲染卡片 / done 结束并刷新）。**落库动作从响应式 Netty 线程 offload 到 `Schedulers.boundedElastic()` 并加 try-catch，避免阻塞 I/O 线程且异常不被静默吞掉。**
 
 ### 9.4 SSE 事件流协议
 

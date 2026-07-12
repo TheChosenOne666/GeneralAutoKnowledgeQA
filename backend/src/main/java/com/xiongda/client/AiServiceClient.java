@@ -3,6 +3,7 @@ package com.xiongda.client;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
@@ -34,7 +35,7 @@ public class AiServiceClient {
     /**
      * 流式问答 — 调用 Python AI 服务的 SSE 接口，返回 Flux 供 Controller 透传。
      */
-    public Flux<String> chatStream(
+    public Flux<DataBuffer> chatStream(
             String question,
             Long conversationId,
             List<Long> kbIds,
@@ -57,7 +58,7 @@ public class AiServiceClient {
                 .uri("/ai/chat/stream")
                 .bodyValue(requestBody)
                 .retrieve()
-                .bodyToFlux(String.class);
+                .bodyToFlux(DataBuffer.class);
     }
 
     /**
