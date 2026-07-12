@@ -124,12 +124,15 @@ public class AiServiceClient {
         requestBody.put("kb_id", String.valueOf(kbId));
         requestBody.put("tenant_id", String.valueOf(tenantId));
         requestBody.put("ai_config", aiConfig);
+        log.info("[文档诊断] 发往Python processDocument docId={} fileType={} kbId={} tenantId={} aiConfigKeys={}",
+                docId, fileType, kbId, tenantId, aiConfig == null ? "NULL" : aiConfig.keySet());
 
         return webClient.post()
                 .uri("/ai/document/process")
                 .bodyValue(requestBody)
                 .retrieve()
                 .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
+                .timeout(java.time.Duration.ofMinutes(10))
                 .block();
     }
 

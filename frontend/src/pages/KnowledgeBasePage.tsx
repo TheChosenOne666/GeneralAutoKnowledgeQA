@@ -74,6 +74,17 @@ export default function KnowledgeBasePage() {
     }
   }, [])
 
+  // 文档处于处理中（待处理/解析中/向量化中）时自动轮询刷新状态，避免界面“一动不动”
+  useEffect(() => {
+    if (!selectedKb) return
+    const processing = documents.some(
+      (d) => d.status === 'pending' || d.status === 'parsing' || d.status === 'embedding'
+    )
+    if (!processing) return
+    const timer = setInterval(() => loadDocuments(selectedKb.id), 3000)
+    return () => clearInterval(timer)
+  }, [documents, selectedKb, loadDocuments])
+
   useEffect(() => { loadKbList(tab) }, [tab, loadKbList])
   useEffect(() => {
     if (selectedKb) loadDocuments(selectedKb.id)

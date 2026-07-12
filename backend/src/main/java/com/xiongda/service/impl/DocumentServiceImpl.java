@@ -135,14 +135,21 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // M3-3：按上传用户解析其 AI 模型配置（用户级 > 租户级），透传给 Python 真正消费。
         AiConfig rawConfig = aiConfigService.getRawConfig(tenantId, userId);
         Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(rawConfig);
+        log.info("[文档诊断] 触发文档处理 docId={} kbId={} tenantId={} userId={} rawConfigIsNull={} aiConfigKeys={}",
+                docId, kbId, tenantId, userId, rawConfig == null,
+                aiConfig == null ? "NULL" : aiConfig.keySet());
         CompletableFuture.runAsync(() -> {
             try {
                 // 1. 更新状态为解析中
                 this.updateDocumentStatus(docId, "parsing", null, null);
+                log.info("[文档诊断] 已置parsing，开始调用Python处理 docId={}", docId);
 
                 // 2. 调用 Python AI 服务处理文档
+                long t0 = System.currentTimeMillis();
                 Map<String, Object> result = aiServiceClient.processDocument(
                         docId, filePath, fileType, kbId, tenantId, aiConfig);
+                log.info("[文档诊断] Python处理返回 docId={} 耗时={}ms result={}",
+                        docId, System.currentTimeMillis() - t0, result);
 
                 // 3. 根据结果更新状态
                 String status = result.get("status") != null ? result.get("status").toString() : "failed";

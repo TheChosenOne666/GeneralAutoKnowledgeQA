@@ -30,7 +30,20 @@ async def process_document(body: ProcessRequest):
     error_type=MODEL_CONFIG_ERROR，供前端识别并引导重新配置。
     """
     try:
+        logger.info(f"[文档诊断] 收到process doc_id={body.doc_id} file_type={body.file_type} "
+                    f"file_path={body.file_path} ai_config是否为空={body.ai_config is None}")
+        if body.ai_config:
+            logger.info(f"[文档诊断] ai_config字段={list(body.ai_config.keys())} "
+                        f"embedding_model={body.ai_config.get('embedding_model')} "
+                        f"has_emb_key={bool(body.ai_config.get('embedding_api_key'))}")
+        else:
+            logger.warning("[文档诊断] ai_config为空，将走env兜底（易触发模型配置错误）")
         cfg = ModelConfig.from_dict(body.ai_config)
+        if cfg is None:
+            logger.warning("[文档诊断] ModelConfig为None，使用env兜底")
+        else:
+            logger.info(f"[文档诊断] ModelConfig已构建 emb={cfg.embedding_provider}/{cfg.embedding_model} "
+                        f"has_emb_key={cfg.has_embedding()}")
         chunk_count = await document_processor.process(
             file_path=body.file_path,
             file_type=body.file_type,
