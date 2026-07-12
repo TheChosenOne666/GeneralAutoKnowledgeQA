@@ -38,9 +38,13 @@ function Check() {
 
 function formatDate(value?: unknown): string {
   if (value == null) return '—'
-  const d = new Date(
-    Array.isArray(value) ? (value as number[]).map(Number) : (value as string | number),
-  )
+  let d: Date
+  if (Array.isArray(value)) {
+    const n = value.map(Number)
+    d = new Date(n[0] || NaN, (n[1] || 1) - 1, n[2] || 1)
+  } else {
+    d = new Date(value as string | number)
+  }
   if (isNaN(d.getTime())) return '—'
   return d.toISOString().slice(0, 10)
 }
