@@ -2,6 +2,7 @@ package com.xiongda.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.xiongda.model.entity.Document;
+import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
 
 import java.util.List;
@@ -14,9 +15,9 @@ import java.util.List;
 public interface DocumentService extends IService<Document> {
 
     /**
-     * 上传文档。
+     * 上传文档（按知识库 scope + owner 鉴权：共享库仅租户管理员，个人库仅 owner）。
      */
-    Long uploadDocument(Long kbId, Long tenantId, Long userId, String filename, String fileType,
+    Long uploadDocument(Long kbId, Long tenantId, User user, String filename, String fileType,
                         Long fileSize, String filePath);
 
     /**
@@ -25,9 +26,9 @@ public interface DocumentService extends IService<Document> {
     List<DocumentVO> listDocuments(Long kbId, Long tenantId);
 
     /**
-     * 删除文档。
+     * 删除文档（按知识库 scope + owner 鉴权：共享库仅租户管理员，个人库仅 owner）。
      */
-    boolean deleteDocument(Long docId, Long tenantId);
+    boolean deleteDocument(Long docId, Long tenantId, User user);
 
     /**
      * 获取文档 VO。

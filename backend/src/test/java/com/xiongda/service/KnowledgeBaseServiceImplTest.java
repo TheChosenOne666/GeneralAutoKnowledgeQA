@@ -2,9 +2,11 @@ package com.xiongda.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.xiongda.common.ErrorCode;
+import com.xiongda.constant.UserConstant;
 import com.xiongda.exception.BusinessException;
 import com.xiongda.mapper.KnowledgeBaseMapper;
 import com.xiongda.model.entity.KnowledgeBase;
+import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.KnowledgeBaseVO;
 import com.xiongda.service.impl.KnowledgeBaseServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 知识库服务实现单元测试 — 覆盖创建、列表查询、VO 转换。
+ * 知识库服务实现单元测试 — 覆盖创建、列表查询、VO 转换、RBAC 创建权限。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
@@ -45,13 +47,14 @@ class KnowledgeBaseServiceImplTest {
     // ==================== 创建知识库 ====================
 
     @Test
-    void createKnowledgeBase_success() {
+    void createKnowledgeBase_tenantAdminCreateShared_success() {
         doAnswer(inv -> {
             inv.getArgument(0, KnowledgeBase.class).setId(100L);
             return 1;
         }).when(knowledgeBaseMapper).insert(any(KnowledgeBase.class));
 
-        Long id = knowledgeBaseService.createKnowledgeBase(1L, 10L, "测试库", "描述", "shared");
+        User admin = buildUser(10L, UserConstant.TENANT_ADMIN_ROLE);
+        Long id = knowledgeBaseService.createKnowledgeBase(1L, admin, "共享库", "描述", "shared");
         assertEquals(100L, id);
 
         verify(knowledgeBaseMapper).insert(any(KnowledgeBase.class));
@@ -64,16 +67,38 @@ class KnowledgeBaseServiceImplTest {
             return 1;
         }).when(knowledgeBaseMapper).insert(any(KnowledgeBase.class));
 
-        knowledgeBaseService.createKnowledgeBase(1L, 10L, "个人库", null, null);
+        User member = buildUser(10L, UserConstant.DEFAULT_ROLE);
+        knowledgeBaseService.createKnowledgeBase(1L, member, "个人库", null, null);
 
         verify(knowledgeBaseMapper).insert(any(KnowledgeBase.class));
     }
 
     @Test
     void createKnowledgeBase_nameBlank() {
+        User member = buildUser(10L, UserConstant.DEFAULT_ROLE);
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> knowledgeBaseService.createKnowledgeBase(1L, 10L, "", null, "shared"));
+                () -> knowledgeBaseService.createKnowledgeBase(1L, member, "", null, "shared"));
         assertEquals(ErrorCode.PARAMS_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void createKnowledgeBase_memberCannotCreateShared() {
+        User member = buildUser(10L, UserConstant.DEFAULT_ROLE);
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> knowledgeBaseService.createKnowledgeBase(1L, member, "共享库", null, "shared"));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void createKnowledgeBase_superAdminCanCreateShared() {
+        doAnswer(inv -> {
+            inv.getArgument(0, KnowledgeBase.class).setId(102L);
+            return 1;
+        }).when(knowledgeBaseMapper).insert(any(KnowledgeBase.class));
+
+        User superAdmin = buildUser(10L, UserConstant.SUPER_ADMIN_ROLE);
+        Long id = knowledgeBaseService.createKnowledgeBase(1L, superAdmin, "共享库", null, "shared");
+        assertEquals(102L, id);
     }
 
     // ==================== 列表查询 ====================
@@ -140,5 +165,13 @@ class KnowledgeBaseServiceImplTest {
         kb.setDocumentCount(0);
         kb.setCreateTime(new Date());
         return kb;
+    }
+
+    private User buildUser(Long id, String role) {
+        User user = new User();
+        user.setId(id);
+        user.setTenantId(1L);
+        user.setRole(role);
+        return user;
     }
 }

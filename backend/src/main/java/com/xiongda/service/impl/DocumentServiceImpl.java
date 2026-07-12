@@ -7,8 +7,12 @@ import com.xiongda.exception.ThrowUtils;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.mapper.DocumentMapper;
 import com.xiongda.model.entity.Document;
+import com.xiongda.model.entity.KnowledgeBase;
+import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
 import com.xiongda.service.DocumentService;
+import com.xiongda.service.KbPermission;
+import com.xiongda.service.KnowledgeBaseService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,9 +33,16 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     @Resource
     private AiServiceClient aiServiceClient;
 
+    @Resource
+    private KnowledgeBaseService knowledgeBaseService;
+
     @Override
-    public Long uploadDocument(Long kbId, Long tenantId, Long userId, String filename, String fileType,
+    public Long uploadDocument(Long kbId, Long tenantId, User user, String filename, String fileType,
                                Long fileSize, String filePath) {
+        // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
+        KnowledgeBase kb = knowledgeBaseService.getById(kbId);
+        KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
+
         Document doc = new Document();
         doc.setKbId(kbId);
         doc.setTenantId(tenantId);
@@ -41,7 +52,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         doc.setFilePath(filePath);
         doc.setStatus("pending");
         doc.setChunkCount(0);
-        doc.setUploadedBy(userId);
+        doc.setUploadedBy(user.getId());
         this.save(doc);
         return doc.getId();
     }
@@ -56,10 +67,13 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     }
 
     @Override
-    public boolean deleteDocument(Long docId, Long tenantId) {
+    public boolean deleteDocument(Long docId, Long tenantId, User user) {
         Document doc = this.getById(docId);
         ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
         ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR);
+        // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
+        KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
+        KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
         // TODO: 删除向量数据库中的数据
         // 文档删除同样改变检索结果，清该租户 L1 检索缓存
         aiServiceClient.invalidateCache(tenantId);

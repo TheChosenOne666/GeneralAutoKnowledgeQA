@@ -436,6 +436,32 @@
 - **依赖**: M1-2
 - **产出**: 不同角色访问不同功能
 
+**实现记录（2026-07-12）**
+
+参考腾讯 WeKnora 的 RBAC 思路（租户角色矩阵 + KB 归属数据级权限，而非纯 URL 级），落地本项目简化模型：
+
+- ✅ 新增 `service/KbPermission.java`：集中 RBAC 数据级规则
+  - 角色模型：`tenant_admin` / `super_admin`（写权限）/ `member`（只读）
+  - 共享库（`shared`）：仅 `tenant_admin` / `super_admin` 可写（创建、上传、删除文档）
+  - 个人库（`personal`）：仅 `owner`（KB 的 `owner_id`）可写
+  - 读操作（列表、问答）对租户内全员开放，不在此限制
+  - `super_admin` 作为跨租户超管自动放行（对齐 WeKnora 的 SystemAdmin 思路）
+- ✅ `KnowledgeBaseService/Impl.createKnowledgeBase`：签名改为传入 `User`，创建共享库时校验 `KbPermission.assertCanCreate(scope, role)`；owner 取 `user.getId()`
+- ✅ `DocumentService/Impl.uploadDocument` / `deleteDocument`：签名改为传入 `User`，写前经 `KbPermission.assertCanWrite(kb, userId, role)` 校验（注入 `KnowledgeBaseService` 查 KB scope/owner）
+- ✅ `KnowledgeBaseController`：创建/上传/删除三处写操作透传 `loginUser`
+- ✅ 单元测试 37 个全过：`KbPermissionTest`(14) + `KnowledgeBaseServiceImplTest`(10) + `DocumentServiceImplTest`(13)，覆盖共享库/个人库的创建与写权限、owner 匹配、跨租户隔离
+- **说明**：WeKnora 的 4 级租户角色（Owner→Admin→Contributor→Viewer）与跨租户 Org 共享（`kb_share` 表 + 3-D 权限帽）对当前需求过度设计，本项目采用"共享库/个人库 + 3 角色"简化模型，核心思路（租户角色 + 资源归属的数据级 RBAC）保持一致
+
+**租户隔离强化（2026-07-12，对齐 WeKnora own-KB 判定）**
+
+复核发现写权限缺口：`assertCanWrite` 仅校验 owner/role，**未校验调用者 tenant 与 KB tenant 一致**，导致租户 A 的 `tenant_admin` 可越权写入租户 B 的共享库（读隔离 `tenant_id` 过滤已完整，删除文档已有 `tenantId` 校验故安全，仅上传漏了）。
+
+对齐 WeKnora `kb_access.go` 第一步 `kb.TenantID == tenantID`（own-KB 优先）修复：
+- ✅ `KbPermission.assertCanWrite` 新增 `callerTenantId` 参数，判定顺序：**super_admin 跨租户完全放行 → 其余角色必须 `callerTenantId == kb.tenantId`（租户隔离第一维度）→ 共享库仅 tenant_admin / 个人库仅 owner**
+- ✅ `DocumentServiceImpl.uploadDocument` / `deleteDocument` 调用处补传 `tenantId`（与删除已有的 doc 级 tenant 校验形成双保险）
+- ✅ 单测增量：KbPermissionTest 14→17（新增跨租户 tenant_admin 拒 / member 个人库跨租户拒 / super_admin 跨租户放），DocumentServiceImplTest 13→14（新增 `uploadDocument_tenantAdminCrossTenant_denied`）；三件套共 41 全过
+- **结论**：至此 RBAC 具备完整的多租户写安全（tenant 作为权限第一维度，与 WeKnora 一致）
+
 ---
 
 ### M3-2 成员管理 [全栈] P1 · 1.5d

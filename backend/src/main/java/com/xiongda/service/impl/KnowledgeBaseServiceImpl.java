@@ -6,7 +6,9 @@ import com.xiongda.exception.ThrowUtils;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.mapper.KnowledgeBaseMapper;
 import com.xiongda.model.entity.KnowledgeBase;
+import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.KnowledgeBaseVO;
+import com.xiongda.service.KbPermission;
 import com.xiongda.service.KnowledgeBaseService;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -23,14 +25,16 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
         implements KnowledgeBaseService {
 
     @Override
-    public Long createKnowledgeBase(Long tenantId, Long userId, String name, String description, String scope) {
+    public Long createKnowledgeBase(Long tenantId, User user, String name, String description, String scope) {
         ThrowUtils.throwIf(StringUtils.isBlank(name), ErrorCode.PARAMS_ERROR, "知识库名称不能为空");
+        // 共享库仅租户管理员 / 平台超管可创建
+        KbPermission.assertCanCreate(scope, user.getRole());
         KnowledgeBase kb = new KnowledgeBase();
         kb.setTenantId(tenantId);
         kb.setName(name);
         kb.setDescription(description);
         kb.setScope(StringUtils.isNotBlank(scope) ? scope : "personal");
-        kb.setOwnerId(userId);
+        kb.setOwnerId(user.getId());
         kb.setDocumentCount(0);
         this.save(kb);
         return kb.getId();

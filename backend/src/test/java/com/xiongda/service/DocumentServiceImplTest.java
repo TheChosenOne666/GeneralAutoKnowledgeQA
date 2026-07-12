@@ -2,9 +2,13 @@ package com.xiongda.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.xiongda.common.ErrorCode;
+import com.xiongda.constant.UserConstant;
 import com.xiongda.exception.BusinessException;
+import com.xiongda.client.AiServiceClient;
 import com.xiongda.mapper.DocumentMapper;
 import com.xiongda.model.entity.Document;
+import com.xiongda.model.entity.KnowledgeBase;
+import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
 import com.xiongda.service.impl.DocumentServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 文档服务实现单元测试 — 覆盖上传、列表、删除、VO 转换。
+ * 文档服务实现单元测试 — 覆盖上传、列表、删除、VO 转换及 RBAC 写权限。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
  */
@@ -34,27 +38,97 @@ class DocumentServiceImplTest {
     @Mock
     private DocumentMapper documentMapper;
 
+    @Mock
+    private KnowledgeBaseService knowledgeBaseService;
+
+    @Mock
+    private AiServiceClient aiServiceClient;
+
     private DocumentServiceImpl documentService;
 
     @BeforeEach
     void setUp() {
         documentService = new DocumentServiceImpl();
         ReflectionTestUtils.setField(documentService, "baseMapper", documentMapper);
+        ReflectionTestUtils.setField(documentService, "knowledgeBaseService", knowledgeBaseService);
+        ReflectionTestUtils.setField(documentService, "aiServiceClient", aiServiceClient);
+    }
+
+    private User user(Long id, String role) {
+        User u = new User();
+        u.setId(id);
+        u.setTenantId(10L);
+        u.setRole(role);
+        return u;
+    }
+
+    private KnowledgeBase kb(Long id, String scope, Long ownerId, Long tenantId) {
+        KnowledgeBase kb = new KnowledgeBase();
+        kb.setId(id);
+        kb.setScope(scope);
+        kb.setOwnerId(ownerId);
+        kb.setTenantId(tenantId);
+        return kb;
     }
 
     // ==================== 上传文档 ====================
 
     @Test
-    void uploadDocument_success() {
+    void uploadDocument_personalOwner_success() {
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
         doAnswer(inv -> {
             inv.getArgument(0, Document.class).setId(200L);
             return 1;
         }).when(documentMapper).insert(any(Document.class));
 
-        Long docId = documentService.uploadDocument(1L, 10L, 100L, "test.pdf", "pdf", 1024L, "/uploads/test.pdf");
+        Long docId = documentService.uploadDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE),
+                "test.pdf", "pdf", 1024L, "/uploads/test.pdf");
         assertEquals(200L, docId);
-
         verify(documentMapper).insert(any(Document.class));
+    }
+
+    @Test
+    void uploadDocument_personalNotOwner_denied() {
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 999L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.uploadDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE),
+                        "test.pdf", "pdf", 1024L, "/uploads/test.pdf"));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void uploadDocument_sharedAsTenantAdmin_success() {
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 10L));
+        doAnswer(inv -> {
+            inv.getArgument(0, Document.class).setId(201L);
+            return 1;
+        }).when(documentMapper).insert(any(Document.class));
+
+        Long docId = documentService.uploadDocument(1L, 10L, user(100L, UserConstant.TENANT_ADMIN_ROLE),
+                "test.pdf", "pdf", 1024L, "/uploads/test.pdf");
+        assertEquals(201L, docId);
+    }
+
+    @Test
+    void uploadDocument_sharedAsMember_denied() {
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.uploadDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE),
+                        "test.pdf", "pdf", 1024L, "/uploads/test.pdf"));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void uploadDocument_tenantAdminCrossTenant_denied() {
+        // 租户 10 的 tenant_admin 不能写租户 99 的共享库（对齐 WeKnora own-KB 判定）
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 99L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.uploadDocument(1L, 10L, user(100L, UserConstant.TENANT_ADMIN_ROLE),
+                        "test.pdf", "pdf", 1024L, "/uploads/test.pdf"));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
     }
 
     // ==================== 列表查询 ====================
@@ -81,14 +155,40 @@ class DocumentServiceImplTest {
     // ==================== 删除文档 ====================
 
     @Test
-    void deleteDocument_success() {
+    void deleteDocument_personalOwner_success() {
         Document doc = buildDoc(1L, "test.pdf", "pdf", "ready");
+        doc.setKbId(1L);
         when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
         when(documentMapper.deleteById(1L)).thenReturn(1);
 
-        boolean result = documentService.deleteDocument(1L, 10L);
+        boolean result = documentService.deleteDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
         assertTrue(result);
         verify(documentMapper).deleteById(1L);
+    }
+
+    @Test
+    void deleteDocument_sharedAsTenantAdmin_success() {
+        Document doc = buildDoc(1L, "test.pdf", "pdf", "ready");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 10L));
+        when(documentMapper.deleteById(1L)).thenReturn(1);
+
+        boolean result = documentService.deleteDocument(1L, 10L, user(100L, UserConstant.TENANT_ADMIN_ROLE));
+        assertTrue(result);
+    }
+
+    @Test
+    void deleteDocument_personalNotOwner_denied() {
+        Document doc = buildDoc(1L, "test.pdf", "pdf", "ready");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 999L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.deleteDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
     }
 
     @Test
@@ -96,7 +196,7 @@ class DocumentServiceImplTest {
         when(documentMapper.selectById(999L)).thenReturn(null);
 
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> documentService.deleteDocument(999L, 10L));
+                () -> documentService.deleteDocument(999L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
         assertEquals(ErrorCode.NOT_FOUND_ERROR.getCode(), ex.getCode());
     }
 
@@ -107,7 +207,7 @@ class DocumentServiceImplTest {
         when(documentMapper.selectById(1L)).thenReturn(doc);
 
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> documentService.deleteDocument(1L, 10L));
+                () -> documentService.deleteDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
         assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
     }
 

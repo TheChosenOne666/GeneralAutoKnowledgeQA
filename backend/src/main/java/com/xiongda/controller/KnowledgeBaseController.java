@@ -58,7 +58,7 @@ public class KnowledgeBaseController {
     public BaseResponse<Long> addKnowledgeBase(@RequestBody KnowledgeBaseAddRequest request, HttpServletRequest httpRequest) {
         User loginUser = userService.getLoginUser(httpRequest);
         Long id = knowledgeBaseService.createKnowledgeBase(
-                loginUser.getTenantId(), loginUser.getId(),
+                loginUser.getTenantId(), loginUser,
                 request.getName(), request.getDescription(), request.getScope());
         return ResultUtils.success(id);
     }
@@ -92,7 +92,7 @@ public class KnowledgeBaseController {
 
         String fileType = getFileExtension(originalFilename);
         Long docId = documentService.uploadDocument(
-                kbId, loginUser.getTenantId(), loginUser.getId(),
+                kbId, loginUser.getTenantId(), loginUser,
                 originalFilename, fileType, file.getSize(), filePath.toString());
 
         // 异步调用 Python AI 服务处理文档（提取文本 → 分块）
@@ -108,7 +108,7 @@ public class KnowledgeBaseController {
     @PostMapping("/document/delete")
     public BaseResponse<Boolean> deleteDocument(@RequestBody DeleteRequest deleteRequest, HttpServletRequest request) {
         User loginUser = userService.getLoginUser(request);
-        boolean result = documentService.deleteDocument(deleteRequest.getId(), loginUser.getTenantId());
+        boolean result = documentService.deleteDocument(deleteRequest.getId(), loginUser.getTenantId(), loginUser);
         return ResultUtils.success(result);
     }
 
