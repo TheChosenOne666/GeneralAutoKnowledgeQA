@@ -1,6 +1,6 @@
 /** 应用布局 — 左侧边栏 + 主内容区（按设计稿 SVG 图标）。*/
 
-import { Fragment, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { ChatProvider, useChat } from '@/context/ChatContext'
@@ -29,25 +29,6 @@ const ROLE_LABELS: Record<string, string> = {
   member: '普通成员',
 }
 
-/** 按更新时间分组：今天 / 近7天 / 更早。*/
-function groupLabel(time?: string): string {
-  if (!time) return '更早'
-  const d = new Date(time).getTime()
-  if (Number.isNaN(d)) return '更早'
-  const diffDays = (Date.now() - d) / 86_400_000
-  if (diffDays < 1) return '今天'
-  if (diffDays < 7) return '近7天'
-  return '更早'
-}
-
-/** 时间范围筛选选项。*/
-interface TimeFilter {
-  key: string
-  label: string
-  /** 判定会话更新时间是否落在选定范围内。*/
-  test: (updateTime: string) => boolean
-}
-
 const DAY = 86_400_000
 
 /** 取某天的 0 点（本地时区）。*/
@@ -57,49 +38,48 @@ function startOfDay(d: Date): Date {
   return x
 }
 
-/** 月数 → 筛选标签（1年内 / 1年1个月内 / 2年内）。*/
-function monthLabel(m: number): string {
-  if (m === 12) return '1年内'
-  if (m === 24) return '2年内'
-  if (m < 12) return `${m}个月内`
-  return `1年${m - 12}个月内`
+/** 历史记录分组定义（从新到旧），collapsible 为 true 表示默认折叠、可展开。*/
+interface HistoryGroupDef {
+  key: string
+  label: string
+  collapsible: boolean
 }
 
-/** 构建历史记录的时间范围筛选选项（今天/昨天/近3天/近7天/按月累计至2年内）。*/
-function buildTimeFilters(): TimeFilter[] {
+/** 根据更新时间归入唯一分组（互斥，避免同一会话重复出现于多个分组）。*/
+function historyGroupOf(time?: string): string {
+  if (!time) return 'older'
+  const t = new Date(time).getTime()
+  if (Number.isNaN(t)) return 'older'
   const now = new Date()
   const today0 = startOfDay(now)
   const yesterday0 = startOfDay(new Date(now.getTime() - DAY))
-  const daysAgo = (n: number) => new Date(today0.getTime() - n * DAY)
+  const daysAgo = (n: number) => new Date(today0.getTime() - n * DAY).getTime()
   const monthsAgo = (n: number) => {
     const d = new Date()
     d.setMonth(d.getMonth() - n)
-    return d
+    return d.getTime()
   }
-  const filters: TimeFilter[] = [
-    { key: 'all', label: '全部', test: () => true },
-    { key: 'today', label: '今天', test: (t) => new Date(t).getTime() >= today0.getTime() },
-    {
-      key: 'yesterday',
-      label: '昨天',
-      test: (t) => {
-        const d = new Date(t).getTime()
-        return d >= yesterday0.getTime() && d < today0.getTime()
-      },
-    },
-    { key: 'last3', label: '近3天', test: (t) => new Date(t).getTime() >= daysAgo(2).getTime() },
-    { key: 'last7', label: '近7天', test: (t) => new Date(t).getTime() >= daysAgo(6).getTime() },
-  ]
-  for (let m = 1; m <= 24; m++) {
-    const threshold = monthsAgo(m)
-    filters.push({
-      key: `m${m}`,
-      label: monthLabel(m),
-      test: (t) => new Date(t).getTime() >= threshold.getTime(),
-    })
-  }
-  return filters
+  if (t >= today0.getTime()) return 'today'
+  if (t >= yesterday0.getTime()) return 'yesterday'
+  if (t >= daysAgo(2)) return 'last3'
+  if (t >= daysAgo(6)) return 'last7'
+  if (t >= monthsAgo(1)) return 'm1'
+  if (t >= monthsAgo(3)) return 'm3'
+  if (t >= monthsAgo(6)) return 'm6'
+  return 'older'
 }
+
+/** 历史记录分组顺序与展示（7 天以上默认折叠）。*/
+const HISTORY_GROUPS: HistoryGroupDef[] = [
+  { key: 'today', label: '今天', collapsible: false },
+  { key: 'yesterday', label: '昨天', collapsible: false },
+  { key: 'last3', label: '近3天', collapsible: false },
+  { key: 'last7', label: '近7天', collapsible: false },
+  { key: 'm1', label: '近1个月内', collapsible: true },
+  { key: 'm3', label: '近3个月内', collapsible: true },
+  { key: 'm6', label: '近半年内', collapsible: true },
+  { key: 'older', label: '更早', collapsible: true },
+]
 
 export default function AppLayout() {
   return (
@@ -116,22 +96,17 @@ function AppLayoutInner() {
   const { conversations, activeId, setActiveId, refresh } = useChat()
   const isChat = location.pathname === '/chat' || location.pathname.startsWith('/chat/')
 
-  const timeFilters = useMemo(buildTimeFilters, [])
-  const [timeFilter, setTimeFilter] = useState('all')
-
-  const filtered = useMemo(() => {
-    const f = timeFilters.find((x) => x.key === timeFilter) ?? timeFilters[0]
-    return conversations.filter((c) => f.test(c.updateTime || ''))
-  }, [conversations, timeFilter, timeFilters])
-
+  // 按时间分组（仅展示有会话的分组，顺序见 HISTORY_GROUPS），7 天以上默认折叠
   const grouped = useMemo(() => {
     const map: Record<string, Conversation[]> = {}
-    for (const c of filtered) {
-      const g = groupLabel(c.updateTime)
+    for (const c of conversations) {
+      const g = historyGroupOf(c.updateTime)
       ;(map[g] ||= []).push(c)
     }
-    return Object.entries(map)
-  }, [filtered])
+    return HISTORY_GROUPS.filter((grp) => (map[grp.key]?.length ?? 0) > 0).map(
+      (grp) => [grp, map[grp.key]] as const,
+    )
+  }, [conversations])
 
   const handleLogout = () => {
     logout()
@@ -217,69 +192,21 @@ function AppLayoutInner() {
                 </svg>
               </button>
             </div>
-            <div className="px-3 pt-1">
-              <select
-                value={timeFilter}
-                onChange={(e) => setTimeFilter(e.target.value)}
-                className="w-full text-xs text-slate-600 bg-emerald-50/60 border border-emerald-200 rounded-lg px-2 py-1.5 outline-none focus:border-brand-400 cursor-pointer"
-              >
-                {timeFilters.map((f) => (
-                  <option key={f.key} value={f.key}>
-                    {f.label}
-                  </option>
-                ))}
-              </select>
-            </div>
             <div className="flex-1 overflow-y-auto px-3 pb-3">
-              {filtered.length === 0 ? (
-                <p className="text-xs text-slate-400 px-2 pt-2">
-                  {conversations.length === 0 ? '暂无对话，发送消息开始新会话' : '该时间范围内暂无对话'}
-                </p>
+              {conversations.length === 0 ? (
+                <p className="text-xs text-slate-400 px-2 pt-2">暂无对话，发送消息开始新会话</p>
               ) : (
-                grouped.map(([group, items]) => (
-                  <Fragment key={group}>
-                    <div className="text-xs text-slate-400 mb-2 mt-2 px-2 first:mt-0">{group}</div>
-                    <div className="space-y-1">
-                      {items.map((c) => (
-                        <div
-                          key={c.id}
-                          className={`group/item relative flex items-center rounded-lg transition ${
-                            activeId === c.id ? 'bg-emerald-50' : 'hover:bg-slate-50'
-                          }`}
-                        >
-                          <button
-                            onClick={() => setActiveId(c.id)}
-                            className={`flex-1 text-left px-3 py-2 text-sm truncate ${
-                              activeId === c.id ? 'text-emerald-700 font-medium' : 'text-slate-600'
-                            }`}
-                            title={c.title}
-                          >
-                            {c.title}
-                          </button>
-                          <div className="hidden group-hover/item:flex items-center gap-0.5 pr-1.5">
-                            <button
-                              onClick={() => handleRename(c)}
-                              className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-100 transition"
-                              title="重命名"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 3h4.75" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={() => handleDelete(c)}
-                              className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 transition"
-                              title="删除"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </Fragment>
+                grouped.map(([grp, items]) => (
+                  <HistoryGroup
+                    key={grp.key}
+                    label={grp.label}
+                    collapsible={grp.collapsible}
+                    items={items}
+                    activeId={activeId}
+                    onSelect={(id) => setActiveId(id)}
+                    onRename={handleRename}
+                    onDelete={handleDelete}
+                  />
                 ))
               )}
             </div>
@@ -312,6 +239,119 @@ function AppLayoutInner() {
       {/* 主内容区 */}
       <div className="flex-1 overflow-hidden bg-emerald-50/30">
         <Outlet />
+      </div>
+    </div>
+  )
+}
+
+/** 历史记录分组：标题灰色；collapsible 为 true 时显示箭头、默认折叠，点击展开。*/
+function HistoryGroup({
+  label,
+  collapsible,
+  items,
+  activeId,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  label: string
+  collapsible: boolean
+  items: Conversation[]
+  activeId: string | null
+  onSelect: (id: string) => void
+  onRename: (c: Conversation) => void
+  onDelete: (c: Conversation) => void
+}) {
+  const [open, setOpen] = useState(!collapsible)
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => collapsible && setOpen((v) => !v)}
+        className={`w-full flex items-center gap-1 text-xs text-slate-400 mb-2 mt-2 px-2 first:mt-0 ${
+          collapsible ? 'cursor-pointer hover:text-slate-500' : 'cursor-default'
+        }`}
+      >
+        {collapsible && (
+          <svg
+            className={`w-3 h-3 transition-transform ${open ? 'rotate-90' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+        )}
+        <span>{label}</span>
+        {collapsible && <span className="text-slate-300">（{items.length}）</span>}
+      </button>
+      {open && (
+        <div className="space-y-1">
+          {items.map((c) => (
+            <ConvItem
+              key={c.id}
+              c={c}
+              active={activeId === c.id}
+              onSelect={onSelect}
+              onRename={onRename}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 单条会话项（标题 + 悬停重命名/删除）。*/
+function ConvItem({
+  c,
+  active,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  c: Conversation
+  active: boolean
+  onSelect: (id: string) => void
+  onRename: (c: Conversation) => void
+  onDelete: (c: Conversation) => void
+}) {
+  return (
+    <div
+      className={`group/item relative flex items-center rounded-lg transition ${
+        active ? 'bg-emerald-50' : 'hover:bg-slate-50'
+      }`}
+    >
+      <button
+        onClick={() => onSelect(c.id)}
+        className={`flex-1 text-left px-3 py-2 text-sm truncate ${
+          active ? 'text-emerald-700 font-medium' : 'text-slate-600'
+        }`}
+        title={c.title}
+      >
+        {c.title}
+      </button>
+      <div className="hidden group-hover/item:flex items-center gap-0.5 pr-1.5">
+        <button
+          onClick={() => onRename(c)}
+          className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-100 transition"
+          title="重命名"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 3h4.75" />
+          </svg>
+        </button>
+        <button
+          onClick={() => onDelete(c)}
+          className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 transition"
+          title="删除"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+          </svg>
+        </button>
       </div>
     </div>
   )
