@@ -94,6 +94,7 @@ export interface ChatHistoryItem {
 export interface AIConfig {
   llmProvider: string | null
   llmModel: string | null
+  llmModels: string[]
   llmBaseUrl: string | null
   llmTemperature: number | null
   llmMaxTokens: number | null
@@ -110,6 +111,7 @@ export interface AIConfig {
 export interface AIConfigUpdateRequest {
   llmProvider?: string | null
   llmModel?: string | null
+  llmModels?: string[] | null
   llmApiKey?: string | null
   llmBaseUrl?: string | null
   llmTemperature?: number | null

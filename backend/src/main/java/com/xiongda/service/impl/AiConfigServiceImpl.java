@@ -2,6 +2,8 @@ package com.xiongda.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiongda.mapper.AiConfigMapper;
 import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.AiConfig;
@@ -10,6 +12,8 @@ import com.xiongda.service.AiConfigService;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+
 /**
  * AI 配置服务实现。
  *
@@ -17,6 +21,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> implements AiConfigService {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Override
     public AiConfigVO getConfig(Long tenantId, Long userId) {
@@ -49,6 +55,17 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         if (StringUtils.isNotBlank(req.getLlmBaseUrl())) config.setLlmBaseUrl(req.getLlmBaseUrl());
         if (req.getLlmTemperature() != null) config.setLlmTemperature(req.getLlmTemperature());
         if (req.getLlmMaxTokens() != null) config.setLlmMaxTokens(req.getLlmMaxTokens());
+        if (req.getLlmModels() != null) {
+            try {
+                config.setLlmModels(OBJECT_MAPPER.writeValueAsString(req.getLlmModels()));
+            } catch (Exception e) {
+                config.setLlmModels(null);
+            }
+            // 默认模型（llmModel）为空时，取多模型列表第一项作为默认选中
+            if (StringUtils.isBlank(config.getLlmModel()) && !req.getLlmModels().isEmpty()) {
+                config.setLlmModel(req.getLlmModels().get(0));
+            }
+        }
         if (StringUtils.isNotBlank(req.getEmbeddingProvider())) config.setEmbeddingProvider(req.getEmbeddingProvider());
         if (StringUtils.isNotBlank(req.getEmbeddingModel())) config.setEmbeddingModel(req.getEmbeddingModel());
         if (StringUtils.isNotBlank(req.getEmbeddingApiKey())) config.setEmbeddingApiKey(req.getEmbeddingApiKey());
@@ -87,6 +104,17 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         vo.setLlmBaseUrl(config.getLlmBaseUrl());
         vo.setLlmTemperature(config.getLlmTemperature());
         vo.setLlmMaxTokens(config.getLlmMaxTokens());
+        // 多模型列表：JSON 反序列化为 List；解析失败或无值返回空列表，避免前端 NPE
+        if (config.getLlmModels() != null && !config.getLlmModels().isBlank()) {
+            try {
+                vo.setLlmModels(OBJECT_MAPPER.readValue(
+                        config.getLlmModels(), new TypeReference<List<String>>() {}));
+            } catch (Exception e) {
+                vo.setLlmModels(List.of());
+            }
+        } else {
+            vo.setLlmModels(List.of());
+        }
         vo.setEmbeddingProvider(config.getEmbeddingProvider());
         vo.setEmbeddingModel(config.getEmbeddingModel());
         vo.setEmbeddingBaseUrl(config.getEmbeddingBaseUrl());

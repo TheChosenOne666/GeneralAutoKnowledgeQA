@@ -7,6 +7,17 @@ import type { AIConfig, AIConfigUpdateRequest } from '@/types'
 const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek']
 const EMBEDDING_PROVIDERS = ['火山方舟', 'OpenAI', 'BGE']
 
+/** 选择厂商后自动填充的默认 endpoint / 温度 / 维度（用户可手动改）。*/
+const PROVIDER_DEFAULTS: Record<
+  string,
+  { llmBaseUrl?: string; llmTemperature?: string; llmMaxTokens?: string; embeddingBaseUrl?: string; embeddingDimension?: string }
+> = {
+  '火山方舟': { llmBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3', embeddingDimension: '2560' },
+  'OpenAI': { llmBaseUrl: 'https://api.openai.com/v1', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: 'https://api.openai.com/v1', embeddingDimension: '1536' },
+  'DeepSeek': { llmBaseUrl: 'https://api.deepseek.com/v1', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: '', embeddingDimension: '' },
+  'BGE': { llmBaseUrl: '', llmTemperature: '', llmMaxTokens: '', embeddingBaseUrl: 'https://api.siliconflow.cn/v1', embeddingDimension: '1024' },
+}
+
 /** 表单状态（含 API Key 明文，仅用户主动输入时提交；留空不覆盖已存密钥）。*/
 interface FormState {
   llmProvider: string
@@ -15,6 +26,7 @@ interface FormState {
   llmBaseUrl: string
   llmTemperature: string
   llmMaxTokens: string
+  llmModels: string[]
   embeddingProvider: string
   embeddingModel: string
   embeddingApiKey: string
@@ -29,6 +41,7 @@ const EMPTY_FORM: FormState = {
   llmBaseUrl: '',
   llmTemperature: '',
   llmMaxTokens: '',
+  llmModels: [],
   embeddingProvider: '',
   embeddingModel: '',
   embeddingApiKey: '',
@@ -46,6 +59,7 @@ function toForm(cfg: AIConfig | null): FormState {
     llmBaseUrl: cfg.llmBaseUrl ?? '',
     llmTemperature: cfg.llmTemperature != null ? String(cfg.llmTemperature) : '',
     llmMaxTokens: cfg.llmMaxTokens != null ? String(cfg.llmMaxTokens) : '',
+    llmModels: cfg.llmModels ?? [],
     embeddingProvider: cfg.embeddingProvider ?? '',
     embeddingModel: cfg.embeddingModel ?? '',
     embeddingApiKey: '',
@@ -63,6 +77,7 @@ function toRequest(f: FormState): AIConfigUpdateRequest {
     llmBaseUrl: f.llmBaseUrl || null,
     llmTemperature: f.llmTemperature ? Number(f.llmTemperature) : null,
     llmMaxTokens: f.llmMaxTokens ? Number(f.llmMaxTokens) : null,
+    llmModels: f.llmModels,
     embeddingProvider: f.embeddingProvider || null,
     embeddingModel: f.embeddingModel || null,
     embeddingApiKey: f.embeddingApiKey || null,
@@ -171,6 +186,44 @@ export default function AIConfigPage() {
 
   const set = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }))
 
+  /** 待添加的额外模型输入框。*/
+  const [newModel, setNewModel] = useState('')
+
+  /** 切换 LLM 厂商时自动填充其默认 endpoint / 温度 / 最大 Token（用户可手动改）。*/
+  const applyLlmProviderDefaults = (v: string) => {
+    const d = PROVIDER_DEFAULTS[v] ?? {}
+    set({
+      llmProvider: v,
+      llmBaseUrl: d.llmBaseUrl ?? form.llmBaseUrl,
+      llmTemperature: d.llmTemperature ?? form.llmTemperature,
+      llmMaxTokens: d.llmMaxTokens ?? form.llmMaxTokens,
+    })
+  }
+
+  /** 切换 Embedding 厂商时自动填充其默认 endpoint / 向量维度（用户可手动改）。*/
+  const applyEmbeddingProviderDefaults = (v: string) => {
+    const d = PROVIDER_DEFAULTS[v] ?? {}
+    set({
+      embeddingProvider: v,
+      embeddingBaseUrl: d.embeddingBaseUrl ?? form.embeddingBaseUrl,
+      embeddingDimension: d.embeddingDimension ?? form.embeddingDimension,
+    })
+  }
+
+  /** 将输入框中的模型名加入多模型列表（去重、去空）。*/
+  const addModel = () => {
+    const m = newModel.trim()
+    if (!m || form.llmModels.includes(m)) {
+      setNewModel('')
+      return
+    }
+    set({ llmModels: [...form.llmModels, m] })
+    setNewModel('')
+  }
+
+  /** 从多模型列表移除指定模型。*/
+  const removeModel = (m: string) => set({ llmModels: form.llmModels.filter((x) => x !== m) })
+
   const handleSave = async () => {
     setSaving(true)
     setFeedback(null)
@@ -241,8 +294,52 @@ export default function AIConfigPage() {
           <div className="bg-white border border-emerald-100 rounded-2xl p-6">
             <CardHeader icon={LLM_ICON} title="LLM 大语言模型" />
             <div className="space-y-3">
-              <ProviderSelect label="提供商" value={form.llmProvider} options={LLM_PROVIDERS} onChange={(v) => set({ llmProvider: v })} />
+              <ProviderSelect label="提供商" value={form.llmProvider} options={LLM_PROVIDERS} onChange={applyLlmProviderDefaults} />
               <Field label="模型" value={form.llmModel} onChange={(v) => set({ llmModel: v })} placeholder="doubao-pro" />
+              <div className="pt-1">
+                <label className="block text-xs text-slate-500 mb-1">更多模型（可选，对话时可切换）</label>
+                <div className="flex gap-2">
+                  <input
+                    value={newModel}
+                    onChange={(e) => setNewModel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        addModel()
+                      }
+                    }}
+                    placeholder="如 deepseek-r1"
+                    className="flex-1 px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={addModel}
+                    className="px-3 py-2 rounded-lg bg-brand-50 text-brand-700 text-sm font-medium border border-emerald-200 hover:bg-emerald-100 transition"
+                  >
+                    添加
+                  </button>
+                </div>
+                {form.llmModels.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {form.llmModels.map((m) => (
+                      <span
+                        key={m}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 text-brand-700 text-xs font-medium border border-emerald-200"
+                      >
+                        {m}
+                        <button
+                          type="button"
+                          onClick={() => removeModel(m)}
+                          className="text-brand-500 hover:text-red-500"
+                          aria-label={`移除 ${m}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
               <Field label="API Key" type="password" value={form.llmApiKey} onChange={(v) => set({ llmApiKey: v })} placeholder={config?.llmProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
               <Field label="API Endpoint" value={form.llmBaseUrl} onChange={(v) => set({ llmBaseUrl: v })} placeholder="https://ark.cn-beijing.volces.com/api/v3" />
               <Field label="温度" type="number" value={form.llmTemperature} onChange={(v) => set({ llmTemperature: v })} placeholder="0.7" />
@@ -254,7 +351,7 @@ export default function AIConfigPage() {
           <div className="bg-white border border-emerald-100 rounded-2xl p-6">
             <CardHeader icon={EMBEDDING_ICON} title="Embedding 向量化模型" />
             <div className="space-y-3">
-              <ProviderSelect label="提供商" value={form.embeddingProvider} options={EMBEDDING_PROVIDERS} onChange={(v) => set({ embeddingProvider: v })} />
+              <ProviderSelect label="提供商" value={form.embeddingProvider} options={EMBEDDING_PROVIDERS} onChange={applyEmbeddingProviderDefaults} />
               <Field label="模型" value={form.embeddingModel} onChange={(v) => set({ embeddingModel: v })} placeholder="doubao-embedding" />
               <Field label="API Key" type="password" value={form.embeddingApiKey} onChange={(v) => set({ embeddingApiKey: v })} placeholder={config?.embeddingProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
               <Field label="API Endpoint" value={form.embeddingBaseUrl} onChange={(v) => set({ embeddingBaseUrl: v })} placeholder="https://ark.cn-beijing.volces.com/api/v3" />

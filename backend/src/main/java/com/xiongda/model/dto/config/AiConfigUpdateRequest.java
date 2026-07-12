@@ -3,6 +3,7 @@ package com.xiongda.model.dto.config;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.util.List;
 
 /**
  * AI 配置更新请求。
@@ -18,6 +19,8 @@ public class AiConfigUpdateRequest implements Serializable {
     private String llmBaseUrl;
     private Double llmTemperature;
     private Integer llmMaxTokens;
+
+    private List<String> llmModels;
 
     private String embeddingProvider;
     private String embeddingModel;

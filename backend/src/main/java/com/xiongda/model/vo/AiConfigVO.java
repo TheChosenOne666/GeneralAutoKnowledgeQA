@@ -3,6 +3,7 @@ package com.xiongda.model.vo;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.util.List;
 
 /**
  * AI 配置视图对象（不含 API Key 明文）。
@@ -18,6 +19,11 @@ public class AiConfigVO implements Serializable {
     private String llmBaseUrl;
     private Double llmTemperature;
     private Integer llmMaxTokens;
+
+    /**
+     * LLM 多模型列表（可选，对话页下拉切换；llmModel 为默认选中）。
+     */
+    private List<String> llmModels = List.of();
 
     // Embedding
     private String embeddingProvider;

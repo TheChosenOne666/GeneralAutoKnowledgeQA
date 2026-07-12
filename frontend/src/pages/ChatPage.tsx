@@ -1,6 +1,6 @@
 /** 问答页 — 左侧会话历史（AppLayout）+ 右侧问答区（按用户截图）。 */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -83,11 +83,33 @@ export default function ChatPage() {
   // 模型配置「填了但填错」（API Key/模型名等运行时错误），由 Python 的 error 事件触发
   const [modelConfigError, setModelConfigError] = useState(false)
 
+  // 对话模型下拉：从 AI 配置读取可选模型并支持切换
+  const [aiConfig, setAiConfig] = useState<AIConfig | null>(null)
+  const [selectedModel, setSelectedModel] = useState('')
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+
+  /** 配置中可用的 LLM 模型（去重：默认模型 + 多模型列表）。*/
+  const availableModels = useMemo(() => {
+    if (!aiConfig) return []
+    const set = new Set<string>()
+    if (aiConfig.llmModel) set.add(aiConfig.llmModel)
+    aiConfig.llmModels?.forEach((m) => set.add(m))
+    return Array.from(set)
+  }, [aiConfig])
+
+  // 可选模型变化且当前选中项不在列表中时，自动选中第一项
+  useEffect(() => {
+    if (availableModels.length > 0 && !availableModels.includes(selectedModel)) {
+      setSelectedModel(availableModels[0])
+    }
+  }, [availableModels, selectedModel])
+
   // 进入问答页即拉取 AI 配置，判定 LLM / Embedding 是否缺失并常驻提示
   useEffect(() => {
     aiConfigApi
       .getConfig()
       .then((cfg) => {
+        setAiConfig(cfg)
         const missing: ('llm' | 'embedding')[] = []
         if (!isModelConfigured(cfg, 'llm')) missing.push('llm')
         if (!isModelConfigured(cfg, 'embedding')) missing.push('embedding')
@@ -154,7 +176,13 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
 
     try {
-      const reader = await chatApi.streamChat(text, conversationId || undefined, history, controller.signal)
+      const reader = await chatApi.streamChat(
+        text,
+        conversationId || undefined,
+        history,
+        controller.signal,
+        selectedModel || undefined,
+      )
       const decoder = new TextDecoder()
       let buffer = ''
       let aiContent = ''
@@ -402,14 +430,39 @@ export default function ChatPage() {
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                {/* 模型选择 */}
-                <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-slate-600 text-xs font-medium hover:bg-emerald-50 hover:text-brand-700 cursor-pointer transition">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  deepseek-v3.2
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                  </svg>
-                </button>
+                {/* 模型选择（动态载入已配置模型，可切换） */}
+                {availableModels.length > 0 && (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setModelMenuOpen((v) => !v)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-slate-600 text-xs font-medium hover:bg-emerald-50 hover:text-brand-700 cursor-pointer transition"
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      {selectedModel || '选择模型'}
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                      </svg>
+                    </button>
+                    {modelMenuOpen && (
+                      <div className="absolute bottom-full mb-2 right-0 w-44 rounded-xl border border-emerald-200 bg-white shadow-lg py-1 z-20">
+                        {availableModels.map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => {
+                              setSelectedModel(m)
+                              setModelMenuOpen(false)
+                            }}
+                            className={`w-full text-left px-3 py-2 text-xs hover:bg-emerald-50 ${m === selectedModel ? 'text-brand-700 font-semibold' : 'text-slate-600'}`}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {streaming ? (
                   <button
                     onClick={() => abortRef.current?.abort()}

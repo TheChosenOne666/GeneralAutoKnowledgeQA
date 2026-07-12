@@ -51,6 +51,7 @@ CREATE TABLE ai_config (
     llm_base_url VARCHAR(500),
     llm_temperature DOUBLE PRECISION,
     llm_max_tokens INTEGER,
+    llm_models VARCHAR(1000),
     embedding_provider VARCHAR(50),
     embedding_model VARCHAR(100),
     embedding_api_key VARCHAR(500),

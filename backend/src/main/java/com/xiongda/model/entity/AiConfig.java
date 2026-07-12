@@ -34,6 +34,12 @@ public class AiConfig implements Serializable {
     private Double llmTemperature;
     private Integer llmMaxTokens;
 
+    /**
+     * LLM 多模型列表（JSON 数组字符串，如 ["deepseek-v3","deepseek-r1"]）。
+     * llmModel 为默认选中的模型；llmModels 为对话页下拉可切换的全部模型。
+     */
+    private String llmModels;
+
     // Embedding
     private String embeddingProvider;
     private String embeddingModel;
