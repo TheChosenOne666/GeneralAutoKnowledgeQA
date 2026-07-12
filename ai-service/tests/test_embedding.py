@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 import httpx
+import json
 
 from services.embedding import EmbeddingService, get_redis
 from services.model_config import ModelConfig, ModelConfigError
@@ -75,6 +76,70 @@ class EmbeddingServiceTest(unittest.TestCase):
         client = self._client([[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]])
         with self.assertRaises(ModelConfigError):
             asyncio.run(self.svc.embed_batch(["a", "b"], cfg, client))
+
+    def _client_with_capture(self, captured):
+        """记录每次请求 path/body 的 Mock 客户端；多模态端点返回对象结构，
+        标准端点返回数组结构（对齐火山方舟真实响应）。"""
+        vec = [0.1, 0.2, 0.3, 0.4]
+
+        def handler(request):
+            captured.setdefault("requests", []).append(
+                {"path": request.url.path, "body": json.loads(request.content)}
+            )
+            if "multimodal" in request.url.path:
+                return httpx.Response(200, json={"data": {"embedding": vec}})
+            return httpx.Response(200, json={"data": [{"embedding": vec, "index": 0}]})
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    def test_multimodal_embed_text_endpoint_and_format(self):
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_model="doubao-embedding-vision-251215",
+            embedding_base_url="https://ark.example.com/api/v3",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        v = asyncio.run(self.svc.embed_text("hello", cfg, client))
+        self.assertEqual(len(v), 4)
+        self.assertEqual(len(captured["requests"]), 1)
+        req = captured["requests"][0]
+        self.assertEqual(req["path"], "/api/v3/embeddings/multimodal")
+        self.assertEqual(req["body"]["input"], [{"type": "text", "text": "hello"}])
+        self.assertEqual(req["body"]["dimensions"], 4)
+
+    def test_multimodal_embed_batch_endpoint_and_format(self):
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_model="doubao-embedding-vision-251215",
+            embedding_base_url="https://ark.example.com/api/v3",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        vs = asyncio.run(self.svc.embed_batch(["a", "b"], cfg, client))
+        self.assertEqual(len(vs), 2)
+        self.assertEqual(len(captured["requests"]), 2)
+        for req in captured["requests"]:
+            self.assertEqual(req["path"], "/api/v3/embeddings/multimodal")
+            self.assertEqual(len(req["body"]["input"]), 1)
+            self.assertEqual(req["body"]["input"][0]["type"], "text")
+            self.assertEqual(req["body"]["dimensions"], 4)
+
+    def test_standard_embedding_endpoint_and_format(self):
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_model="text-embedding-3-small",
+            embedding_base_url="https://ark.example.com/api/v3",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        v = asyncio.run(self.svc.embed_text("hello", cfg, client))
+        self.assertEqual(len(v), 4)
+        self.assertEqual(captured["requests"][0]["path"], "/api/v3/embeddings")
+        self.assertEqual(captured["requests"][0]["body"]["input"], ["hello"])
 
 
 if __name__ == "__main__":

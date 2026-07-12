@@ -8,6 +8,7 @@ import json
 from typing import AsyncGenerator
 
 import httpx
+from loguru import logger
 
 from core.config import settings
 from services.model_config import ModelConfig, ModelConfigError
@@ -56,6 +57,9 @@ class LlmService:
 
         base_url = cfg.llm_base_url or settings.llm_base_url
         model_name = model or cfg.llm_model or settings.llm_model
+        _llm_key = cfg.llm_api_key or ""
+        _llm_tail = "***" + _llm_key[-4:] if _llm_key else "null"
+        logger.info(f"[M3-3诊断] LLM请求 base_url={base_url} model={model_name} key尾4={_llm_tail}")
         try:
             if client is None:
                 async with httpx.AsyncClient(timeout=60.0) as c:

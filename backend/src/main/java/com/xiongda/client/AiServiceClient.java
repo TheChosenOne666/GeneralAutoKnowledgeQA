@@ -91,6 +91,19 @@ public class AiServiceClient {
         requestBody.put("tenant_id", tenantId != null ? String.valueOf(tenantId) : "");
         requestBody.put("history", history != null ? history : List.of());
         requestBody.put("ai_config", aiConfig);
+        if (aiConfig != null) {
+            String llmKey = (String) aiConfig.get("llm_api_key");
+            String embKey = (String) aiConfig.get("embedding_api_key");
+            log.info("[M3-3诊断] 发往Python mode={} model={} llm_model={} embedding_model={} "
+                            + "llm_api_key尾4={} embedding_api_key尾4={} rerank_provider={}",
+                    mode, model, aiConfig.get("llm_model"), aiConfig.get("embedding_model"),
+                    llmKey != null ? "***" + llmKey.substring(Math.max(0, llmKey.length() - 4)) : "null",
+                    embKey != null ? "***" + embKey.substring(Math.max(0, embKey.length() - 4)) : "null",
+                    aiConfig.get("rerank_provider"));
+        } else {
+            log.warn("[M3-3诊断] 发往Python mode={} model={} ai_config=NULL，Python将走env兜底（易触发模型配置错误）",
+                    mode, model);
+        }
 
         return webClient.post()
                 .uri("/ai/chat/stream")

@@ -578,6 +578,19 @@ Python（AI 服务）
 
 **说明**：Java→Python 经 DB 配置的真实全链路（用户在前端配置→Java 读出→Python 识别）由用户网页手动配置后联调验证；M3-3 配置正确性检测逻辑已通过直接注入 `ai_config` 覆盖。
 
+**Bug 修复（2026-07-12，多模态 Embedding 端点适配）**
+
+- **现象**：用户用火山方舟 `doubao-embedding-vision-251215` 作 Embedding 模型时，提问/上传文档均报 `400 Bad Request ... does not support this api`，前端提示"模型配置不正确"。
+- **根因**：火山方舟多模态 Embedding 模型**不走标准 OpenAI 兼容 `/embeddings` 接口**，而走专用端点 `/embeddings/multimodal`，且 `input` 必须为对象数组 `[{type:"text", text:"..."}]`（非字符串数组）；并支持 `dimensions` 参数（1024/2048 可选）。原 `embedding.py` 固定调 `/embeddings` + 字符串数组，故该模型 400。其它平台能跑通正是因为它们适配了多模态端点与格式（用户最初质疑"该模型支持文本、在别处能跑"完全成立）。
+- **修复（`services/embedding.py`）**：
+  - 新增 `_is_multimodal_embedding(model)`：`embedding-vision` 命中即判定多模态；
+  - 多模态分支走 `/embeddings/multimodal`，`input` 为单条文本对象；该端点对多条 input 会**把各向量拼接成一维返回、难以拆分**，故改为**逐条调用**（每条独立 POST）；
+  - 透传 `dimensions`（取配置的 `embedding_dimension`），实测 `dimensions:1024`→1024 维、`2048`→2048 维，**用户原配置无需改动**；
+  - 响应解析兼容多模态 `{"data": {"embedding": [...]}}`（dict）与标准 `[{embedding, index}]`（list）两种结构。
+- **单测（`tests/test_embedding.py`）**：新增多模态端点/input 格式/dimensions 透传断言（单条+批量）；ai-service 全量 **24 单测全过**。
+- **联调**：用库内真实配置真实调用 Ark，单条返回 **1024 维成功**、无 400；重启 8001 后 `POST /ai/chat/stream` 真实链路流式返回 token 直至 `done`，全程无 `MODEL_CONFIG_ERROR` / "Embedding 调用失败"。
+- 注：属 M3-3 正确性运行时检测框架下的具体 Bug 修复（端点/格式/维度适配），非新功能；前端错误提示与跳转逻辑不变。
+
 **M3-3 补充（2026-07-12 晚）：AI 配置厂商默认填充 + LLM 多模型**
 
 需求（用户提出）：① 选完厂商后自动填充 API Endpoint / 向量维度（用户可改）；② 配置页支持配置多个 LLM 模型；③ 对话输入框模型下拉从写死 `deepseek-v3.2` 改为动态载入已配置模型并可切换。

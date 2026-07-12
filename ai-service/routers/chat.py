@@ -45,7 +45,23 @@ async def chat_stream(body: ChatStreamRequest):
     async def event_generator():
         yield _sse("thinking", {"content": "正在思考..."})
 
+        logger.info(f"[M3-3诊断] 收到请求 mode={body.mode} kb_ids={body.kb_ids} "
+                    f"ai_config是否为空={body.ai_config is None}")
+        if body.ai_config:
+            logger.info(f"[M3-3诊断] 收到ai_config字段={list(body.ai_config.keys())} "
+                        f"llm_model={body.ai_config.get('llm_model')} "
+                        f"embedding_model={body.ai_config.get('embedding_model')} "
+                        f"rerank_provider={body.ai_config.get('rerank_provider')}")
+        else:
+            logger.warning("[M3-3诊断] ai_config为空，将走env兜底（易触发模型配置错误）")
+
         cfg = ModelConfig.from_dict(body.ai_config)
+        if cfg is None:
+            logger.warning("[M3-3诊断] ModelConfig为None，使用env兜底配置")
+        else:
+            logger.info(f"[M3-3诊断] ModelConfig已构建: llm={cfg.llm_provider}/{cfg.llm_model} "
+                        f"emb={cfg.embedding_provider}/{cfg.embedding_model} "
+                        f"has_llm_key={cfg.has_llm()} has_emb_key={cfg.has_embedding()}")
         context = ""
         sources = []
         if body.mode == "rag":

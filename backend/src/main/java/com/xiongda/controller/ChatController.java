@@ -130,8 +130,13 @@ public class ChatController {
         // 元素自动加 "data: " 前缀二次包装，破坏手写 event: 行。前端用 fetch+reader 手动按行解析，Content-Type
         // 不影响解析。
         // M3-3：拉取用户在界面配置的 AI 模型（含 API Key）透传给 Python，供其真正消费并识别模型配置错误。
-        Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(
-                aiConfigService.getRawConfig(loginUser.getTenantId(), loginUser.getId()));
+        com.xiongda.model.entity.AiConfig rawConfig =
+                aiConfigService.getRawConfig(loginUser.getTenantId(), loginUser.getId());
+        log.info("[M3-3诊断] 解析AI配置 tenantId={} userId={} rawConfigIsNull={}",
+                loginUser.getTenantId(), loginUser.getId(), rawConfig == null);
+        Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(rawConfig);
+        log.info("[M3-3诊断] 透传给Python的ai_config={}",
+                aiConfig == null ? "NULL(走env兜底)" : aiConfig.keySet());
         Flux<DataBuffer> upstream = aiServiceClient.chatStream(
                 req.getContent(),
                 convId,
