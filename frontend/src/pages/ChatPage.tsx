@@ -30,16 +30,16 @@ interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   sources?: SourceItem[]
-  /** 消息时间（MM-DD HH:mm），用于展示在用户消息下方。*/
+  /** 消息时间（YYYY-MM-DD HH:mm），用于展示在用户消息下方。*/
   time?: string
 }
 
-/** 将时间格式化为「MM-DD HH:mm」。*/
+/** 将时间格式化为「YYYY-MM-DD HH:mm」。*/
 function formatTime(input: string | Date): string {
   const d = typeof input === 'string' ? new Date(input) : input
   if (isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /** 解析后端以 JSON 字符串存储的来源（容错）。*/

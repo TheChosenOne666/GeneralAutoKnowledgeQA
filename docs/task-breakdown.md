@@ -944,4 +944,18 @@ M3 全部 ──→ M4-8 部署
 **验证**：Python 重启就绪（200）；直接打 `/ai/chat/stream` 问无关问题，SSE 事件为 `thinking/error/done`，无 `event: sources`（error 为探针假 Key 触发，与门槛无关）。前端无需改动（已按长度守卫）。
 **注意**：`retrieval_vector_min_relevance=0.30` 为默认保守值，若真实场景出现「该显示却没显示」，可在 `.env` 调低该值。
 
+### 10. 用户消息时间显示加年份（2026-07-13）
+**需求**：每条用户消息下方时间加上年份，便于跨年回溯。
+**改动**（`frontend/src/pages/ChatPage.tsx`）：`formatTime` 由 `MM-DD HH:mm` 调整为 `YYYY-MM-DD HH:mm`（年份来自 `getFullYear`）；同步更新 `ChatMessage.time` 字段注释。
+**验证**：`tsc --noEmit` 零错误，前端 dev server 在线（HMR 生效）。刷新会话后历史消息时间带年份显示。
+
+### 11. 历史记录时间范围筛选（2026-07-13）
+**需求**：左侧历史记录原仅有「今天/近7天/更早」分组，需支持更细的时间范围筛选——昨天、近3天、1个月内，更久远按每月跨度（2个月内…1年内），再继续 1年1个月、1年2个月…。
+**改动**（`frontend/src/components/AppLayout.tsx`）：
+- 新增 `TimeFilter` 接口与 `buildTimeFilters()`：生成 `全部 / 今天 / 昨天 / 近3天 / 近7天 / 1个月内…12个月内(1年内) / 1年1个月内…2年内` 共 30 个选项。今天/昨天按自然日 0 点边界；月级用 `setMonth(-n)` 滚动窗口（跨年自动处理）。
+- `AppLayoutInner` 新增 `timeFilter` 状态，`filtered` 先按选中范围过滤 `conversations`，`grouped` 再对过滤结果分组；空态区分「暂无对话」与「该时间范围内暂无对话」。
+- 在「历史记录」标题下方新增筛选 `<select>` 下拉，选中即实时过滤。
+**说明**：筛选为纯前端（对既有会话列表 `updateTime` 过滤），不改动后端接口；月级档位上限设为「2年内」（即 24 个月），更早的会话用「全部」查看。若需更长跨度可调整 `buildTimeFilters` 的循环上限。
+**验证**：`tsc --noEmit` 零错误、无 lint；前端类型检查与 dev server 均正常。
+
 

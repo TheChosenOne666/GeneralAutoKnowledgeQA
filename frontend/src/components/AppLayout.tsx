@@ -1,6 +1,6 @@
 /** 应用布局 — 左侧边栏 + 主内容区（按设计稿 SVG 图标）。*/
 
-import { Fragment, useMemo } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { ChatProvider, useChat } from '@/context/ChatContext'
@@ -40,6 +40,67 @@ function groupLabel(time?: string): string {
   return '更早'
 }
 
+/** 时间范围筛选选项。*/
+interface TimeFilter {
+  key: string
+  label: string
+  /** 判定会话更新时间是否落在选定范围内。*/
+  test: (updateTime: string) => boolean
+}
+
+const DAY = 86_400_000
+
+/** 取某天的 0 点（本地时区）。*/
+function startOfDay(d: Date): Date {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  return x
+}
+
+/** 月数 → 筛选标签（1年内 / 1年1个月内 / 2年内）。*/
+function monthLabel(m: number): string {
+  if (m === 12) return '1年内'
+  if (m === 24) return '2年内'
+  if (m < 12) return `${m}个月内`
+  return `1年${m - 12}个月内`
+}
+
+/** 构建历史记录的时间范围筛选选项（今天/昨天/近3天/近7天/按月累计至2年内）。*/
+function buildTimeFilters(): TimeFilter[] {
+  const now = new Date()
+  const today0 = startOfDay(now)
+  const yesterday0 = startOfDay(new Date(now.getTime() - DAY))
+  const daysAgo = (n: number) => new Date(today0.getTime() - n * DAY)
+  const monthsAgo = (n: number) => {
+    const d = new Date()
+    d.setMonth(d.getMonth() - n)
+    return d
+  }
+  const filters: TimeFilter[] = [
+    { key: 'all', label: '全部', test: () => true },
+    { key: 'today', label: '今天', test: (t) => new Date(t).getTime() >= today0.getTime() },
+    {
+      key: 'yesterday',
+      label: '昨天',
+      test: (t) => {
+        const d = new Date(t).getTime()
+        return d >= yesterday0.getTime() && d < today0.getTime()
+      },
+    },
+    { key: 'last3', label: '近3天', test: (t) => new Date(t).getTime() >= daysAgo(2).getTime() },
+    { key: 'last7', label: '近7天', test: (t) => new Date(t).getTime() >= daysAgo(6).getTime() },
+  ]
+  for (let m = 1; m <= 24; m++) {
+    const threshold = monthsAgo(m)
+    filters.push({
+      key: `m${m}`,
+      label: monthLabel(m),
+      test: (t) => new Date(t).getTime() >= threshold.getTime(),
+    })
+  }
+  return filters
+}
+
 export default function AppLayout() {
   return (
     <ChatProvider>
@@ -55,14 +116,22 @@ function AppLayoutInner() {
   const { conversations, activeId, setActiveId, refresh } = useChat()
   const isChat = location.pathname === '/chat' || location.pathname.startsWith('/chat/')
 
+  const timeFilters = useMemo(buildTimeFilters, [])
+  const [timeFilter, setTimeFilter] = useState('all')
+
+  const filtered = useMemo(() => {
+    const f = timeFilters.find((x) => x.key === timeFilter) ?? timeFilters[0]
+    return conversations.filter((c) => f.test(c.updateTime || ''))
+  }, [conversations, timeFilter, timeFilters])
+
   const grouped = useMemo(() => {
     const map: Record<string, Conversation[]> = {}
-    for (const c of conversations) {
+    for (const c of filtered) {
       const g = groupLabel(c.updateTime)
       ;(map[g] ||= []).push(c)
     }
     return Object.entries(map)
-  }, [conversations])
+  }, [filtered])
 
   const handleLogout = () => {
     logout()
@@ -148,9 +217,24 @@ function AppLayoutInner() {
                 </svg>
               </button>
             </div>
+            <div className="px-3 pt-1">
+              <select
+                value={timeFilter}
+                onChange={(e) => setTimeFilter(e.target.value)}
+                className="w-full text-xs text-slate-600 bg-emerald-50/60 border border-emerald-200 rounded-lg px-2 py-1.5 outline-none focus:border-brand-400 cursor-pointer"
+              >
+                {timeFilters.map((f) => (
+                  <option key={f.key} value={f.key}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="flex-1 overflow-y-auto px-3 pb-3">
-              {conversations.length === 0 ? (
-                <p className="text-xs text-slate-400 px-2 pt-2">暂无对话，发送消息开始新会话</p>
+              {filtered.length === 0 ? (
+                <p className="text-xs text-slate-400 px-2 pt-2">
+                  {conversations.length === 0 ? '暂无对话，发送消息开始新会话' : '该时间范围内暂无对话'}
+                </p>
               ) : (
                 grouped.map(([group, items]) => (
                   <Fragment key={group}>
