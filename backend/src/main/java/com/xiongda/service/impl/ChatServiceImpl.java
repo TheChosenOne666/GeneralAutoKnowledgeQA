@@ -19,6 +19,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,6 +85,11 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
                     vo.setContent((String) entry.get("content"));
                     vo.setSources((String) entry.get("sources"));
                     vo.setModel((String) entry.get("model"));
+                    // 缓存回放需携带 createTime，否则前端消息时间丢失
+                    Object ct = entry.get("createTime");
+                    if (ct instanceof Number) {
+                        vo.setCreateTime(new Date(((Number) ct).longValue()));
+                    }
                     vos.add(vo);
                 }
                 return vos;
@@ -100,7 +106,7 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
         // 回填 L3 会话缓存
         try {
             for (Message m : messages) {
-                cacheMessage(conversationId, m.getRole(), m.getContent(), m.getSources(), m.getModel());
+                cacheMessage(conversationId, m.getRole(), m.getContent(), m.getSources(), m.getModel(), m.getCreateTime());
             }
         } catch (Exception e) {
             log.warn("回填会话 Redis 缓存失败，忽略: {}", e.getMessage());
@@ -111,18 +117,17 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
     @Override
     public void saveUserMessage(Long conversationId, String content) {
         // 先写 Redis 会话缓存（带 TTL），再落库持久化
-        cacheMessage(conversationId, "user", content, null, null);
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole("user");
         message.setContent(content);
         messageMapper.insert(message);
+        cacheMessage(conversationId, "user", content, null, null, message.getCreateTime());
     }
 
     @Override
     public void saveAssistantMessage(Long conversationId, String content, String model, String sources) {
         // 先写 Redis 会话缓存（带 TTL），再落库持久化
-        cacheMessage(conversationId, "assistant", content, sources, model);
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole("assistant");
@@ -130,6 +135,7 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
         message.setModel(model);
         message.setSources(sources);
         messageMapper.insert(message);
+        cacheMessage(conversationId, "assistant", content, sources, model, message.getCreateTime());
     }
 
     @Override
@@ -164,7 +170,7 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
      * 写会话消息到 Redis 会话缓存（L3）：RPUSH + 保留最近 N 条 + 刷新 TTL。
      * Redis 不可用时忽略，不阻塞主流程。
      */
-    private void cacheMessage(Long conversationId, String role, String content, String sources, String model) {
+    private void cacheMessage(Long conversationId, String role, String content, String sources, String model, Date createTime) {
         try {
             String key = CONV_CACHE_PREFIX + conversationId;
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -172,6 +178,7 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
             entry.put("content", content);
             entry.put("sources", sources);
             entry.put("model", model);
+            entry.put("createTime", createTime != null ? createTime.getTime() : null);
             redisTemplate.opsForList().rightPush(key, objectMapper.writeValueAsString(entry));
             redisTemplate.opsForList().trim(key, -CONV_CACHE_MAX, -1);
             redisTemplate.expire(key, CONV_CACHE_TTL, TimeUnit.SECONDS);

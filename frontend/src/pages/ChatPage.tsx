@@ -30,6 +30,16 @@ interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   sources?: SourceItem[]
+  /** 消息时间（MM-DD HH:mm），用于展示在用户消息下方。*/
+  time?: string
+}
+
+/** 将时间格式化为「MM-DD HH:mm」。*/
+function formatTime(input: string | Date): string {
+  const d = typeof input === 'string' ? new Date(input) : input
+  if (isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /** 解析后端以 JSON 字符串存储的来源（容错）。*/
@@ -166,6 +176,7 @@ export default function ChatPage() {
             role: m.role as 'user' | 'assistant',
             content: m.content,
             sources: parseSources(m.sources),
+            time: m.createTime ? formatTime(m.createTime) : undefined,
           })),
         )
         setConversationId(activeId)
@@ -200,7 +211,7 @@ export default function ChatPage() {
     setStreaming(true)
     setModelConfigError(false)
     followRef.current = true // 发送后主动跳到底部并跟随 AI 回复
-    setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
+    setMessages((prev) => [...prev, { role: 'user', content: text, time: formatTime(new Date()) }, { role: 'assistant', content: '' }])
     scrollToBottom('smooth')
 
     try {
@@ -399,6 +410,9 @@ export default function ChatPage() {
                         </div>
                       )}
                     </div>
+                    {isUser && msg.time && (
+                      <span className="text-[11px] text-slate-400 mt-1 px-1">{msg.time}</span>
+                    )}
                   </div>
                   {isUser && (
                     <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-slate-500 flex items-center justify-center text-white text-sm font-bold ml-3 flex-shrink-0">
