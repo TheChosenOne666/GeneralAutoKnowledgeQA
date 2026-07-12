@@ -78,13 +78,18 @@ class RagService:
             query, kb_ids, tenant_id, top_k=20
         )
 
+        # 相关性门槛所需信号：RRF 融合会覆盖原始分数，故先取向量/BM25 原始最高分
+        best_vec = vec_results[0].score if vec_results else 0.0
+        best_bm25 = bm25_results[0].score if bm25_results else 0.0
+
         # 4. RRF 融合去重
         merged = self._rrf([vec_results, bm25_results])
 
         # 5. Rerank 精排（未配置 rerank_api_key 则跳过）
         rerank_key = (cfg.rerank_api_key if cfg and cfg.rerank_api_key else None) or settings.rerank_api_key
+        rerank_applied = False
         if rerank_key:
-            merged = await self._rerank(
+            merged, rerank_applied = await self._rerank(
                 query,
                 merged,
                 top_n,
@@ -94,6 +99,17 @@ class RagService:
             )
         else:
             merged = merged[:top_n]
+
+        # 6. 相关性门槛：检索结果全部不相关时视为「无相关文档」，返回空，
+        #    避免下游（chat 路由）把不相关的错误引用来源展示给用户
+        if settings.retrieval_relevance_gate and merged and not self._is_relevant(
+            merged, rerank_applied, best_vec, best_bm25
+        ):
+            logger.info(
+                f"检索相关性不足，视为无相关文档: query={query} "
+                f"rerank_applied={rerank_applied} best_vec={best_vec:.3f} best_bm25={best_bm25:.3f}"
+            )
+            merged = []
 
         try:
             r = await get_redis()
@@ -114,13 +130,14 @@ class RagService:
         rerank_api_key: str = "",
         rerank_base_url: str = "",
         rerank_model: str = "",
-    ) -> list[RetrievalResult]:
+    ) -> tuple[list[RetrievalResult], bool]:
         """Rerank 精排（调用 OpenAI 兼容 Rerank 接口）。
 
-        调用失败（模型名 / API Key 错误）抛 :class:`ModelConfigError`，不静默降级。
+        返回 ``(精排后结果, 是否真正应用 rerank 分数)``。调用失败（模型名 / API Key 错误）
+        抛 :class:`ModelConfigError`，不静默降级。
         """
         if not results:
-            return results
+            return results, False
         documents = [r.content for r in results]
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -145,8 +162,33 @@ class RagService:
         for item in data:
             idx = item.get("index")
             if idx is not None and 0 <= idx < len(results):
-                ordered.append(results[idx])
-        return ordered if ordered else results[:top_n]
+                r = results[idx]
+                # 写入 rerank 相关性分数（兼容 relevance_score / score 两种字段名）
+                r.score = float(item.get("relevance_score", item.get("score", r.score)))
+                ordered.append(r)
+        # 未返回可用结果则回退 RRF 顺序，并标记未应用 rerank 分数（改用向量/BM25 门槛）
+        if not ordered:
+            return results[:top_n], False
+        return ordered, True
+
+    @staticmethod
+    def _is_relevant(
+        merged: list[RetrievalResult],
+        rerank_applied: bool,
+        best_vec: float,
+        best_bm25: float,
+    ) -> bool:
+        """检索结果是否相关（达到相关性门槛）。
+
+        配置 rerank 且成功应用：以 rerank 相关性分数为准；否则以向量余弦最高分或
+        BM25 最高分为准（两者满足其一即视为相关）。
+        """
+        if rerank_applied:
+            return merged[0].score >= settings.retrieval_rerank_min_relevance
+        return (
+            best_vec >= settings.retrieval_vector_min_relevance
+            or best_bm25 >= settings.retrieval_bm25_min_relevance
+        )
 
     @staticmethod
     def _rrf(results_list: list[list[RetrievalResult]], k: int = 60) -> list[RetrievalResult]:

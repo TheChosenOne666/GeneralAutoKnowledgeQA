@@ -913,3 +913,35 @@ M3 全部 ──→ M4-8 部署
 - 消息渲染重构为「头像 + 名称 + 气泡」：AI 用「熊」头像 + 名称「熊答AI」；用户用首字头像（灰） + 名称 `user.name`（取不到时回退「我」）。
 - 名称以 `text-xs text-slate-400` 显示在气泡上方，左右对齐随角色。
 **验证**：前端 HMR 已热更新，浏览器发消息可见「熊答AI」与当前用户名。
+
+### 7. 用户消息显示时间（2026-07-13）
+**需求**：每条用户消息下方显示具体时间。
+**实现**（`frontend/src/pages/ChatPage.tsx`）：
+- `ChatMessage` 新增 `time?` 字段；新增 `formatTime` 格式化为「MM-DD HH:mm」。
+- 历史消息加载时从 `Message.createTime` 解析时间；实时发送时打 `formatTime(new Date())`。
+- 仅在用户消息气泡下方以 `text-[11px] text-slate-400` 渲染时间。
+**验证**：前端 HMR 已热更新，发消息可见「MM-DD HH:mm」。
+
+### 8. 用户消息时间持久保存（2026-07-13）
+**问题**：用户刚发送时显示时间，AI 回复结束后时间消失（刷新/重开会话后也丢失）。
+**根因**：AI 回复结束触发 `setActiveId` → 重新 `listMessages` 命中 L3 Redis 会话缓存；后端缓存回放构造的 `MessageVO` 不带 `createTime`，前端 `m.createTime` 为 null → `time` 成 undefined 消失。
+**修复**（`backend/.../service/impl/ChatServiceImpl.java`）：
+- `cacheMessage` 新增 `createTime` 参数，把时间（epoch 毫秒）写入缓存条目。
+- `saveUserMessage`/`saveAssistantMessage` 改为「先落库取回 `createTime` 再写缓存」。
+- 缓存回放（命中 L3）时还原 `createTime` 到 `MessageVO`（缺 import `java.util.Date` 导致首启 `NoClassDefFoundError`，已补）。
+- 已清空旧 `chat:conv:*` 缓存，使历史会话重载回源数据库拿到真实时间。
+**效果**：每条用户消息下方始终显示「MM-DD HH:mm」，刷新/重开/切会话后从后端历史加载仍带时间，便于按时间回溯。
+**验证**：Java 重启就绪（200），旧 L3 缓存已 flush；浏览器发消息→AI 回复结束→时间不消失→刷新页面时间仍在。
+
+### 9. 检索无相关时不展示错误引用来源（2026-07-13）
+**问题**：用户问知识库没有的内容（如「介绍一下HR的招聘流程」，库里只有测试入职指南），AI 回答「未包含相关信息」却仍列出 5 条不相关引用来源，误导用户。
+**根因**：`rag.retrieve` 无论相关性始终返回 top-5，`chat.py` 一并推送 `sources`，前端按 `sources.length` 渲染来源卡片。
+**修复**（根因在检索层，与「检索中没有就不显示」对齐）：
+- `core/config.py` 新增门槛配置：`retrieval_relevance_gate`（默认开）、`retrieval_vector_min_relevance=0.30`（余弦）、`retrieval_bm25_min_relevance=1.0`（关键词）、`retrieval_rerank_min_relevance=0.10`（rerank 分数）。
+- `services/rag.py`：`retrieve` 在 RRF 融合前先取向量余弦 / BM25 原始最高分；`_rerank` 改为返回 `(结果, 是否应用rerank分数)` 并写入 rerank 相关性分数；新增 `_is_relevant`——配置 rerank 且应用则以 rerank 分数为准，否则向量余弦或 BM25 满足其一即相关；不相关则直接返回空列表（L1 缓存也存空，行为一致）。
+- 空结果下 `chat.py` 不推送 `sources` 事件，前端不渲染来源卡片；AI 仅以空上下文回答「未找到」。
+**测试**：`test_rag_pipeline.py` 新增 `test_unrelated_query_returns_empty`（正交向量+无关键词重叠→返回空）、`test_is_relevant_logic`（三种门槛分支）；全量 26 个 Python 单测通过。
+**验证**：Python 重启就绪（200）；直接打 `/ai/chat/stream` 问无关问题，SSE 事件为 `thinking/error/done`，无 `event: sources`（error 为探针假 Key 触发，与门槛无关）。前端无需改动（已按长度守卫）。
+**注意**：`retrieval_vector_min_relevance=0.30` 为默认保守值，若真实场景出现「该显示却没显示」，可在 `.env` 调低该值。
+
+

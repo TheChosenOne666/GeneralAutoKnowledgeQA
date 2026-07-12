@@ -55,7 +55,7 @@ class RagPipelineTest(unittest.TestCase):
                 cnt = self._run(
                     document_processor.process(path, "txt", "kb1", "doc1", "t1")
                 )
-            self.assertGreater(cnt, 0)
+            self.assertGreater(cnt["chunk_count"], 0)
 
             with patch(
                 "services.embedding.embedding_service.embed_text", _fake_embed_text
@@ -69,6 +69,73 @@ class RagPipelineTest(unittest.TestCase):
             self.assertTrue(all(r.source.endswith(".txt") for r in results))
         finally:
             os.unlink(path)
+
+    def test_unrelated_query_returns_empty(self):
+        """完全无关的话题应被相关性门槛拦截，返回空（不展示错误引用来源）。"""
+        text = "熊答是一款企业知识问答助手，支持上传文档并自动向量化处理。"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(text)
+            path = f.name
+        try:
+            # 文档向量固定为 A，无关 query 向量固定为几乎正交的 B（余弦=0）
+            async def fake_batch(texts, cfg=None, client=None):
+                return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+            async def fake_text(q, cfg=None, client=None):
+                return [0.0, 1.0, 0.0, 0.0]
+
+            with patch(
+                "services.embedding.embedding_service.embed_batch", fake_batch
+            ):
+                self._run(
+                    document_processor.process(path, "txt", "kb1", "doc1", "t1")
+                )
+            with patch(
+                "services.embedding.embedding_service.embed_text", fake_text
+            ):
+                results = self._run(
+                    rag_service.retrieve("招聘财务报销流程", ["kb1"], "t1", top_n=3)
+                )
+            self.assertEqual(results, [])
+        finally:
+            os.unlink(path)
+
+    def test_is_relevant_logic(self):
+        """相关性判定：向量/BM25/rerank 三种门槛逻辑。"""
+        from services.vector_store import RetrievalResult
+
+        # 无 rerank：向量超门槛 → 相关
+        self.assertTrue(
+            rag_service._is_relevant(
+                [RetrievalResult(content="x", source="s", score=0.5)], False, 0.5, 0.0
+            )
+        )
+        # 无 rerank：向量与 BM25 均低于门槛 → 不相关
+        self.assertFalse(
+            rag_service._is_relevant(
+                [RetrievalResult(content="x", source="s", score=0.1)], False, 0.1, 0.0
+            )
+        )
+        # 无 rerank：BM25 超门槛 → 相关（关键词强相关）
+        self.assertTrue(
+            rag_service._is_relevant(
+                [RetrievalResult(content="x", source="s", score=0.1)], False, 0.1, 2.0
+            )
+        )
+        # 有 rerank：分数低于门槛 → 不相关
+        self.assertFalse(
+            rag_service._is_relevant(
+                [RetrievalResult(content="x", source="s", score=0.05)], True, 0.5, 0.0
+            )
+        )
+        # 有 rerank：分数超门槛 → 相关
+        self.assertTrue(
+            rag_service._is_relevant(
+                [RetrievalResult(content="x", source="s", score=0.5)], True, 0.1, 0.0
+            )
+        )
 
 
 if __name__ == "__main__":

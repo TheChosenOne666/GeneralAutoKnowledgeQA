@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
 
+    # 检索相关性门槛：检索结果均不相关时视为「无相关文档」，不向下游推送引用来源
+    # （避免用户问知识库没有的内容时，AI 仍展示不相关的错误引用来源）。
+    retrieval_relevance_gate: bool = True       # 总开关
+    retrieval_vector_min_relevance: float = 0.30  # 向量余弦相似度门槛（无 rerank 时使用）
+    retrieval_bm25_min_relevance: float = 1.0     # BM25 分数门槛（关键词强相关时放宽向量门槛）
+    retrieval_rerank_min_relevance: float = 0.10  # Rerank 相关性分数门槛（配置 rerank 时使用）
+
+
     # Redis（与 Java 后端共用同一实例，作为 L1 检索结果 / L2 嵌入向量缓存层）
     redis_host: str = "localhost"
     redis_port: int = 6379
