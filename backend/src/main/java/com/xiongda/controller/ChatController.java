@@ -8,6 +8,7 @@ import com.xiongda.model.dto.chat.RenameConversationRequest;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.ConversationVO;
 import com.xiongda.model.vo.MessageVO;
+import com.xiongda.service.AiConfigService;
 import com.xiongda.service.ChatService;
 import com.xiongda.service.UserService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -25,6 +26,7 @@ import reactor.core.scheduler.Schedulers;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -47,6 +49,9 @@ public class ChatController {
 
     @Resource
     private UserService userService;
+
+    @Resource
+    private AiConfigService aiConfigService;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -124,6 +129,9 @@ public class ChatController {
         // 注意：produces 必须为 TEXT_PLAIN。若用 TEXT_EVENT_STREAM，Spring MVC 会把 Flux<String> 的每个
         // 元素自动加 "data: " 前缀二次包装，破坏手写 event: 行。前端用 fetch+reader 手动按行解析，Content-Type
         // 不影响解析。
+        // M3-3：拉取用户在界面配置的 AI 模型（含 API Key）透传给 Python，供其真正消费并识别模型配置错误。
+        Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(
+                aiConfigService.getRawConfig(loginUser.getTenantId(), loginUser.getId()));
         Flux<DataBuffer> upstream = aiServiceClient.chatStream(
                 req.getContent(),
                 convId,
@@ -131,7 +139,8 @@ public class ChatController {
                 req.getModel(),
                 req.getMode(),
                 loginUser.getTenantId(),
-                req.getHistory()
+                req.getHistory(),
+                aiConfig
         );
 
         StringBuilder rawBuf = new StringBuilder();

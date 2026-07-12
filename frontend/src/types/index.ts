@@ -51,6 +51,8 @@ export interface Document {
   status: 'pending' | 'parsing' | 'embedding' | 'ready' | 'failed'
   chunkCount: number
   errorMsg: string | null
+  /** 是否因 AI 模型配置错误导致处理失败（用于前端提示重配）。*/
+  modelConfigError: boolean | null
   createTime: string
 }
 
@@ -102,6 +104,24 @@ export interface AIConfig {
   rerankProvider: string | null
   rerankModel: string | null
   hasRerank: boolean
+}
+
+/** AI 模型配置更新请求（对齐后端 AiConfigUpdateRequest；API Key 为可选明文）。*/
+export interface AIConfigUpdateRequest {
+  llmProvider?: string | null
+  llmModel?: string | null
+  llmApiKey?: string | null
+  llmBaseUrl?: string | null
+  llmTemperature?: number | null
+  llmMaxTokens?: number | null
+  embeddingProvider?: string | null
+  embeddingModel?: string | null
+  embeddingApiKey?: string | null
+  embeddingBaseUrl?: string | null
+  embeddingDimension?: number | null
+  rerankProvider?: string | null
+  rerankModel?: string | null
+  rerankApiKey?: string | null
 }
 
 export interface Member {

@@ -105,6 +105,7 @@ CREATE TABLE document (
     status VARCHAR(20) DEFAULT 'pending',
     chunk_count INTEGER DEFAULT 0,
     error_msg TEXT,
+    model_config_error SMALLINT DEFAULT 0,
     uploaded_by BIGINT,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

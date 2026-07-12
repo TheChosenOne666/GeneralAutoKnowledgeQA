@@ -80,6 +80,8 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null)
   const navigate = useNavigate()
   const [missingModels, setMissingModels] = useState<('llm' | 'embedding')[]>([])
+  // 模型配置「填了但填错」（API Key/模型名等运行时错误），由 Python 的 error 事件触发
+  const [modelConfigError, setModelConfigError] = useState(false)
 
   // 进入问答页即拉取 AI 配置，判定 LLM / Embedding 是否缺失并常驻提示
   useEffect(() => {
@@ -148,6 +150,7 @@ export default function ChatPage() {
     const controller = new AbortController()
     abortRef.current = controller
     setStreaming(true)
+    setModelConfigError(false)
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }])
 
     try {
@@ -190,6 +193,13 @@ export default function ChatPage() {
             } else if (currentEvent === 'token' && parsed.content) {
               aiContent += parsed.content
               updateLast({ content: aiContent })
+            } else if (currentEvent === 'error') {
+              // Python 抛出的模型配置错误（API Key/模型名等填错），引导用户重配
+              const msg = parsed.message || '模型调用失败'
+              if (parsed.error_type === 'MODEL_CONFIG_ERROR') {
+                setModelConfigError(true)
+              }
+              updateLast({ content: `错误：${msg}` })
             } else if (currentEvent === 'done') {
               if (parsed.conversation_id && !convId) {
                 convId = parsed.conversation_id
@@ -230,6 +240,26 @@ export default function ChatPage() {
 
   return (
     <div className="h-full flex flex-col relative overflow-hidden bg-white">
+      {/* 模型配置错误提示（填了但填错：API Key/模型名等运行时错误） */}
+      {modelConfigError && (
+        <div className="flex-shrink-0 px-6 pt-3">
+          <div className="max-w-3xl mx-auto flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div className="flex-1 text-sm text-red-800 leading-relaxed">
+              <span className="font-semibold">模型配置不正确</span>，AI 调用失败，请检查 API Key、模型名或向量维度后重新配置。
+            </div>
+            <button
+              onClick={() => navigate('/ai-config')}
+              className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-semibold hover:bg-red-600 transition"
+            >
+              去配置
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 未配置模型常驻提示（不随消息滚动） */}
       {missingModels.length > 0 && (
         <div className="flex-shrink-0 px-6 pt-3">

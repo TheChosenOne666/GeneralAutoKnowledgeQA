@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from core.config import settings
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
+from services.model_config import ModelConfig
 
 
 @dataclass
@@ -63,10 +64,12 @@ class DocumentProcessor:
             for i, c in enumerate(chunks)
         ]
 
-    async def embed_chunks(self, chunks: list[DocumentChunk]) -> list[DocumentChunk]:
+    async def embed_chunks(
+        self, chunks: list[DocumentChunk], cfg: ModelConfig | None = None
+    ) -> list[DocumentChunk]:
         """向量化分块。"""
         texts = [c.content for c in chunks]
-        vectors = await embedding_service.embed_batch(texts)
+        vectors = await embedding_service.embed_batch(texts, cfg)
         for chunk, vec in zip(chunks, vectors):
             chunk.embedding = vec
         return chunks
@@ -78,6 +81,7 @@ class DocumentProcessor:
         kb_id: str,
         doc_id: str,
         tenant_id: str,
+        cfg: ModelConfig | None = None,
     ) -> int:
         """完整文档处理流水线：提取 → 分块 → 向量化 → 存储。
 
@@ -91,7 +95,7 @@ class DocumentProcessor:
         chunks = await self.chunk_text(text)
 
         # 3. 向量化
-        chunks = await self.embed_chunks(chunks)
+        chunks = await self.embed_chunks(chunks, cfg)
 
         # 4. 存储（含元数据：doc_id, kb_id, tenant_id, source, page）
         source = os.path.basename(file_path)

@@ -1,15 +1,30 @@
-"""文档处理全链路 + RAG 检索集成测试（内存存储，零外部依赖）。"""
+"""文档处理全链路 + RAG 检索集成测试（内存存储，零外部依赖）。
+
+M3-3 取消静默降级后，Embedding 调用需配置 Key；此处用桩替换 embed_batch / embed_text，
+聚焦「提取 → 分块 → 向量化 → 存储 → 检索命中」全链路，不依赖真实模型 Key。
+"""
 
 import asyncio
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import services.document_processor as dp_mod
 import services.vector_store as vs_mod
 from services.document_processor import document_processor
 from services.rag import rag_service
 from services.vector_store import InMemoryVectorStore
+
+VEC = [0.1, 0.2, 0.3, 0.4]  # 固定 4 维向量
+
+
+async def _fake_embed_text(text, cfg=None, client=None):
+    return list(VEC)
+
+
+async def _fake_embed_batch(texts, cfg=None, client=None):
+    return [list(VEC) for _ in texts]
 
 
 class RagPipelineTest(unittest.TestCase):
@@ -34,14 +49,20 @@ class RagPipelineTest(unittest.TestCase):
             f.write(text)
             path = f.name
         try:
-            cnt = self._run(
-                document_processor.process(path, "txt", "kb1", "doc1", "t1")
-            )
+            with patch(
+                "services.embedding.embedding_service.embed_batch", _fake_embed_batch
+            ):
+                cnt = self._run(
+                    document_processor.process(path, "txt", "kb1", "doc1", "t1")
+                )
             self.assertGreater(cnt, 0)
 
-            results = self._run(
-                rag_service.retrieve("熊答 知识问答 助手", ["kb1"], "t1", top_n=3)
-            )
+            with patch(
+                "services.embedding.embedding_service.embed_text", _fake_embed_text
+            ):
+                results = self._run(
+                    rag_service.retrieve("熊答 知识问答 助手", ["kb1"], "t1", top_n=3)
+                )
             self.assertTrue(len(results) >= 1)
             self.assertTrue(any("熊答" in r.content for r in results))
             # 检索结果应携带来源元数据

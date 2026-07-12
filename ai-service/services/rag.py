@@ -19,6 +19,7 @@ from core.config import settings
 from core.redis_client import get_redis
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
+from services.model_config import ModelConfig, ModelConfigError
 from services.vector_store import RetrievalResult
 
 
@@ -38,6 +39,7 @@ class RagService:
         kb_ids: list[str],
         tenant_id: str,
         top_n: int = 5,
+        cfg: ModelConfig | None = None,
     ) -> list[RetrievalResult]:
         """完整检索流程：混合检索 → RRF 融合 → Rerank 精排。
 
@@ -64,7 +66,7 @@ class RagService:
             logger.warning(f"读取检索缓存失败，降级实时检索: {e}")
 
         # 1. Query 向量化
-        query_vec = await embedding_service.embed_text(query)
+        query_vec = await embedding_service.embed_text(query, cfg)
 
         # 2. 向量检索 Top-K=20
         vec_results = await vector_store_module.vector_store_service.search(
@@ -79,9 +81,17 @@ class RagService:
         # 4. RRF 融合去重
         merged = self._rrf([vec_results, bm25_results])
 
-        # 5. Rerank 精排（未配置则跳过）
-        if settings.rerank_api_key:
-            merged = await self._rerank(query, merged, top_n)
+        # 5. Rerank 精排（未配置 rerank_api_key 则跳过）
+        rerank_key = (cfg.rerank_api_key if cfg and cfg.rerank_api_key else None) or settings.rerank_api_key
+        if rerank_key:
+            merged = await self._rerank(
+                query,
+                merged,
+                top_n,
+                rerank_key,
+                (cfg.rerank_base_url if cfg else None) or settings.rerank_base_url,
+                (cfg.rerank_model if cfg else None) or settings.rerank_model,
+            )
         else:
             merged = merged[:top_n]
 
@@ -101,33 +111,42 @@ class RagService:
         query: str,
         results: list[RetrievalResult],
         top_n: int = 5,
+        rerank_api_key: str = "",
+        rerank_base_url: str = "",
+        rerank_model: str = "",
     ) -> list[RetrievalResult]:
-        """Rerank 精排（调用 OpenAI 兼容 Rerank 接口）。"""
+        """Rerank 精排（调用 OpenAI 兼容 Rerank 接口）。
+
+        调用失败（模型名 / API Key 错误）抛 :class:`ModelConfigError`，不静默降级。
+        """
         if not results:
             return results
         documents = [r.content for r in results]
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{settings.rerank_base_url}/rerank",
-                headers={
-                    "Authorization": f"Bearer {settings.rerank_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.rerank_model,
-                    "query": query,
-                    "documents": documents,
-                    "top_n": top_n,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json().get("results", [])
-            ordered = []
-            for item in data:
-                idx = item.get("index")
-                if idx is not None and 0 <= idx < len(results):
-                    ordered.append(results[idx])
-            return ordered if ordered else results[:top_n]
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{rerank_base_url}/rerank",
+                    headers={
+                        "Authorization": f"Bearer {rerank_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": rerank_model,
+                        "query": query,
+                        "documents": documents,
+                        "top_n": top_n,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json().get("results", [])
+        except httpx.HTTPError as e:
+            raise ModelConfigError(f"Rerank 调用失败（模型名或 API Key 可能错误）：{e}") from e
+        ordered = []
+        for item in data:
+            idx = item.get("index")
+            if idx is not None and 0 <= idx < len(results):
+                ordered.append(results[idx])
+        return ordered if ordered else results[:top_n]
 
     @staticmethod
     def _rrf(results_list: list[list[RetrievalResult]], k: int = 60) -> list[RetrievalResult]:

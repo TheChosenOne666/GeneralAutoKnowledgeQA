@@ -14,6 +14,7 @@ from routers import cache as cache_router
 from routers.cache import InvalidateRequest
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
+from services.model_config import ModelConfig
 from services.rag import rag_service
 
 
@@ -39,43 +40,42 @@ class _FakeRedisTest(unittest.TestCase):
 class EmbeddingCacheTest(_FakeRedisTest):
     """L2 嵌入向量缓存。"""
 
-    def test_embed_text_cache_hit(self):
+    def _patch_remote(self):
+        """用计数桩替换远程调用，避免真实 HTTP 且绕过无 Key 校验。"""
         call_count = {"n": 0}
-        orig = embedding_service._embed_fallback
+        orig = embedding_service._embed_remote
 
-        def counting(text):
+        async def counting(texts, cfg, client=None):
             call_count["n"] += 1
-            return orig(text)
+            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
-        embedding_service._embed_fallback = counting
+        embedding_service._embed_remote = counting
+        cfg = ModelConfig(embedding_api_key="k", embedding_model="m", embedding_dimension=4)
+        return call_count, cfg, orig
+
+    def test_embed_text_cache_hit(self):
+        call_count, cfg, orig = self._patch_remote()
         try:
-            v1 = self._run(embedding_service.embed_text("缓存测试文本"))
-            v2 = self._run(embedding_service.embed_text("缓存测试文本"))
+            v1 = self._run(embedding_service.embed_text("缓存测试文本", cfg))
+            v2 = self._run(embedding_service.embed_text("缓存测试文本", cfg))
         finally:
-            embedding_service._embed_fallback = orig
+            embedding_service._embed_remote = orig
 
-        # 只计算一次：第二次命中 L2 缓存，不再调用 fallback
+        # 只计算一次：第二次命中 L2 缓存，不再调用远程
         self.assertEqual(call_count["n"], 1)
         self.assertEqual(v1, v2)
         keys = self._run(self.fake.keys("embedding:*"))
         self.assertEqual(len(keys), 1)
 
     def test_embed_batch_cache_hit(self):
-        call_count = {"n": 0}
-        orig = embedding_service._embed_fallback
-
-        def counting(text):
-            call_count["n"] += 1
-            return orig(text)
-
-        embedding_service._embed_fallback = counting
+        call_count, cfg, orig = self._patch_remote()
         try:
-            v1 = self._run(embedding_service.embed_batch(["A", "B"]))
-            v2 = self._run(embedding_service.embed_batch(["A", "B"]))
+            v1 = self._run(embedding_service.embed_batch(["A", "B"], cfg))
+            v2 = self._run(embedding_service.embed_batch(["A", "B"], cfg))
         finally:
-            embedding_service._embed_fallback = orig
+            embedding_service._embed_remote = orig
 
-        self.assertEqual(call_count["n"], 2)  # 两文本各算一次
+        self.assertEqual(call_count["n"], 1)  # 批量一次远程调用
         self.assertEqual(v1, v2)
         keys = self._run(self.fake.keys("embedding:*"))
         self.assertEqual(len(keys), 2)
@@ -83,6 +83,17 @@ class EmbeddingCacheTest(_FakeRedisTest):
 
 class RagCacheTest(_FakeRedisTest):
     """L1 检索结果缓存。"""
+
+    def setUp(self):
+        super().setUp()
+        # retrieve 现需 Embedding 配置；用固定向量桩绕开 Key 校验，聚焦 L1 缓存行为
+        import services.embedding as emb_mod
+        from services.model_config import ModelConfig
+
+        async def fake_embed_text(text, cfg=None, client=None):
+            return [0.1, 0.2, 0.3, 0.4]
+
+        emb_mod.embedding_service.embed_text = fake_embed_text
 
     def test_retrieve_cache_hit_skips_retrieval(self):
         call_count = {"n": 0}

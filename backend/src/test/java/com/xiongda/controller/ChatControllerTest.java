@@ -45,6 +45,9 @@ class ChatControllerTest {
     @Mock
     private UserService userService;
 
+    @Mock
+    private com.xiongda.service.AiConfigService aiConfigService;
+
     private ChatController controller;
 
     @BeforeEach
@@ -53,6 +56,7 @@ class ChatControllerTest {
         ReflectionTestUtils.setField(controller, "chatService", chatService);
         ReflectionTestUtils.setField(controller, "aiServiceClient", aiServiceClient);
         ReflectionTestUtils.setField(controller, "userService", userService);
+        ReflectionTestUtils.setField(controller, "aiConfigService", aiConfigService);
     }
 
     /**
@@ -84,7 +88,7 @@ class ChatControllerTest {
         user.setTenantId(3L);
         when(userService.getLoginUser(any())).thenReturn(user);
         when(chatService.createConversation(3L, 7L, "你好吗")).thenReturn(1L);
-        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any()))
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Flux.just(sseBuffer()));
 
         ChatRequest req = new ChatRequest();
@@ -117,7 +121,7 @@ class ChatControllerTest {
         // 只推 thinking 事件、无 token，回答聚合结果为空
         String raw = "event: thinking\ndata: {\"content\": \"正在思考...\"}\n\n";
         DataBuffer db = new DefaultDataBufferFactory().wrap(raw.getBytes(StandardCharsets.UTF_8));
-        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any()))
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Flux.just(db));
 
         ChatRequest req = new ChatRequest();

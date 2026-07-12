@@ -42,6 +42,13 @@ public class Document implements Serializable {
 
     private String errorMsg;
 
+    /**
+     * 是否因 AI 模型配置错误导致处理失败（M3-3，引导用户到 /ai-config 重新配置）。
+     * 仅当 status=failed 时可能为 true。
+     */
+    @TableField("model_config_error")
+    private Boolean modelConfigError;
+
     private Long uploadedBy;
 
     @TableField(fill = FieldFill.INSERT)

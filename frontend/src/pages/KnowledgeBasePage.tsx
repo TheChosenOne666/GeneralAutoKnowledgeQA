@@ -1,6 +1,7 @@
 /** 知识库管理页 — 按设计稿 03-knowledge-base.html 重写，保留后端 API 调用。*/
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { knowledgeApi } from '@/api/knowledge'
 import type { Document, KnowledgeBase } from '@/types'
 
@@ -44,6 +45,10 @@ export default function KnowledgeBasePage() {
   const [showCreate, setShowCreate] = useState(false)
   const [newKbName, setNewKbName] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const navigate = useNavigate()
+
+  // 是否存在因 AI 模型配置错误（API Key/模型名/向量维度填错）导致处理失败的文档
+  const hasModelConfigError = documents.some((d) => d.modelConfigError)
 
   const loadKbList = useCallback(async (scope: 'shared' | 'personal') => {
     setLoading(true)
@@ -164,6 +169,24 @@ export default function KnowledgeBasePage() {
 
       <div className="flex-1 overflow-auto p-6">
         {error && <div className="mb-4 px-4 py-2 rounded-lg bg-red-50 text-red-600 text-sm">{error}</div>}
+
+        {/* 模型配置错误提示：文档向量化失败因 API Key/模型名/向量维度填错 */}
+        {hasModelConfigError && (
+          <div className="mb-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div className="flex-1 text-sm text-red-800 leading-relaxed">
+              <span className="font-semibold">模型配置不正确</span>，部分文档向量化失败，请检查 Embedding 的 API Key、模型名或向量维度后重新配置，并重新上传。
+            </div>
+            <button
+              onClick={() => navigate('/ai-config')}
+              className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-semibold hover:bg-red-600 transition"
+            >
+              去配置
+            </button>
+          </div>
+        )}
 
         {/* Tab 切换 */}
         <div className="flex items-center gap-1 mb-5 bg-emerald-50/50 p-1 rounded-xl w-fit border border-emerald-100">

@@ -46,15 +46,30 @@ public interface DocumentService extends IService<Document> {
     boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg);
 
     /**
+     * 更新文档处理状态（含模型配置错误标记）。
+     *
+     * @param docId           文档 ID
+     * @param status          新状态（parsing / ready / failed）
+     * @param chunkCount      分块数量（可空）
+     * @param errorMsg        错误信息（可空）
+     * @param modelConfigError 是否因模型配置错误导致失败（M3-3，引导用户重配）
+     */
+    boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError);
+
+    /**
      * 异步触发文档处理 — 调用 Python AI 服务提取文本并分块。
      *
      * <p>流程：更新状态为 parsing → 调用 AI 服务 → 根据结果更新 ready/failed。
+     * M3-3：按上传用户解析其 AI 模型配置（含 API Key）透传给 Python。
      *
      * @param docId    文档 ID
      * @param filePath 文件绝对路径
      * @param fileType 文件类型
      * @param kbId     知识库 ID
      * @param tenantId 租户 ID
+     * @param userId   上传用户 ID（用于解析用户级/租户级 AI 配置）
      */
-    void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId);
+    void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId,
+            Long userId);
 }

@@ -535,7 +535,7 @@ Python event_generator（routers/chat.py）
 > **SSE 封装（已修复）**：Java 不再裸透传 Python 的 `data:` 文本碎片，而是解析每帧后重新包装成带 `event:` 的标准 SSE 发给前端（保留事件类型），前端 `ChatPage.tsx` 按 `event` 名分发（token 追加 / sources 渲染卡片 / done 结束并刷新）。**落库动作从响应式 Netty 线程 offload 到 `Schedulers.boundedElastic()` 并加 try-catch，避免阻塞 I/O 线程且异常不被静默吞掉。**
 > **前端停止生成（已修复）**：流式未正常结束（如 LLM 响应极慢、HMR 热更新保留状态）会让 `streaming` 卡在 `true`，导致输入框 `disabled` 无法输入。改用 `AbortController`：`streamChat` 透传 `signal`，生成中显示「停止」按钮可主动中断（`AbortError` 不报错、保留已生成内容）；切换会话时 `useEffect` 自动 `abort()` 旧流并重置 `streaming`，恢复输入态。
 > **未配置模型常驻提示（M3-3 前端）**：进入问答页即调用 `GET /api/ai-config/`，按「provider 与 model 均非空」判定 LLM / Embedding 是否已配置（API Key 不在前端可见范围，故不纳入判定）；任一未配置则在消息区顶部渲染常驻琥珀色横幅并列出缺失项（仅 LLM / 仅 Embedding / 两者皆缺），附「去配置」跳转到 `/ai-config`。接口异常时静默忽略，不打扰对话。
-> **模型配置正确性运行时检测（M3 边界，待开发）**：上述常驻提示只覆盖"字段是否为空"。用户已明确要求额外覆盖**配置填了但填错**的情况——API Key 错误 / 模型名错误 / 提供商不匹配 / 向量维度不匹配，会导致上传文档向量化失败或对话 LLM 调用失败。开发 M3-3 时需：① Python 真正消费用户配置并**取消静默降级**（无 Key 造假向量/假回答），调用失败抛**可识别的"模型配置错误"**；② Java 透传该错误类型；③ 前端在「上传文档失败」与「对话失败」两处按错误类型提示"模型配置不正确，请重新配置"并带跳转。这是"存在性检测"之外的"**正确性检测**"，二者互补。
+> **模型配置正确性运行时检测（M3-3 已实现）**：上述常驻提示只覆盖"字段是否为空"。M3-3 额外覆盖**配置填了但填错**的情况——API Key 错误 / 模型名错误 / 提供商不匹配 / 向量维度不匹配，会导致上传文档向量化失败或对话 LLM 调用失败。落地：① Python 新增 `ModelConfigError` 并真正消费用户配置、**取消静默降级**（无 Key 直接抛错而非造假向量/假回答），调用失败 / 维度不匹配抛此错误；② Java `AiServiceClient.toAiConfigMap` 把配置以 `ai_config` 透传 Python，失败时解析 `error_type==MODEL_CONFIG_ERROR` 置 `document.modelConfigError`；③ 前端 `ChatPage` 解析 SSE `event: error` 的 `MODEL_CONFIG_ERROR` 渲染红色「模型配置不正确」横幅 + 跳转，`KnowledgeBasePage` 在文档 `modelConfigError` 时同样提示。与存在性常驻横幅构成"存在性+正确性"两层提示。
 
 ### 9.4 SSE 事件流协议
 

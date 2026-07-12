@@ -97,7 +97,7 @@ public class KnowledgeBaseController {
 
         // 异步调用 Python AI 服务处理文档（提取文本 → 分块）
         documentService.triggerDocumentProcessing(
-                docId, filePath.toString(), fileType, kbId, loginUser.getTenantId());
+                docId, filePath.toString(), fileType, kbId, loginUser.getTenantId(), loginUser.getId());
 
         return ResultUtils.success(docId);
     }

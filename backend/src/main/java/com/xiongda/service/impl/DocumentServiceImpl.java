@@ -6,10 +6,12 @@ import com.xiongda.client.AiServiceClient;
 import com.xiongda.exception.ThrowUtils;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.mapper.DocumentMapper;
+import com.xiongda.model.entity.AiConfig;
 import com.xiongda.model.entity.Document;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
+import com.xiongda.service.AiConfigService;
 import com.xiongda.service.DocumentService;
 import com.xiongda.service.KbPermission;
 import com.xiongda.service.KnowledgeBaseService;
@@ -35,6 +37,9 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
 
     @Resource
     private KnowledgeBaseService knowledgeBaseService;
+
+    @Resource
+    private AiConfigService aiConfigService;
 
     @Override
     public Long uploadDocument(Long kbId, Long tenantId, User user, String filename, String fileType,
@@ -94,12 +99,19 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         vo.setStatus(doc.getStatus());
         vo.setChunkCount(doc.getChunkCount());
         vo.setErrorMsg(doc.getErrorMsg());
+        vo.setModelConfigError(doc.getModelConfigError());
         vo.setCreateTime(doc.getCreateTime());
         return vo;
     }
 
     @Override
     public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg) {
+        return updateDocumentStatus(docId, status, chunkCount, errorMsg, null);
+    }
+
+    @Override
+    public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError) {
         Document doc = this.getById(docId);
         if (doc == null) {
             return false;
@@ -111,18 +123,26 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         if (errorMsg != null) {
             doc.setErrorMsg(errorMsg);
         }
+        if (modelConfigError != null) {
+            doc.setModelConfigError(modelConfigError);
+        }
         return this.updateById(doc);
     }
 
     @Override
-    public void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId) {
+    public void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId,
+            Long userId) {
+        // M3-3：按上传用户解析其 AI 模型配置（用户级 > 租户级），透传给 Python 真正消费。
+        AiConfig rawConfig = aiConfigService.getRawConfig(tenantId, userId);
+        Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(rawConfig);
         CompletableFuture.runAsync(() -> {
             try {
                 // 1. 更新状态为解析中
                 this.updateDocumentStatus(docId, "parsing", null, null);
 
                 // 2. 调用 Python AI 服务处理文档
-                Map<String, Object> result = aiServiceClient.processDocument(docId, filePath, fileType, kbId, tenantId);
+                Map<String, Object> result = aiServiceClient.processDocument(
+                        docId, filePath, fileType, kbId, tenantId, aiConfig);
 
                 // 3. 根据结果更新状态
                 String status = result.get("status") != null ? result.get("status").toString() : "failed";
@@ -134,9 +154,12 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                     aiServiceClient.invalidateCache(tenantId);
                     log.info("文档处理完成: docId={}, chunks={}", docId, chunkCount);
                 } else {
+                    String errorType = result.get("error_type") != null ? result.get("error_type").toString() : null;
                     String error = result.get("error") != null ? result.get("error").toString() : "未知错误";
-                    this.updateDocumentStatus(docId, "failed", null, error);
-                    log.warn("文档处理失败: docId={}, error={}", docId, error);
+                    // M3-3：模型配置错误（无 Key / Key 错 / 模型名错 / 维度不匹配）标记，前端引导重配
+                    boolean modelConfigError = "MODEL_CONFIG_ERROR".equals(errorType);
+                    this.updateDocumentStatus(docId, "failed", null, error, modelConfigError);
+                    log.warn("文档处理失败: docId={}, errorType={}, error={}", docId, errorType, error);
                 }
             } catch (Exception e) {
                 log.error("文档处理异常: docId={}", docId, e);

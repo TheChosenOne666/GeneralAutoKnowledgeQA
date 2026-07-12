@@ -30,6 +30,11 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
     }
 
     @Override
+    public AiConfig getRawConfig(Long tenantId, Long userId) {
+        return getConfigEntity(tenantId, userId);
+    }
+
+    @Override
     public AiConfigVO updateConfig(Long tenantId, Long userId, AiConfigUpdateRequest req) {
         AiConfig config = getConfigEntity(tenantId, userId);
         if (config == null) {

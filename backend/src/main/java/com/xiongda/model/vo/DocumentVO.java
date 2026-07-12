@@ -32,5 +32,10 @@ public class DocumentVO implements Serializable {
 
     private String errorMsg;
 
+    /**
+     * 是否因 AI 模型配置错误导致失败（M3-3，前端据此提示重配）。
+     */
+    private Boolean modelConfigError;
+
     private Date createTime;
 }
