@@ -39,6 +39,11 @@ public interface UserService extends IService<User> {
     User getLoginUser(HttpServletRequest request);
 
     /**
+     * 用户登出（JWT 无状态，无服务端状态需清理；仅记录审计日志）。
+     */
+    void userLogout(HttpServletRequest request);
+
+    /**
      * 获取登录用户脱敏信息。
      */
     LoginUserVO getLoginUserVO(User user);

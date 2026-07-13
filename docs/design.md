@@ -447,6 +447,7 @@ multi-rag-employee/
 > - Python：新增 `core/redis_client.py`（Redis 异步客户端单例）、`routers/cache.py`（`POST /ai/cache/invalidate` 失效接口）、`services/model_config.py`（`ModelConfigError` 模型配置错误类型，M3-3 取消静默降级）。
 > - Java：新增 `service/KbPermission.java`（RBAC 数据级权限集中规则，M3-1）、`TenantInvitation` 实体与 Mapper + 邀请链路（M3-2）；`AiServiceClient` 增加 `toAiConfigMap` + `invalidateCache`（M3-2/M2-7）；`ChatServiceImpl` 增加 L3 会话缓存读写与失效（M2-7）。
 > - 前端：新增 `frontend/src/api/user.ts`、`frontend/src/context/ChatContext.tsx`（会话持久化）、`frontend/src/components/AppLayout.tsx`（历史记录按时间分组 + 7 天以上可折叠）；`MembersPage.tsx` 由静态假数据重写为接真实 API。
+> - M3-4 审计日志：Java 新增 `annotation/AuditLog.java`（注解）+ `aop/AuditLogAspect.java`（`@AfterReturning` 切面，自动抓用户/IP/UA 并脱敏记录，埋点于 UserService/DocumentServiceImpl/AiConfigServiceImpl）；`AuditLogService.recordLog` 改 `REQUIRES_NEW` 独立事务并补 `userAgent`；`AuditLogController` 查询补 `userEmail`/时间范围筛选并返回 `Page<AuditLogVO>`；新增 `GET /api/user/logout`（仅记录登出审计）。前端新增 `frontend/src/api/audit.ts`、`pages/AuditLogPage.tsx`（筛选栏 + 表格 + JSON 详情展开 + 分页）。
 
 ---
 

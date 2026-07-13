@@ -153,13 +153,14 @@ export interface InviteInfoVO {
   role: Role
 }
 
+/** 审计日志（对齐后端 AuditLogVO，camelCase；detail 为 JSON 字符串）。*/
 export interface AuditLog {
   id: string
-  user_email: string
+  userEmail: string
   action: string
-  resource_type: string | null
-  resource_id: string | null
-  detail: Record<string, unknown> | null
-  ip_address: string | null
-  created_at: string
+  resourceType: string | null
+  resourceId: string | null
+  detail: string | null
+  ipAddress: string | null
+  createTime: string
 }

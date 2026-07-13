@@ -3,6 +3,7 @@ package com.xiongda.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.xiongda.annotation.AuditLog;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.constant.CommonConstant;
 import com.xiongda.constant.UserConstant;
@@ -109,6 +110,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
+    @AuditLog(action = "login", resourceType = "user")
     public LoginUserVO userLogin(UserLoginRequest request, HttpServletRequest httpServletRequest) {
         String email = request.getEmail();
         String userPassword = request.getUserPassword();
@@ -135,7 +137,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public User getLoginUser(HttpServletRequest request) {
-        // 先判断是否已登录
         String authorization = request.getHeader(CommonConstant.AUTHORIZATION_HEADER);
         ThrowUtils.throwIf(StringUtils.isBlank(authorization), ErrorCode.NOT_LOGIN_ERROR);
 
@@ -152,6 +153,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
         ThrowUtils.throwIf(loginUser.getIsActive() == 0, ErrorCode.FORBIDDEN_ERROR, "用户已被停用");
         return loginUser;
+    }
+
+    @Override
+    @AuditLog(action = "logout", resourceType = "user")
+    public void userLogout(HttpServletRequest request) {
+        // 校验登录态（JWT 无状态，无服务端状态需清理）；审计由切面记录
+        getLoginUser(request);
     }
 
     @Override
@@ -204,6 +212,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
+    @AuditLog(action = "member_change", resourceType = "member")
     public boolean updateUser(Long tenantId, Long operatorId, UserUpdateRequest request) {
         User user = this.baseMapper.selectById(request.getId());
         ThrowUtils.throwIf(user == null, ErrorCode.NOT_FOUND_ERROR, "成员不存在");
@@ -242,6 +251,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    @AuditLog(action = "member_change", resourceType = "member")
     public InviteResultVO createInvitation(Long tenantId, Long inviterId, UserInviteRequest request) {
         String role = StringUtils.isNotBlank(request.getRole()) ? request.getRole() : UserConstant.DEFAULT_ROLE;
         boolean valid = UserConstant.DEFAULT_ROLE.equals(role) || UserConstant.TENANT_ADMIN_ROLE.equals(role);
@@ -283,6 +293,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    @AuditLog(action = "member_change", resourceType = "member")
     public LoginUserVO acceptInvitation(UserAcceptInviteRequest request) {
         TenantInvitation invitation = findValidInvitation(request.getToken());
 
@@ -310,6 +321,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    @AuditLog(action = "member_change", resourceType = "member")
     public boolean removeMember(Long tenantId, Long operatorId, UserRemoveRequest request) {
         Long targetId = request.getId();
         ThrowUtils.throwIf(targetId == null, ErrorCode.PARAMS_ERROR, "成员 ID 不能为空");

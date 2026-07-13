@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xiongda.annotation.AuditLog;
 import com.xiongda.mapper.AiConfigMapper;
 import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.AiConfig;
@@ -41,6 +42,7 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
     }
 
     @Override
+    @AuditLog(action = "config_update", resourceType = "ai_config")
     public AiConfigVO updateConfig(Long tenantId, Long userId, AiConfigUpdateRequest req) {
         AiConfig config = getConfigEntity(tenantId, userId);
         if (config == null) {

@@ -620,15 +620,25 @@ Python（AI 服务）
 
 ---
 
-### M3-4 审计日志 [全栈] P1 · 1d
+### M3-4 审计日志 [全栈] P1 · 1d ✅ 已完成
 
 - **Java**: 审计日志记录切面（AOP）
-  - 登录/登出、文档上传/删除、配置修改、成员变更
-- **Java**: 审计日志查询接口（分页、筛选）
-- **前端**: 审计日志页面
-  - 筛选栏（操作类型、时间范围、用户）
-  - 日志列表表格
-  - 展开查看 JSON 详情
+  - 新增 `@AuditLog` 注解 + `AuditLogAspect`（`@AfterReturning`）：方法成功返回后自动落库
+  - 自动抓取：当前登录用户（未登录场景如登录/接受邀请从返回值 `LoginUserVO` 取）、客户端 IP（`X-Forwarded-For` 优先）、User-Agent
+  - 自动从返回值提取资源 ID（Long / `LoginUserVO.id`）；从入参构造脱敏 `detail`（屏蔽 `password`/`secret`/`token`/`apiKey` 等敏感字段，跳过 `HttpServletRequest`/`MultipartFile`/`User`）
+  - 埋点：`UserServiceImpl`（login/logout/member_change: updateUser·removeMember·createInvitation·acceptInvitation）、`DocumentServiceImpl`（doc_upload/doc_delete）、`AiConfigServiceImpl`（config_update）
+  - `recordLog` 用 `REQUIRES_NEW` 独立事务，写入失败仅告警、不影响主流程
+- **Java**: 审计日志查询接口（`GET /api/audit/list`，租户管理员查本租户 / 平台超管查全局）
+  - 筛选：操作类型 `action`、操作人 `userEmail`、时间范围 `startTime`/`endTime`（支持 `yyyy-MM-dd` 或 `yyyy-MM-dd HH:mm:ss`，结束时间日期型补齐 `23:59:59`）
+  - 分页返回 `Page<AuditLogVO>`（records / total / size / current / pages）
+- **前端**: 审计日志页面（`frontend/src/pages/AuditLogPage.tsx`，接真实 API）
+  - 筛选栏（操作类型 / 操作人邮箱 / 时间范围：全部·今天·近7天·近30天·近90天）
+  - 日志列表表格（时间 / 操作人 / 操作类型徽章 / 资源类型 / IP / 详情）
+  - 详情行内展开查看 JSON（自动格式化，解析失败保留原文）
+  - 分页（上一页/下一页）
+  - 登出时 `AppLayout.handleLogout` 异步调用 `/api/user/logout` 记录登出审计
+- **单测**: `AuditLogServiceImplTest` 3 例（recordLog 落库字段含 userAgent / 租户级筛选与 VO 映射 / 全局忽略租户）全过
+- **联调验证**：注册→登录→改配置→邀请 全链路，DB 确认 login/config_update/member_change 三种日志写入且 `userPassword`、`llmApiKey` 脱敏为 `***`；查询接口分页与 `action` 筛选正确
 - **依赖**: M3-1
 - **产出**: 可查看操作审计记录
 

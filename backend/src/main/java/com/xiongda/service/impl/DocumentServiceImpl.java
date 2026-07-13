@@ -2,6 +2,7 @@ package com.xiongda.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.xiongda.annotation.AuditLog;
 import com.xiongda.client.AiServiceClient;
 import com.xiongda.exception.ThrowUtils;
 import com.xiongda.common.ErrorCode;
@@ -42,6 +43,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     private AiConfigService aiConfigService;
 
     @Override
+    @AuditLog(action = "doc_upload", resourceType = "document")
     public Long uploadDocument(Long kbId, Long tenantId, User user, String filename, String fileType,
                                Long fileSize, String filePath) {
         // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
@@ -74,6 +76,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     }
 
     @Override
+    @AuditLog(action = "doc_delete", resourceType = "document")
     public boolean deleteDocument(Long docId, Long tenantId, User user) {
         Document doc = this.getById(docId);
         ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");

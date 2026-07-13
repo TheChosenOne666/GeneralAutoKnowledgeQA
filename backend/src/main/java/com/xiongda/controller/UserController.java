@@ -63,6 +63,15 @@ public class UserController {
     }
 
     /**
+     * 用户登出（JWT 无状态；仅记录审计日志）。
+     */
+    @PostMapping("/logout")
+    public BaseResponse<Boolean> userLogout(HttpServletRequest request) {
+        userService.userLogout(request);
+        return ResultUtils.success(true);
+    }
+
+    /**
      * 获取成员列表（仅租户管理员）。
      */
     @GetMapping("/list")

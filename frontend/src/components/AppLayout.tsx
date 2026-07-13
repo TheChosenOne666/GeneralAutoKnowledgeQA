@@ -5,6 +5,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { ChatProvider, useChat } from '@/context/ChatContext'
 import { chatApi } from '@/api/chat'
+import { auditApi } from '@/api/audit'
 import type { Conversation, Role } from '@/types'
 
 
@@ -109,6 +110,8 @@ function AppLayoutInner() {
   }, [conversations])
 
   const handleLogout = () => {
+    // 记录登出审计（失败不影响登出）
+    auditApi.logout().catch(() => {})
     logout()
     navigate('/login')
   }
