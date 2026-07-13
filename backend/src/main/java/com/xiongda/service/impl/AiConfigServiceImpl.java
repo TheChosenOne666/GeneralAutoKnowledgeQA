@@ -25,6 +25,11 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    /**
+     * 平台级默认配置的租户哨兵（不等于任何真实租户 ID，对所有租户生效）。
+     */
+    private static final Long PLATFORM_TENANT_ID = 0L;
+
     @Override
     public AiConfigVO getConfig(Long tenantId, Long userId) {
         // 优先查用户级配置
@@ -44,13 +49,79 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
     @Override
     @AuditLog(action = "config_update", resourceType = "ai_config")
     public AiConfigVO updateConfig(Long tenantId, Long userId, AiConfigUpdateRequest req) {
-        AiConfig config = getConfigEntity(tenantId, userId);
+        AiConfig config = selectConfig(tenantId, userId);
         if (config == null) {
             config = new AiConfig();
             config.setTenantId(tenantId);
             config.setUserId(userId);
         }
+        applyUpdate(config, req);
+        this.saveOrUpdate(config);
+        return toVO(config);
+    }
 
+    /**
+     * 获取配置回退链：用户级 → 租户级默认 → 平台级默认。
+     */
+    private AiConfig getConfigEntity(Long tenantId, Long userId) {
+        AiConfig config = selectConfig(tenantId, userId);
+        if (config != null) {
+            return config;
+        }
+        config = selectConfig(tenantId, null);
+        if (config != null) {
+            return config;
+        }
+        return selectConfig(PLATFORM_TENANT_ID, null);
+    }
+
+    /**
+     * 精确查询某 (tenantId, userId) 配置；userId 为 null 表示租户 / 平台级默认。
+     */
+    private AiConfig selectConfig(Long tenantId, Long userId) {
+        QueryWrapper<AiConfig> queryWrapper = new QueryWrapper<>();
+        queryWrapper.eq("tenant_id", tenantId);
+        if (userId == null) {
+            queryWrapper.isNull("user_id");
+        } else {
+            queryWrapper.eq("user_id", userId);
+        }
+        return this.getOne(queryWrapper);
+    }
+
+    /**
+     * 获取平台级默认配置（tenant_id=0，对所有租户生效的兜底）。
+     */
+    @Override
+    public AiConfigVO getPlatformDefault() {
+        AiConfig config = selectConfig(PLATFORM_TENANT_ID, null);
+        if (config == null) {
+            config = new AiConfig();
+            config.setTenantId(PLATFORM_TENANT_ID);
+        }
+        return toVO(config);
+    }
+
+    /**
+     * 更新平台级默认配置（仅平台超管）。
+     */
+    @Override
+    @AuditLog(action = "config_update", resourceType = "ai_config")
+    public AiConfigVO updatePlatformDefault(AiConfigUpdateRequest req) {
+        AiConfig config = selectConfig(PLATFORM_TENANT_ID, null);
+        if (config == null) {
+            config = new AiConfig();
+            config.setTenantId(PLATFORM_TENANT_ID);
+        }
+        applyUpdate(config, req);
+        this.saveOrUpdate(config);
+        return toVO(config);
+    }
+
+    /**
+     * 将请求字段应用到配置实体（用户级 / 平台级复用）。
+     */
+    private void applyUpdate(AiConfig config, AiConfigUpdateRequest req) {
         if (StringUtils.isNotBlank(req.getLlmProvider())) config.setLlmProvider(req.getLlmProvider());
         if (StringUtils.isNotBlank(req.getLlmModel())) config.setLlmModel(req.getLlmModel());
         if (StringUtils.isNotBlank(req.getLlmApiKey())) config.setLlmApiKey(req.getLlmApiKey());
@@ -63,7 +134,6 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
             } catch (Exception e) {
                 config.setLlmModels(null);
             }
-            // 默认模型（llmModel）为空时，取多模型列表第一项作为默认选中
             if (StringUtils.isBlank(config.getLlmModel()) && !req.getLlmModels().isEmpty()) {
                 config.setLlmModel(req.getLlmModels().get(0));
             }
@@ -76,27 +146,6 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         if (StringUtils.isNotBlank(req.getRerankProvider())) config.setRerankProvider(req.getRerankProvider());
         if (StringUtils.isNotBlank(req.getRerankModel())) config.setRerankModel(req.getRerankModel());
         if (StringUtils.isNotBlank(req.getRerankApiKey())) config.setRerankApiKey(req.getRerankApiKey());
-
-        this.saveOrUpdate(config);
-        return toVO(config);
-    }
-
-    /**
-     * 获取用户级配置，不存在则查租户级默认。
-     */
-    private AiConfig getConfigEntity(Long tenantId, Long userId) {
-        QueryWrapper<AiConfig> queryWrapper = new QueryWrapper<>();
-        queryWrapper.eq("tenant_id", tenantId);
-        queryWrapper.eq("user_id", userId);
-        AiConfig config = this.getOne(queryWrapper);
-        if (config != null) {
-            return config;
-        }
-        // 查租户级默认
-        queryWrapper = new QueryWrapper<>();
-        queryWrapper.eq("tenant_id", tenantId);
-        queryWrapper.isNull("user_id");
-        return this.getOne(queryWrapper);
     }
 
     private AiConfigVO toVO(AiConfig config) {

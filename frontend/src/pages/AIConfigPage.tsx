@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { aiConfigApi } from '@/api/aiConfig'
+import { useAuth } from '@/hooks/useAuth'
 import type { AIConfig, AIConfigUpdateRequest } from '@/types'
 
 const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek']
@@ -169,20 +170,30 @@ function ProviderSelect({
 }
 
 export default function AIConfigPage() {
+  const { user } = useAuth()
+  const isSuperAdmin = user?.role === 'super_admin'
+  /** 配置作用域：超管可在「我的配置」与「平台默认配置」间切换。*/
+  const [scope, setScope] = useState<'user' | 'platform'>('user')
+
   const [config, setConfig] = useState<AIConfig | null>(null)
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM })
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
-  useEffect(() => {
-    aiConfigApi
-      .getConfig()
+  const load = (s: 'user' | 'platform') => {
+    const fetcher = s === 'platform' ? aiConfigApi.getPlatformDefault() : aiConfigApi.getConfig()
+    return fetcher
       .then((cfg) => {
         setConfig(cfg)
         setForm(toForm(cfg))
       })
       .catch(() => setFeedback({ type: 'error', msg: '加载配置失败，请稍后重试' }))
-  }, [])
+  }
+
+  useEffect(() => {
+    load(scope)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope])
 
   const set = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }))
 
@@ -228,10 +239,13 @@ export default function AIConfigPage() {
     setSaving(true)
     setFeedback(null)
     try {
-      const updated = await aiConfigApi.updateConfig(toRequest(form))
+      const updated =
+        scope === 'platform'
+          ? await aiConfigApi.updatePlatformDefault(toRequest(form))
+          : await aiConfigApi.updateConfig(toRequest(form))
       setConfig(updated)
       setForm(toForm(updated))
-      setFeedback({ type: 'success', msg: '配置已保存' })
+      setFeedback({ type: 'success', msg: scope === 'platform' ? '平台默认配置已保存' : '配置已保存' })
     } catch (err) {
       setFeedback({ type: 'error', msg: `保存失败：${err instanceof Error ? err.message : '请稍后重试'}` })
     } finally {
@@ -275,6 +289,31 @@ export default function AIConfigPage() {
       </div>
 
       <div className="flex-1 overflow-auto p-6">
+        {/* 平台超管：切换「我的配置 / 平台默认配置」*/}
+        {isSuperAdmin && (
+          <div className="flex items-center gap-3 mb-5">
+            <span className="text-sm text-slate-500">配置作用域：</span>
+            <div className="inline-flex rounded-lg border border-emerald-200 overflow-hidden">
+              {(['user', 'platform'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setScope(s)}
+                  className={`px-4 py-1.5 text-sm font-medium transition ${
+                    scope === s
+                      ? 'bg-brand-600 text-white'
+                      : 'bg-white text-slate-500 hover:bg-emerald-50'
+                  }`}
+                >
+                  {s === 'user' ? '我的配置' : '平台默认配置'}
+                </button>
+              ))}
+            </div>
+            {scope === 'platform' && (
+              <span className="text-xs text-amber-600">平台默认配置将对所有租户生效（用户未单独配置时回退到此）</span>
+            )}
+          </div>
+        )}
+
         {/* 状态概览 */}
         <div className="bg-gradient-to-r from-brand-50 to-teal-50 border border-brand-200 rounded-2xl p-5 mb-6 flex gap-8">
           {statusItems.map((s) => (

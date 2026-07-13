@@ -99,8 +99,10 @@ public class ChatController {
      * 获取会话消息列表。
      */
     @GetMapping("/message/list")
-    public BaseResponse<List<MessageVO>> listMessages(@RequestParam Long conversationId) {
-        List<MessageVO> list = chatService.listMessages(conversationId);
+    public BaseResponse<List<MessageVO>> listMessages(@RequestParam Long conversationId, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        // 归属校验：仅允许读取当前用户自己的会话消息（防越权/跨账号串号）
+        List<MessageVO> list = chatService.listMessages(conversationId, loginUser.getId());
         return ResultUtils.success(list);
     }
 

@@ -70,7 +70,12 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
     }
 
     @Override
-    public List<MessageVO> listMessages(Long conversationId) {
+    public List<MessageVO> listMessages(Long conversationId, Long userId) {
+        // 归属校验：会话必须属于当前登录用户，防止越权读取他人对话（含跨账号串号）
+        Conversation conv = this.getById(conversationId);
+        if (conv == null || !userId.equals(conv.getUserId())) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "会话不存在");
+        }
         String key = CONV_CACHE_PREFIX + conversationId;
         try {
             List<String> cached = redisTemplate.opsForList().range(key, 0, -1);

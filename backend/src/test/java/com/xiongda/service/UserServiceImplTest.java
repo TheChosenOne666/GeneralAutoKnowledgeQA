@@ -264,6 +264,76 @@ class UserServiceImplTest {
         assertEquals(ErrorCode.FORBIDDEN_ERROR.getCode(), ex.getCode());
     }
 
+    // ==================== 超管切换租户（M3-5 方案A） ====================
+
+    @Test
+    void getLoginUser_superAdmin_withTenantHeader_overridesTenantId() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(CommonConstant.AUTHORIZATION_HEADER)).thenReturn("Bearer valid-token");
+        when(request.getHeader(CommonConstant.TENANT_HEADER)).thenReturn("5");
+
+        Claims claims = mock(Claims.class);
+        when(jwtUtil.parseToken("valid-token")).thenReturn(claims);
+        when(jwtUtil.getUserId(claims)).thenReturn(100L);
+
+        User user = buildUser(100L, null, "super@e.com", UserConstant.SUPER_ADMIN_ROLE, 1);
+        when(userMapper.selectById(100L)).thenReturn(user);
+
+        User result = userService.getLoginUser(request);
+        assertEquals(5L, result.getTenantId());
+    }
+
+    @Test
+    void getLoginUser_superAdmin_withoutHeader_keepsTenantId() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(CommonConstant.AUTHORIZATION_HEADER)).thenReturn("Bearer valid-token");
+        when(request.getHeader(CommonConstant.TENANT_HEADER)).thenReturn(null);
+
+        Claims claims = mock(Claims.class);
+        when(jwtUtil.parseToken("valid-token")).thenReturn(claims);
+        when(jwtUtil.getUserId(claims)).thenReturn(100L);
+
+        User user = buildUser(100L, null, "super@e.com", UserConstant.SUPER_ADMIN_ROLE, 1);
+        when(userMapper.selectById(100L)).thenReturn(user);
+
+        User result = userService.getLoginUser(request);
+        assertNull(result.getTenantId());
+    }
+
+    @Test
+    void getLoginUser_normalUser_withTenantHeader_ignored() {
+        // 普通用户不读取 X-Tenant-ID 头，即便请求携带该头也不应覆盖其 tenantId（防越权切换租户）
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(CommonConstant.AUTHORIZATION_HEADER)).thenReturn("Bearer valid-token");
+
+        Claims claims = mock(Claims.class);
+        when(jwtUtil.parseToken("valid-token")).thenReturn(claims);
+        when(jwtUtil.getUserId(claims)).thenReturn(100L);
+
+        User user = buildUser(100L, 1L, "admin@e.com", UserConstant.TENANT_ADMIN_ROLE, 1);
+        when(userMapper.selectById(100L)).thenReturn(user);
+
+        User result = userService.getLoginUser(request);
+        assertEquals(1L, result.getTenantId());
+    }
+
+    @Test
+    void getLoginUser_superAdmin_invalidHeader_ignored() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(CommonConstant.AUTHORIZATION_HEADER)).thenReturn("Bearer valid-token");
+        when(request.getHeader(CommonConstant.TENANT_HEADER)).thenReturn("abc");
+
+        Claims claims = mock(Claims.class);
+        when(jwtUtil.parseToken("valid-token")).thenReturn(claims);
+        when(jwtUtil.getUserId(claims)).thenReturn(100L);
+
+        User user = buildUser(100L, null, "super@e.com", UserConstant.SUPER_ADMIN_ROLE, 1);
+        when(userMapper.selectById(100L)).thenReturn(user);
+
+        User result = userService.getLoginUser(request);
+        assertNull(result.getTenantId());
+    }
+
     // ==================== VO 转换 ====================
 
     @Test
@@ -542,6 +612,58 @@ class UserServiceImplTest {
 
         assertTrue(userService.removeMember(1L, 100L, req));
         verify(userMapper).deleteById(200L);
+    }
+
+    // ==================== 配额拦截（M3-5，对齐 WeKnora） ====================
+
+    @Test
+    void acceptInvitation_quotaExceeded() {
+        TenantInvitation invitation = buildInvitation(1L, 1L, 100L, "member", "pending",
+                new Date(System.currentTimeMillis() + 3600_000));
+        when(tenantInvitationMapper.selectOne(any(QueryWrapper.class))).thenReturn(invitation);
+        // 邮箱未注册，但租户成员数已达上限
+        when(userMapper.selectCount(any(QueryWrapper.class))).thenReturn(0L, 1L);
+        Tenant tenant = new Tenant();
+        tenant.setId(1L);
+        tenant.setMaxMembers(1);
+        when(tenantMapper.selectById(1L)).thenReturn(tenant);
+
+        UserAcceptInviteRequest req = new UserAcceptInviteRequest();
+        req.setToken("tok-1");
+        req.setName("接受者");
+        req.setEmail("new@e.com");
+        req.setUserPassword("123456");
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> userService.acceptInvitation(req));
+        assertEquals(ErrorCode.OPERATION_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void acceptInvitation_quotaUnlimited() {
+        TenantInvitation invitation = buildInvitation(1L, 1L, 100L, "member", "pending",
+                new Date(System.currentTimeMillis() + 3600_000));
+        when(tenantInvitationMapper.selectOne(any(QueryWrapper.class))).thenReturn(invitation);
+        // maxMembers<=0 视为不限：成员数任意都不拦截
+        when(userMapper.selectCount(any(QueryWrapper.class))).thenReturn(0L);
+        Tenant tenant = new Tenant();
+        tenant.setId(1L);
+        tenant.setMaxMembers(0);
+        when(tenantMapper.selectById(1L)).thenReturn(tenant);
+        when(userMapper.insert(any(User.class))).thenAnswer(inv -> {
+            inv.getArgument(0, User.class).setId(300L);
+            return 1;
+        });
+        when(tenantInvitationMapper.updateById(any(TenantInvitation.class))).thenReturn(1);
+        when(jwtUtil.generateToken(300L, 1L, "member")).thenReturn("tok");
+
+        UserAcceptInviteRequest req = new UserAcceptInviteRequest();
+        req.setToken("tok-1");
+        req.setName("接受者");
+        req.setEmail("new@e.com");
+        req.setUserPassword("123456");
+
+        LoginUserVO vo = userService.acceptInvitation(req);
+        assertEquals(300L, vo.getId());
     }
 
     // ==================== 辅助方法 ====================

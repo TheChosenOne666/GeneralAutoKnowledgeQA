@@ -27,7 +27,7 @@ public interface ChatService extends IService<Conversation> {
     /**
      * 获取会话消息列表。
      */
-    List<MessageVO> listMessages(Long conversationId);
+    List<MessageVO> listMessages(Long conversationId, Long userId);
 
     /**
      * 重命名会话（校验归属）。

@@ -7,8 +7,10 @@ import com.xiongda.client.AiServiceClient;
 import com.xiongda.exception.ThrowUtils;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.mapper.DocumentMapper;
+import com.xiongda.mapper.TenantMapper;
 import com.xiongda.model.entity.AiConfig;
 import com.xiongda.model.entity.Document;
+import com.xiongda.model.entity.Tenant;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
@@ -42,6 +44,9 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     @Resource
     private AiConfigService aiConfigService;
 
+    @Resource
+    private TenantMapper tenantMapper;
+
     @Override
     @AuditLog(action = "doc_upload", resourceType = "document")
     public Long uploadDocument(Long kbId, Long tenantId, User user, String filename, String fileType,
@@ -60,6 +65,15 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         doc.setStatus("pending");
         doc.setChunkCount(0);
         doc.setUploadedBy(user.getId());
+
+        // 租户文档数配额校验（对齐 WeKnora：达到上限即拒绝，<=0 视为不限）
+        Tenant tenant = tenantMapper.selectById(tenantId);
+        if (tenant != null && tenant.getMaxDocuments() != null && tenant.getMaxDocuments() > 0) {
+            long docCount = this.count(new QueryWrapper<Document>().eq("tenant_id", tenantId));
+            ThrowUtils.throwIf(docCount >= tenant.getMaxDocuments(),
+                    ErrorCode.OPERATION_ERROR, "租户文档数已达上限");
+        }
+
         this.save(doc);
         // 知识库文档数同步（重新统计，自我校正已有偏差）
         syncKbDocCount(kbId, tenantId);

@@ -2,6 +2,8 @@ package com.xiongda.controller;
 
 import com.xiongda.common.BaseResponse;
 import com.xiongda.common.ResultUtils;
+import com.xiongda.annotation.AuthCheck;
+import com.xiongda.constant.UserConstant;
 import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.AiConfigVO;
@@ -44,5 +46,23 @@ public class AiConfigController {
         User loginUser = userService.getLoginUser(request);
         AiConfigVO config = aiConfigService.updateConfig(loginUser.getTenantId(), loginUser.getId(), body);
         return ResultUtils.success(config);
+    }
+
+    /**
+     * 获取平台级默认配置（仅平台超管）。
+     */
+    @GetMapping("/platform-default")
+    @AuthCheck(mustRole = UserConstant.SUPER_ADMIN_ROLE)
+    public BaseResponse<AiConfigVO> getPlatformDefault() {
+        return ResultUtils.success(aiConfigService.getPlatformDefault());
+    }
+
+    /**
+     * 更新平台级默认配置（仅平台超管）。
+     */
+    @PostMapping("/platform-default")
+    @AuthCheck(mustRole = UserConstant.SUPER_ADMIN_ROLE)
+    public BaseResponse<AiConfigVO> updatePlatformDefault(@RequestBody AiConfigUpdateRequest body) {
+        return ResultUtils.success(aiConfigService.updatePlatformDefault(body));
     }
 }

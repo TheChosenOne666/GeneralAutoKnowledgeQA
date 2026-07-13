@@ -15,4 +15,16 @@ export const aiConfigApi = {
     const res = await api.post<BaseResponse<AIConfig>>('/ai-config/update', body)
     return res.data.data
   },
+
+  /** 获取平台级默认 AI 配置（仅平台超管）。*/
+  getPlatformDefault: async (): Promise<AIConfig | null> => {
+    const res = await api.get<BaseResponse<AIConfig>>('/ai-config/platform-default')
+    return res.data.data
+  },
+
+  /** 更新平台级默认 AI 配置（仅平台超管）。*/
+  updatePlatformDefault: async (body: AIConfigUpdateRequest): Promise<AIConfig> => {
+    const res = await api.post<BaseResponse<AIConfig>>('/ai-config/platform-default', body)
+    return res.data.data
+  },
 }

@@ -27,6 +27,11 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  // 平台超管切换租户时携带目标租户ID（仅超管在 TenantContext 中写入该 key，普通用户不写，故不会带）
+  const tenantId = window.localStorage.getItem('xiongda_current_tenant')
+  if (tenantId) {
+    config.headers['X-Tenant-ID'] = tenantId
+  }
   return config
 })
 

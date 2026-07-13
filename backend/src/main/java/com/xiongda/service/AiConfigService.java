@@ -28,4 +28,14 @@ public interface AiConfigService extends IService<AiConfig> {
      * 更新当前用户的 AI 配置。
      */
     AiConfigVO updateConfig(Long tenantId, Long userId, AiConfigUpdateRequest request);
+
+    /**
+     * 获取平台级默认 AI 配置（对所有租户生效的兜底）。
+     */
+    AiConfigVO getPlatformDefault();
+
+    /**
+     * 更新平台级默认 AI 配置（仅平台超管）。
+     */
+    AiConfigVO updatePlatformDefault(AiConfigUpdateRequest request);
 }

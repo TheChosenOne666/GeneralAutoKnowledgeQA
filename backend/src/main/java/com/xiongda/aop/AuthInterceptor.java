@@ -2,6 +2,7 @@ package com.xiongda.aop;
 
 import com.xiongda.annotation.AuthCheck;
 import com.xiongda.common.ErrorCode;
+import com.xiongda.constant.UserConstant;
 import com.xiongda.exception.BusinessException;
 import com.xiongda.model.entity.User;
 import com.xiongda.service.UserService;
@@ -42,6 +43,11 @@ public class AuthInterceptor {
 
         User loginUser = userService.getLoginUser(request);
         String userRole = loginUser.getRole();
+
+        // 平台超管拥有全部权限（含切租户后访问成员管理等业务接口）
+        if (UserConstant.SUPER_ADMIN_ROLE.equals(userRole)) {
+            return joinPoint.proceed();
+        }
 
         // 校验角色
         boolean hasRole = false;

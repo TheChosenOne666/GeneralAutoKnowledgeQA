@@ -6,7 +6,9 @@ import com.xiongda.constant.UserConstant;
 import com.xiongda.exception.BusinessException;
 import com.xiongda.client.AiServiceClient;
 import com.xiongda.mapper.DocumentMapper;
+import com.xiongda.mapper.TenantMapper;
 import com.xiongda.model.entity.Document;
+import com.xiongda.model.entity.Tenant;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
@@ -44,6 +46,9 @@ class DocumentServiceImplTest {
     @Mock
     private AiServiceClient aiServiceClient;
 
+    @Mock
+    private TenantMapper tenantMapper;
+
     private DocumentServiceImpl documentService;
 
     @BeforeEach
@@ -52,6 +57,7 @@ class DocumentServiceImplTest {
         ReflectionTestUtils.setField(documentService, "baseMapper", documentMapper);
         ReflectionTestUtils.setField(documentService, "knowledgeBaseService", knowledgeBaseService);
         ReflectionTestUtils.setField(documentService, "aiServiceClient", aiServiceClient);
+        ReflectionTestUtils.setField(documentService, "tenantMapper", tenantMapper);
     }
 
     private User user(Long id, String role) {
@@ -248,5 +254,24 @@ class DocumentServiceImplTest {
         doc.setUploadedBy(100L);
         doc.setCreateTime(new Date());
         return doc;
+    }
+
+    // ==================== 配额拦截（M3-5，对齐 WeKnora） ====================
+
+    @Test
+    void uploadDocument_quotaExceeded() {
+        KnowledgeBase kb = kb(1L, "shared", 1L, 10L);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb);
+        // 租户 maxDocuments=1，已有 1 篇文档
+        Tenant tenant = new Tenant();
+        tenant.setId(10L);
+        tenant.setMaxDocuments(1);
+        when(tenantMapper.selectById(10L)).thenReturn(tenant);
+        when(documentMapper.selectCount(any(QueryWrapper.class))).thenReturn(1L);
+
+        User u = user(1L, UserConstant.TENANT_ADMIN_ROLE);
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.uploadDocument(1L, 10L, u, "f.pdf", "pdf", 10L, "/p"));
+        assertEquals(ErrorCode.OPERATION_ERROR.getCode(), ex.getCode());
     }
 }

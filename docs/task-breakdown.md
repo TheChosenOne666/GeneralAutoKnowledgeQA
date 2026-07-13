@@ -644,13 +644,27 @@ Python（AI 服务）
 
 ---
 
-### M3-5 平台超管功能 [后端/Java] P2 · 1.5d
+### M3-5 平台超管功能 [全栈] P2 · 1.5d ✅ 已完成
 
 - 租户管理：列表、创建、停用、配额设置
 - 平台配置：全局默认模型配置
 - 全局审计日志（跨租户）
 - **依赖**: M3-1
 - **产出**: 平台超管可管理系统
+
+**实现（2026-07-13）**：
+- **后端/Java**：新增 `TenantController` + `TenantService`/`TenantServiceImpl` + `TenantVO` + `TenantCreateRequest`/`TenantQuotaRequest`，全部 `@AuthCheck(mustRole=SUPER_ADMIN_ROLE)`；`AiConfigController` 新增 `GET/POST /ai-config/platform-default`（以 `tenant_id=0` 哨兵行作全租户兜底，三级回退链 用户→租户→平台）；`UserServiceImpl` 注册入租户、`DocumentServiceImpl.uploadDocument` 分别校验租户成员数/文档数配额（达到上限 `OPERATION_ERROR` 拒绝，`<=0` 视为不限，对齐 WeKnora）。`AuditLogController` 对 `super_admin` 走 `listAllLogs` 跨租户。
+- **前端/TS**：新增 `api/tenant.ts` + `pages/TenantPage.tsx`（超管专属：租户表格含实时成员/文档数、创建弹窗（slug 校验/管理员需已注册/拒绝超管作管理员）、启用停用、配额弹窗、分页）；`AppLayout` 侧边栏新增「租户管理」菜单（`roles:['super_admin']`）；`AIConfigPage` 超管视角下提供「我的配置 / 平台默认配置」作用域切换，分别调用用户/平台接口；`types` 补充 `Tenant`/`TenantCreateRequest`/`TenantQuotaRequest`/`Page<T>`。
+- **单测**：`TenantServiceImplTest`（8 例：创建/slug重复/管理员不存在/管理员是超管/状态非法/配额/列表统计）、`AiConfigServiceImplTest`（平台默认 upsert+读、三级回退、更新不误改平台默认）、`DocumentServiceImplTest`/`UserServiceImplTest` 补充配额校验用例。本次后端单测共 **61 例全过**。
+- **联调验证**：用临时超管账号 `super@xiongda.com` 登录实测——租户列表（total=12）、创建租户（正路径 code=0 且管理员自动转 tenant_admin）、管理员不存在/超管作管理员两负路径均返回 `code=40000` 且中文提示正确、启用停用/配额/平台默认配置读写均 `code=0`、列表计数同步 +1。验证后清理临时租户与用户，保留超管账号供 UI 试用。
+- **注意**：系统中原本无 `super_admin` 账号，联调时临时插入 `super@xiongda.com / test123456`（MD5(`xiongda`+pwd)）以便访问 M3-5 功能；如不需要可自行删除。
+
+- **方案A 扩展（超管切换租户，对齐 WeKnora TenantSelector）**：在 M3-5 基础上补充"超管以某租户管理员身份操作其资源"，复用既有知识库/成员/对话/AI 配置页面，不新建跨租户列表。
+  - **后端**：`CommonConstant` 新增 `TENANT_HEADER="X-Tenant-ID"`；`UserServiceImpl.getLoginUser` 对 `super_admin` 且携带该头时，将 `tenantId` 临时覆盖为请求头值（仅内存、不写库），普通用户忽略以防越权；`AuthInterceptor` 对 `super_admin` 直接放行全部接口（含 `tenant_admin` 专属的成员管理接口）。
+  - **前端**：新增 `context/TenantContext.tsx`（超管加载并默认选中租户，持久化 `localStorage`）；`api/client.ts` 拦截器携带 `X-Tenant-ID`；`AppLayout` 仅对超管渲染租户切换器、将其有效角色映射为可见 `tenant_admin` 菜单（知识库/成员管理），主内容区以 `currentTenantId` 为 `key` 重挂触发各页刷新；`ChatContext` 随 `currentTenantId` 变化刷新对话列表。
+  - **单测**：`UserServiceImplTest` 新增 4 例覆盖超管带头覆盖 / 不带头 / 非法头及普通用户忽略越权。
+  - **联调验证**：用临时超管 `super@xiongda.com`（密码已重置为 `test123456`）登录实测——带 `X-Tenant-ID` 调 `/api/user/list` 返回目标租户成员（Count=1 且 tenantId 一致），不带时返回空（超管 tenantId 为 NULL 不串数据），证明超管放行 + 租户上下文切换生效。
+  - **Bug 修复**：方案A 初版把主内容区改为嵌套 `<div key>{outlet}</div>`，中间 div 无 `h-full` 打断了对话页 `h-full flex flex-col` 高度链，导致输入框不再固定在底部；已把 `key` 上移到外层 `flex-1` 容器、去掉多余嵌套层，DOM 结构恢复为与 `<Outlet/>` 直接作子元素等价，布局修复（前端 `npm run build` + lint 通过）。
 
 ---
 

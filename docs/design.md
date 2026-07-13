@@ -160,8 +160,32 @@ const menuItems = [
   { key: 'ai-config', label: 'AI模型配置', roles: ['member', 'tenant_admin'] },
   { key: 'members', label: '成员管理', roles: ['tenant_admin'] },
   { key: 'audit', label: '审计日志', roles: ['tenant_admin', 'super_admin'] },
+  { key: 'tenant', label: '租户管理', roles: ['super_admin'] },
 ];
 ```
+
+### 3.4 平台超管功能（M3-5）
+
+平台超管（`super_admin`，`tenant_id` 为 NULL）可跨租户管理整个系统，所有接口均加 `@AuthCheck(mustRole = SUPER_ADMIN_ROLE)`。
+
+**租户管理**（`TenantController` `/api/tenant`，仅超管）：
+
+- `GET /list`：分页列出全部租户，VO 实时统计 `memberCount` / `docCount`。
+- `POST /create`：创建租户，并把指定**已注册**邮箱用户设为该租户首个 `tenant_admin`（对齐 WeKnora EnsureOwner）；slug 全局唯一；拒绝把 `super_admin` 设为租户管理员。
+- `POST /{id}/status`：`active` ↔ `suspended` 启用停用。
+- `POST /{id}/quota`：设置成员数 / 文档数上限（`<=0` 视为不限）。
+
+**配额执行（对齐 WeKnora）**：`DocumentServiceImpl.uploadDocument` 与 `UserServiceImpl` 邀请/注册入租户时，校验 `Tenant.maxDocuments` / `maxMembers`，达到上限即拒绝（`OPERATION_ERROR`）。
+
+**平台默认 AI 配置**：`AiConfigController` 新增 `GET/POST /ai-config/platform-default`（仅超管），以 `tenant_id=0` 哨兵行作为全租户兜底；用户配置回退链：`用户级 → 租户级 → 平台级`。前端 `AIConfigPage` 在超管视角下提供「我的配置 / 平台默认配置」作用域切换。
+
+**全局审计日志**：`AuditLogController.listLogs` 对 `super_admin` 走 `listAllLogs`（跨租户），对 `tenant_admin` 走 `listLogsByTenant`（本租户）。
+
+**超管切换租户操作（方案A，对齐 WeKnora TenantSelector）**：平台超管除平台级页面（租户管理 / 全局审计 / 平台默认 AI 配置）外，还常以"某个租户管理员"身份进入其知识库、成员、对话、租户级 AI 配置。采用**租户上下文切换**而非新建跨租户列表页：
+
+- **后端**：`UserServiceImpl.getLoginUser` 解析出登录用户后，若角色为 `super_admin` 且请求头携带 `X-Tenant-ID`（`CommonConstant.TENANT_HEADER`），则将其 `tenantId` 临时覆盖为该请求头值（仅内存对象，不写库）；普通用户忽略该头，防止越权切换租户。`AuthInterceptor` 对 `super_admin` 直接放行全部接口，故切进某租户后可访问其 `tenant_admin` 专属业务接口（如成员管理 `@AuthCheck(mustRole=tenant_admin)`）。
+- **前端**：新增 `TenantContext`（`context/TenantContext.tsx`），超管登录后加载全部租户并默认选中 `localStorage` 中已选（否则第一个）；切换器写入 `localStorage` 的 `xiongda_current_tenant`。`api/client.ts` 请求拦截器携带 `X-Tenant-ID` 头。`AppLayout` 仅对超管渲染租户切换器，并将其有效角色映射为可见 `tenant_admin` 菜单（知识库 / 成员管理），同时主内容区以 `currentTenantId` 为 `key` 重挂，触发各业务页重新加载该租户数据；`ChatContext` 在 `currentTenantId` 变化时清空并刷新对话列表。
+- **效果**：超管在侧边栏切到「租户A」后，知识库 / 成员管理 / 对话 / AI 模型配置均按租户A展示与操作，复用既有页面与接口，无需新建跨租户列表。
 
 ---
 

@@ -152,6 +152,20 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
         ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
         ThrowUtils.throwIf(loginUser.getIsActive() == 0, ErrorCode.FORBIDDEN_ERROR, "用户已被停用");
+
+        // 平台超管支持通过 X-Tenant-ID 请求头切换到指定租户，从而以该租户身份操作其资源
+        // （对齐 WeKnora 的 TenantSelector：超管切进某租户后当作 admin）。
+        // 仅 super_admin 采纳该头，普通用户忽略，防止越权切换租户。
+        if (UserConstant.SUPER_ADMIN_ROLE.equals(loginUser.getRole())) {
+            String targetTenant = request.getHeader(CommonConstant.TENANT_HEADER);
+            if (StringUtils.isNotBlank(targetTenant)) {
+                try {
+                    loginUser.setTenantId(Long.parseLong(targetTenant.trim()));
+                } catch (NumberFormatException e) {
+                    log.warn("平台超管 X-Tenant-ID 头非法，已忽略: {}", targetTenant);
+                }
+            }
+        }
         return loginUser;
     }
 
@@ -309,6 +323,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         user.setUserPassword(encryptPassword(request.getUserPassword()));
         user.setRole(invitation.getRole());
         user.setIsActive(1);
+
+        // 租户成员数配额校验（对齐 WeKnora：达到上限即拒绝，<=0 视为不限）
+        Tenant tenant = tenantMapper.selectById(invitation.getTenantId());
+        if (tenant != null && tenant.getMaxMembers() != null && tenant.getMaxMembers() > 0) {
+            QueryWrapper<User> cntQw = new QueryWrapper<>();
+            cntQw.eq("tenant_id", invitation.getTenantId());
+            long memberCount = this.baseMapper.selectCount(cntQw);
+            ThrowUtils.throwIf(memberCount >= tenant.getMaxMembers(),
+                    ErrorCode.OPERATION_ERROR, "租户成员数已达上限");
+        }
+
         this.save(user);
 
         // share-link 可复用：仅累加已加入人数，链接保持 pending 可继续分享

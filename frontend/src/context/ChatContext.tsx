@@ -1,7 +1,9 @@
 /** 会话 Context — 管理会话列表、当前选中会话、刷新。供 AppLayout 与 ChatPage 共享。 */
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { chatApi } from '@/api/chat'
+import { useAuth } from '@/hooks/useAuth'
+import { useTenant } from '@/context/TenantContext'
 import type { Conversation } from '@/types'
 
 const ACTIVE_CONVERSATION_KEY = 'xiongda_active_conversation'
@@ -16,10 +18,10 @@ interface ChatContextValue {
 const ChatContext = createContext<ChatContextValue | null>(null)
 
 export function ChatProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const [conversations, setConversations] = useState<Conversation[]>([])
-  const [activeId, setActiveIdState] = useState<string | null>(() =>
-    typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_CONVERSATION_KEY) ?? null : null,
-  )
+  const [activeId, setActiveIdState] = useState<string | null>(null)
 
   // 持久化当前会话 id：刷新/重进平台时自动恢复"当前对话窗口"
   const setActiveId = (id: string | null) => {
@@ -28,7 +30,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setActiveIdState(id)
   }
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const list = await chatApi.listConversations()
       setConversations(list)
@@ -43,11 +45,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     } catch {
       // 加载失败静默，避免阻塞页面
     }
-  }
-
-  useEffect(() => {
-    void refresh()
   }, [])
+
+  // 登录用户变化（如 admin → 超管）或登出时，或超管切换操作租户时，清空残留会话状态，
+  // 避免跨账号/跨租户串号看到他人对话记录（后端 listMessages 也已加归属校验兜底）
+  useEffect(() => {
+    setActiveIdState(null)
+    window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY)
+    setConversations([])
+    if (user) void refresh()
+  }, [user?.id, currentTenantId, refresh])
 
   return (
     <ChatContext.Provider value={{ conversations, activeId, setActiveId, refresh }}>

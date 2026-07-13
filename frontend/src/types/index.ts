@@ -154,6 +154,44 @@ export interface InviteInfoVO {
   role: Role
 }
 
+/** MyBatis-Plus 分页响应（对齐后端 Page<T>）。*/
+export interface Page<T> {
+  records: T[]
+  total: number
+  size: number
+  current: number
+  pages: number
+}
+
+/** 租户视图对象（对齐后端 TenantVO，含实时成员数 / 文档数）。*/
+export interface Tenant {
+  id: string | number
+  name: string
+  slug: string
+  /** active / suspended */
+  status: string
+  maxMembers: number | null
+  maxDocuments: number | null
+  memberCount: number
+  docCount: number
+  createTime: string
+}
+
+/** 创建租户请求（平台超管）。*/
+export interface TenantCreateRequest {
+  name: string
+  slug: string
+  maxMembers?: number | null
+  maxDocuments?: number | null
+  adminEmail: string
+}
+
+/** 租户配额设置请求。*/
+export interface TenantQuotaRequest {
+  maxMembers?: number | null
+  maxDocuments?: number | null
+}
+
 /** 审计日志（对齐后端 AuditLogVO，camelCase；detail 为 JSON 字符串）。*/
 export interface AuditLog {
   id: string

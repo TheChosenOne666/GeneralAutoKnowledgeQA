@@ -10,6 +10,7 @@ import AIConfigPage from '@/pages/AIConfigPage'
 import MembersPage from '@/pages/MembersPage'
 import AuditLogPage from '@/pages/AuditLogPage'
 import RolePermissionPage from '@/pages/RolePermissionPage'
+import TenantPage from '@/pages/TenantPage'
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   if (!getToken()) return <Navigate to="/login" replace />
@@ -58,6 +59,7 @@ export const router = createBrowserRouter([
       { path: 'members', element: <MembersPage /> },
       { path: 'audit', element: <AuditLogPage /> },
       { path: 'role-permission', element: <RolePermissionPage /> },
+      { path: 'tenant', element: <TenantPage /> },
     ],
   },
 ])
