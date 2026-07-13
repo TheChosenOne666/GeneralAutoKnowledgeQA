@@ -111,19 +111,44 @@ def _extract_thought(text: str, end_pos: int) -> str:
 
 
 def _extract_query(tool_input: str) -> str:
-    """从 Action Input 提取检索 query（支持 JSON {"query": ...} 或纯文本）。"""
+    """从 Action Input 提取检索 query。
+
+    兼容 LLM 常见输出形态：标准 JSON（{"query": ...}）、被 markdown 代码块
+    （```json ... ```）包裹的 JSON、前后混入解释文字，以及纯文本。
+
+    旧实现一旦 json.loads 失败就把整段脏字符串（含 ``` 围栏）当 query 去检索，
+    导致 Agent 检索必然落空；这里改为先剥离围栏、再尝试提取首个 JSON 对象，
+    使 LLM 用代码块包裹 Action Input 时也能正确取出 query。
+    """
     s = (tool_input or "").strip()
     if not s:
         return ""
+
+    # 1) 去除 markdown 代码块围栏（``` 或 ```json）
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", s, re.S | re.I)
+    if fenced:
+        s = fenced.group(1).strip()
+
+    # 2) 尝试直接解析标准 JSON
     try:
         obj = json.loads(s)
     except json.JSONDecodeError:
-        return s
+        # 3) 退化：从文本中提取第一个 {...} 对象再解析
+        obj_match = re.search(r"\{[^{}]*\}", s, re.S)
+        if obj_match:
+            try:
+                obj = json.loads(obj_match.group(0))
+            except json.JSONDecodeError:
+                obj = None
+        else:
+            obj = None
+
     if isinstance(obj, dict):
         return (obj.get("query") or obj.get("q") or "").strip()
     if isinstance(obj, str):
         return obj.strip()
-    return ""
+    # 4) 非 JSON：把清洗后的文本作为纯查询
+    return s
 
 
 def _build_messages(question: str, history: list[dict] | None) -> list[dict]:
@@ -158,6 +183,7 @@ async def _execute_tool(
     """
     if tool_name == "knowledge_base_search":
         query = _extract_query(tool_input)
+        logger.info(f"[Agent诊断] 原始ActionInput={tool_input!r} 清洗后query={query!r}")
         if not query:
             return "工具参数错误：未提供有效查询。", [], False
         try:

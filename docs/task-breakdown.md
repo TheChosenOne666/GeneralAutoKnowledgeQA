@@ -698,6 +698,11 @@ Python（AI 服务）
 - **测试**：`tests/test_agent.py`（9 例全过）覆盖多轮推理事件序列、单轮直答、检索模型配置错误；`AgentRouteTest` 用真实 `app` 对 `POST /ai/chat/stream mode=agent` 做完整 SSE 契约验证。
 - **联调**：Python 8001 新代码启动 + agent 路由冒烟通过（agent 分支可达）。受环境无真实 LLM/Embedding Key 限制，真实多步推理需配置 Key 后由 Java 8080 + Python 8001 + 前端 5173 全栈联调。
 - **链路已贯通**：前端 `mode` → Java `ChatRequest.mode` → `AiServiceClient` → Python `/ai/chat/stream`（Java 无需改动，早已支持 `mode` 透传）。
+- **Bug 修复（2026-07-14）— 智能推理检索不到知识库内容**：Agent 模式 `knowledge_base_search` 返回「未检索到」而知识库确有相关内容。
+  - 根因：`services/agent.py:_extract_query` 对 LLM 输出的 Action Input 容错不足。普通 RAG 模式直接用 `body.question` 不经过该解析；Agent 用 LLM 生成的子查询，而 LLM（豆包等）常以 ```` ```json ```` 代码块包裹 Action Input。旧实现 `json.loads` 失败后直接把整段脏字符串（含 ```` ``` ```` 围栏）当 query 去检索，必然落空；单测此前仅覆盖干净 JSON，未能暴露。
+  - 修复：`_extract_query` 增加容错——先剥离 markdown 代码块围栏、再尝试提取首个 JSON 对象、最后退化为纯文本查询；并在 Agent 检索工具入口与 `rag.retrieve` 融合后增加诊断日志（清洗后 query、vec/bm25 top 分、merged 数），便于联调定位。
+  - 测试：`tests/test_agent.py` 新增 `ExtractQueryTest`（6 例）覆盖干净 JSON / ```` ```json ```` 包裹 / 前后多余文本 / 首个 JSON 对象提取 / 纯文本 / 空输入；agent 单测 15 例全过。
+  - 待联调确认：相关性门槛（`retrieval_vector_min_relevance=0.30` / `retrieval_bm25_min_relevance=1.0`）是否对中文短查询过严；已加诊断日志，需真实环境带 Key 跑一次 Agent 后据日志判定是否调整（该环境临时实例无 LLM Key，未能走到工具调用）。
 - **依赖**: M2-5
 - **产出**: 复杂问题多步推理回答（知识库检索工具）
 

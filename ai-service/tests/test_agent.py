@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from main import app
-from services.agent import parse_react, run_agent, _execute_tool
+from services.agent import parse_react, run_agent, _execute_tool, _extract_query
 from services.model_config import ModelConfig
 from services.vector_store import RetrievalResult
 
@@ -269,6 +269,36 @@ class AgentRouteTest(unittest.TestCase):
         self.assertIn("event: token", body)
         self.assertIn("event: done", body)
         self.assertIn("knowledge_base_search", body)
+
+
+class ExtractQueryTest(unittest.TestCase):
+    """_extract_query 容错：覆盖 LLM 常见输出形态（之前仅覆盖干净 JSON）。"""
+
+    def test_clean_json(self):
+        self.assertEqual(_extract_query('{"query": "算法入职前期准备"}'), "算法入职前期准备")
+
+    def test_markdown_fenced_json(self):
+        # LLM 常用 ```json 代码块包裹 Action Input
+        self.assertEqual(
+            _extract_query('```json\n{"query": "算法入职前期准备"}\n```'),
+            "算法入职前期准备",
+        )
+
+    def test_json_with_surrounding_text(self):
+        s = '这是我的检索：\n{"query": "算法岗入职准备"}\n请检索'
+        self.assertEqual(_extract_query(s), "算法岗入职准备")
+
+    def test_first_json_object_when_trailing_text(self):
+        # LLM 在 JSON 后追加解释
+        s = '{"query": "算法入职准备"} 我需要相关知识'
+        self.assertEqual(_extract_query(s), "算法入职准备")
+
+    def test_plain_text_fallback(self):
+        self.assertEqual(_extract_query("算法入职前期准备"), "算法入职前期准备")
+
+    def test_empty_input(self):
+        self.assertEqual(_extract_query(""), "")
+        self.assertEqual(_extract_query("   "), "")
 
 
 if __name__ == "__main__":

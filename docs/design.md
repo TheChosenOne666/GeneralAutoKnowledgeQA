@@ -298,6 +298,7 @@ LLM 生成回答（SSE 流式输出）
 - **触发方式**：问答页底部「普通问答 / 智能推理」分段切换，前端 `mode=agent` 经 Java 透传至 Python `/ai/chat/stream`（`ChatController` → `AiServiceClient` 早已支持 `mode` 透传，Java 无需改动）。
 - **循环**：`services/agent.py` 的 `run_agent` 每轮调用 `llm_service.stream_messages` 生成 ReAct 文本 → 解析 `parse_react` → 执行工具 → 回填 Observation，直到 `Final Answer` 或达到最大轮数（`MAX_AGENT_ITERATIONS=5`）。
 - **工具范围（M4-1）**：仅 `knowledge_base_search`（包 `rag_service.retrieve`）。联网搜索工具（`web_search`）留待 M4-3，届时仅新增一个工具注册 + 开关，架构零改动。
+- **Action Input 解析健壮性（2026-07-14 修复）**：`_extract_query` 兼容 LLM 常见输出形态——标准 JSON、被 ```` ```json ```` 代码块包裹的 JSON、前后混入解释文字、以及纯文本。旧实现 `json.loads` 失败后把整段脏字符串（含 ```` ``` ```` 围栏）当 query 去检索，导致 Agent 模式「知识库有内容却检索不到」（普通 RAG 模式用 `body.question` 不经此解析，故不受影响）。修复后先剥离围栏 → 提取首个 JSON 对象 → 退化为纯文本；并在 Agent 检索入口与 `rag.retrieve` 融合后增加诊断日志（`[Agent诊断]` / `[检索诊断]`），便于联调定位相关性门槛。
 - **SSE 事件契约**：`agent_step`（type=thought/action/observation，含 tool/input/success）、`sources`、`token`（最终答案流式）、`error`（MODEL_CONFIG_ERROR / AGENT_ERROR）、`done`。前端 `ChatPage.tsx` 的 `AgentSteps` 组件将推理步骤渲染为可折叠的步骤树。
 
 复杂问题触发 ReAct Agent：

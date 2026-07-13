@@ -100,6 +100,13 @@ class RagService:
         else:
             merged = merged[:top_n]
 
+        # 诊断日志：打印召回信号，便于排查「知识库有内容却检索不到」
+        logger.info(
+            f"[检索诊断] query={query!r} kb_ids={kb_ids} tenant={tenant_id} "
+            f"vec_top={best_vec:.3f} bm25_top={best_bm25:.3f} "
+            f"merged={len(merged)} rerank={'on' if rerank_key else 'off'}"
+        )
+
         # 6. 相关性门槛：检索结果全部不相关时视为「无相关文档」，返回空，
         #    避免下游（chat 路由）把不相关的错误引用来源展示给用户
         if settings.retrieval_relevance_gate and merged and not self._is_relevant(
