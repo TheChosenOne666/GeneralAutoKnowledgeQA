@@ -980,4 +980,14 @@ M3 全部 ──→ M4-8 部署
 - `Message.createTime` 类型由 `string` 改为 `string | number`，与后端实际返回（数字时间戳）对齐，避免类型声明误导。
 **验证**：`npm run build`（`tsc -b && vite build`）通过 EXIT=0、lint 0 错误；dev server HMR 已热更新，刷新历史会话可正常加载消息与时间。
 
+### 14. 角色权限矩阵：修正内容 + 移出成员管理页（2026-07-13）
+**问题**：成员管理页底部的「角色权限矩阵」有两处问题：① 内容过时，与后端真实权限脱节——`上传 / 管理文档` 与 `配置 AI 模型` 两行把普通成员写成 `false`，但后端 `design.md §3.3` 菜单 `knowledge: member+`、`ai-config: member+`，且 `AiConfigController` 无 `@AuthCheck`、`KbPermission` 允许个人库 owner 写，实际普通成员**可上传文档（个人库）/配置 AI 模型**；② 摆放位置不合理，权限矩阵属产品级说明，放在"管人"的成员页语义错位，且硬编码易再次与后端脱节。
+**处理**（用户选定：移到独立说明页）：
+- 新建 `frontend/src/pages/RolePermissionPage.tsx`：独立「角色权限」页，矩阵数据与后端对齐（普通成员 `上传/管理文档`、`配置 AI 模型` 改为 ✅，并加脚注说明"个人库可写/共享库仅管理员、每人独立配模型"）。
+- `frontend/src/router.tsx`：注册 `/role-permission` 路由。
+- `frontend/src/components/AppLayout.tsx`：侧边栏新增「角色权限」入口（`roles: [member, tenant_admin, super_admin]`，全角色可见）。
+- `frontend/src/pages/MembersPage.tsx`：移除硬编码 `PERMISSIONS`/`Check` 与矩阵 JSX，仅保留成员列表与邀请功能。
+**验证**：`npm run build` 通过 EXIT=0、4 文件 lint 0 错误。
+**注意**：矩阵仍为前端硬编码（本次未做后端动态化）；后端 RBAC 再次变更时需同步更新 `RolePermissionPage.tsx` 的 `PERMISSIONS`。
+
 

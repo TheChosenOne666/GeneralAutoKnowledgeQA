@@ -19,23 +19,6 @@ const ROLE_BADGE: Record<Role, string> = {
 
 type InviteRole = Exclude<Role, 'super_admin'>
 
-const PERMISSIONS = [
-  { label: '提问 / 查看回答', member: true, admin: true, super: true },
-  { label: '上传 / 管理文档', member: false, admin: true, super: true },
-  { label: '管理成员 / 角色分配', member: false, admin: true, super: true },
-  { label: '配置 AI 模型', member: false, admin: true, super: true },
-  { label: '查看审计日志', member: false, admin: true, super: true },
-  { label: '管理所有租户', member: false, admin: false, super: true },
-]
-
-function Check() {
-  return (
-    <svg className="w-5 h-5 inline text-emerald-500" fill="currentColor" viewBox="0 0 20 20">
-      <path d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" />
-    </svg>
-  )
-}
-
 function formatDate(value?: unknown): string {
   if (value == null) return '—'
   let d: Date
@@ -282,35 +265,6 @@ export default function MembersPage() {
                   )
                 })
               )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* 权限矩阵 */}
-        <div className="bg-white rounded-xl border border-emerald-100 p-6">
-          <h4 className="font-bold text-slate-800 text-base mb-4">角色权限矩阵</h4>
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-emerald-100">
-                {['权限', '普通成员', '租户管理员', '平台超管'].map((h, i) => (
-                  <th
-                    key={h}
-                    className={`px-4 py-2.5 ${i === 0 ? 'text-left' : 'text-center'} text-xs font-semibold text-slate-500 uppercase bg-emerald-50/50`}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-emerald-50">
-              {PERMISSIONS.map((p) => (
-                <tr key={p.label}>
-                  <td className="px-4 py-2.5 text-sm text-slate-700 font-medium">{p.label}</td>
-                  <td className="px-4 py-2.5 text-center">{p.member ? <Check /> : <span className="text-slate-300">—</span>}</td>
-                  <td className="px-4 py-2.5 text-center">{p.admin ? <Check /> : <span className="text-slate-300">—</span>}</td>
-                  <td className="px-4 py-2.5 text-center">{p.super ? <Check /> : <span className="text-slate-300">—</span>}</td>
-                </tr>
-              ))}
             </tbody>
           </table>
         </div>
