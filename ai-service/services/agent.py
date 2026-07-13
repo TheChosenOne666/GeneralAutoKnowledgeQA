@@ -52,6 +52,7 @@ Final Answer: 给用户的完整回答
 - 只能使用 knowledge_base_search 这一个工具
 - Action Input 必须是 JSON，包含 query 字段
 - 不要编造知识库中不存在的内容
+- 若知识库检索明确返回「未找到相关内容」，请如实告知用户知识库中无相关信息，不得编造或使用通用知识虚构
 - Final Answer 直接面向用户，简洁准确、使用中文
 """
 
@@ -168,7 +169,14 @@ async def _execute_tool(
             return f"工具执行失败（模型配置错误）：{e}", [], True
 
         if not results:
-            return "未检索到相关知识库内容。", [], False
+            kb_count = len(kb_ids)
+            observation = (
+                f"在知识库中未找到相关内容（已检索 {kb_count} 个知识库）。\n"
+                "- 不要使用训练数据或通用知识编造答案\n"
+                "- 直接说明「知识库中未找到相关信息」\n"
+                "- 严禁编造或虚构来源"
+            )
+            return observation, [], False
 
         lines: list[str] = []
         sources: list[dict] = []

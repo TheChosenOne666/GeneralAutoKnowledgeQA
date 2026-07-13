@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import services.document_processor as dp_mod
 import services.vector_store as vs_mod
+from core.config import settings
 from main import app
 from services.document_processor import document_processor
 from services.vector_store import InMemoryVectorStore
@@ -29,9 +30,31 @@ async def _fake_embed_batch(texts, cfg=None, client=None):
     return [list(VEC) for _ in texts]
 
 
-async def _fake_stream_generate(question, context="", model=None, history=None, cfg=None, client=None):
+async def _fake_stream_generate(question, context="", model=None, history=None, cfg=None, client=None, no_kb_content=False):
     yield "熊"
     yield "答"
+
+
+async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
+    return []
+
+
+class _SpyStreamGenerate:
+    """记录 stream_generate 调用参数，用于校验兜底分支是否注入 no_kb_content。"""
+
+    def __init__(self):
+        self.calls = 0
+        self.kwargs = None
+
+    async def __call__(self, question, context="", model=None, history=None, cfg=None, client=None, no_kb_content=False):
+        self.calls += 1
+        self.kwargs = {
+            "question": question,
+            "context": context,
+            "no_kb_content": no_kb_content,
+        }
+        yield "熊"
+        yield "答"
 
 
 class ChatRagTest(unittest.TestCase):
@@ -111,6 +134,63 @@ class ChatRagTest(unittest.TestCase):
             ) as resp:
                 body = "".join(resp.iter_text())
 
+        self.assertIn("event: token", body)
+        self.assertIn("event: done", body)
+
+    def test_chat_stream_empty_kb_fixed_fallback(self):
+        """检索无结果且 fallback_strategy=fixed：直接返回固定文案，且不调用 LLM。"""
+        saved = settings.fallback_strategy
+        settings.fallback_strategy = "fixed"
+        spy = _SpyStreamGenerate()
+        try:
+            with self._patch_services(), patch(
+                "services.rag.rag_service.retrieve", _fake_retrieve_empty
+            ), patch("services.llm.llm_service.stream_generate", spy):
+                with self.client.stream(
+                    "POST",
+                    "/ai/chat/stream",
+                    json={
+                        "question": "知识库里没有的话题",
+                        "kb_ids": ["kb1"],
+                        "tenant_id": "t1",
+                        "mode": "rag",
+                    },
+                ) as resp:
+                    body = "".join(resp.iter_text())
+        finally:
+            settings.fallback_strategy = saved
+
+        self.assertEqual(spy.calls, 0, "fixed 兜底不应调用 LLM")
+        self.assertIn("event: token", body)
+        self.assertIn(settings.fallback_response, body)
+        self.assertIn("event: done", body)
+
+    def test_chat_stream_empty_kb_model_fallback(self):
+        """检索无结果且 fallback_strategy=model：调用 LLM 并注入 no_kb_content 声明。"""
+        saved = settings.fallback_strategy
+        settings.fallback_strategy = "model"
+        spy = _SpyStreamGenerate()
+        try:
+            with self._patch_services(), patch(
+                "services.rag.rag_service.retrieve", _fake_retrieve_empty
+            ), patch("services.llm.llm_service.stream_generate", spy):
+                with self.client.stream(
+                    "POST",
+                    "/ai/chat/stream",
+                    json={
+                        "question": "知识库里没有的话题",
+                        "kb_ids": ["kb1"],
+                        "tenant_id": "t1",
+                        "mode": "rag",
+                    },
+                ) as resp:
+                    body = "".join(resp.iter_text())
+        finally:
+            settings.fallback_strategy = saved
+
+        self.assertEqual(spy.calls, 1, "model 兜底应调用 LLM 一次")
+        self.assertTrue(spy.kwargs["no_kb_content"], "应标记知识库无内容")
+        self.assertEqual(spy.kwargs["context"], "", "无相关文档应无上下文")
         self.assertIn("event: token", body)
         self.assertIn("event: done", body)
 

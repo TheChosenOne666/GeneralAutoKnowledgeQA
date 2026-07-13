@@ -14,6 +14,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from services.agent import run_agent
+from core.config import settings
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.rag import rag_service
@@ -107,6 +108,18 @@ async def chat_stream(body: ChatStreamRequest):
         if sources:
             yield _sse("sources", {"sources": sources})
 
+        # 检索无结果兜底（对齐 WeKnora）：
+        #  - fixed：直接返回固定文案，不调用 LLM（省成本）
+        #  - model（默认）：交给 LLM 用通用知识兜底，并在 system 指令中声明「知识库暂无相关内容」
+        if not sources and settings.fallback_strategy == "fixed":
+            logger.info("检索无结果，走 fixed 兜底返回固定文案")
+            yield _sse("token", {"content": settings.fallback_response})
+            yield _sse(
+                "done",
+                {"conversation_id": body.conversation_id, "sources": []},
+            )
+            return
+
         try:
             async for token in llm_service.stream_generate(
                 question=body.question,
@@ -114,6 +127,7 @@ async def chat_stream(body: ChatStreamRequest):
                 model=body.model or None,
                 history=body.history,
                 cfg=cfg,
+                no_kb_content=not sources,
             ):
                 yield _sse("token", {"content": token})
         except ModelConfigError as e:

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from main import app
-from services.agent import parse_react, run_agent
+from services.agent import parse_react, run_agent, _execute_tool
 from services.model_config import ModelConfig
 from services.vector_store import RetrievalResult
 
@@ -52,6 +52,60 @@ async def _collect(events_gen) -> list[dict]:
     async for e in events_gen:
         out.append(e)
     return out
+
+
+async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
+    return []
+
+
+class ToolEmptyKbTest(unittest.TestCase):
+    def test_execute_tool_empty_kb_returns_no_content_constraint(self):
+        """检索工具空结果：返回『未找到相关内容』并约束不编造。"""
+        with patch("services.agent.rag_service.retrieve", _fake_retrieve_empty):
+            observation, sources, is_config_error = asyncio.run(
+                _execute_tool(
+                    "knowledge_base_search",
+                    '{"query": "知识库里没有的话题"}',
+                    ["kb1", "kb2"],
+                    "t1",
+                    ModelConfig(),
+                )
+            )
+        self.assertEqual(sources, [])
+        self.assertFalse(is_config_error)
+        self.assertIn("未找到相关内容", observation)
+        self.assertIn("严禁编造", observation)
+        self.assertIn("2 个知识库", observation)
+
+    def test_agent_empty_kb_observation_flow(self):
+        """端到端：Agent 检索空结果时，observation 事件携带不编造约束。"""
+        fake_llm = _FakeLLM(
+            [
+                'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "x"}',
+                "Thought: 检索为空\nFinal Answer: 知识库中未找到相关信息。",
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve_empty):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="x",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        obs = [
+            e for e in events
+            if e["event"] == "agent_step" and e["data"]["type"] == "observation"
+        ]
+        self.assertTrue(obs, "应产出 observation 事件")
+        self.assertIn("未找到相关内容", obs[0]["data"]["content"])
 
 
 class ParseReactTest(unittest.TestCase):

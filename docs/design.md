@@ -565,9 +565,16 @@ Python event_generator（routers/chat.py）
    │           └─ 写 L1 缓存（TTL 3600s）
    │     检索失败 → 降级无上下文问答
    ├─ 有 sources → 发 event: sources（引用来源：文件名 / 页码 / 内容片段）
+   ├─ 检索无结果兜底（见下「检索无结果兜底策略」）
    ├─ LLM stream_generate（携带 history 多轮上下文）→ 逐 token 发 event: token
    └─ 发 event: done（conversation_id, sources）
 ```
+
+> **检索无结果兜底策略（对齐 WeKnora，2026-07-14）**：知识库/文档为空或检索不匹配时不再让 LLM 静默凭通用知识作答，而是走可配置兜底（`core/config.py` 的 `fallback_strategy`，默认 `model`）：
+> - **rag 普通问答**：
+>   - `fixed`：检索无结果直接发 `event: token`（内容=`fallback_response` 固定文案「知识库暂无相关内容…」），**不调用 LLM**（省成本），随后 `done`。
+>   - `model`（默认）：仍调用 `llm.stream_generate`，但传入 `no_kb_content=True`，在 system 指令中要求 LLM 用通用知识兜底并**明确声明「知识库中暂无相关内容，以下回答基于通用知识，仅供参考」、严禁编造或声称内容来自知识库**。
+> - **Agent 智能推理**：`rag` 之外的 `agent` 模式，`_execute_tool` 的 `knowledge_base_search` 检索空结果时，返回 Observation「在知识库中未找到相关内容（已检索 N 个知识库）」并附约束「不要使用训练数据/通用知识编造」「严禁编造或虚构来源」；Agent 系统提示同步要求「检索明确返回未找到相关内容时如实告知、不得编造」。前端无需改动（兜底文本以 `token`/`observation` 事件正常渲染）。
 
 > **助手回答持久化（已修复）**：Java 在透传 SSE 流时聚合 `token` 事件累积回答文本、捕获 `done` 事件的 `sources`，流结束后调用 `saveAssistantMessage`（先写 L3 缓存再落库），刷新后历史可完整回看。
 > **SSE 封装（已修复）**：Java 不再裸透传 Python 的 `data:` 文本碎片，而是解析每帧后重新包装成带 `event:` 的标准 SSE 发给前端（保留事件类型），前端 `ChatPage.tsx` 按 `event` 名分发（token 追加 / sources 渲染卡片 / done 结束并刷新）。**落库动作从响应式 Netty 线程 offload 到 `Schedulers.boundedElastic()` 并加 try-catch，避免阻塞 I/O 线程且异常不被静默吞掉。**

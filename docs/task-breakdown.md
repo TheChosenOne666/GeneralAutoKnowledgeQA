@@ -393,6 +393,15 @@
 - ✅ 端到端联调（curl）：`/ai/document/process` 入库 → `/ai/chat/stream` 返回 `sources` 事件，链路跑通
 - ⚠️ 前端"查看原文"当前展开检索片段，原文件在线预览见 M4-4
 
+#### 检索无结果兜底（对齐 WeKnora，2026-07-14）
+- **背景**：知识库/文档为空或检索不匹配时，旧逻辑直接让 LLM 凭通用知识作答且无任何"知识库无相关内容"声明，与 WeKnora 的 `fallback` 行为不一致。
+- **普通问答（rag 模式）**：`core/config.py` 新增可配置项 `fallback_strategy`（默认 `model`）与 `fallback_response`（固定文案）。
+  - `fixed`：检索无结果时直接推送 `fallback_response` 固定文案，**不调用 LLM**（省成本）。
+  - `model`（默认）：检索无结果时仍调用 LLM，但 `services/llm.py:stream_generate` 新增 `no_kb_content` 标记，在 system 指令中要求 LLM 用通用知识兜底并**明确声明「知识库中暂无相关内容」、严禁编造**。
+- **智能推理（Agent）**：`services/agent.py:_execute_tool` 检索工具空结果改为返回「在知识库中未找到相关内容（已检索 N 个知识库）」并附「不要使用训练数据/通用知识编造」「严禁编造或虚构来源」约束；系统提示同步补充"检索明确返回未找到相关内容时如实告知、不得编造"。
+- **测试**：`tests/test_chat.py` 新增 `fixed`/`model` 两种兜底分支测试；`tests/test_agent.py` 新增检索工具空结果约束单测（含端到端 observation 事件校验）。ai-service 单测全过（注：`test_document_processor.py` 有 3 例因 pytest 事件循环跨测试干扰在大套件联跑时失败，单独跑/原始代码同样存在，与本特性无关）。
+- **前端**：无需改动——兜底文本以 `token` 事件流式推送，前端既有渲染逻辑直接展示。
+
 ---
 
 ### M2-6 会话管理完善 [全栈] P1 · 1d ✅ 已完成
