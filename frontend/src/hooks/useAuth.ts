@@ -38,12 +38,8 @@ export function useAuth() {
   }
 
   const register = async (name: string, email: string, password: string) => {
-    await authApi.register(name, email, password)
-    // 注册成功后自动登录
-    const res = await authApi.login(email, password)
-    setToken(res.token)
-    setUser(res)
-    return res
+    // 仅注册账户，不自动登录；由用户手动前往登录页登录
+    return authApi.register(name, email, password)
   }
 
   const logout = () => {

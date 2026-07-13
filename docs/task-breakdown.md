@@ -98,7 +98,7 @@
 
 **实际完成内容：**
 - ✅ 前端骨架已有 AuthPage（登录/注册 Tab 切换、邮箱+密码表单、错误提示、loading 状态）
-- ✅ useAuth Hook（login/register/logout，注册成功自动登录，JWT 存 localStorage）
+- ✅ useAuth Hook（login/register/logout，注册仅创建账户、不自动登录；注册成功切回登录表单并提示「注册成功，请登录」，JWT 存 localStorage）
 - ✅ API 客户端（Axios 拦截器：请求注入 Bearer Token，响应 40100 自动跳转 /login）
 - ✅ AuthGuard 路由守卫（无 Token 跳转 /login）
 - ✅ 修复 `types/index.ts` TokenResponse 类型定义语法错误
