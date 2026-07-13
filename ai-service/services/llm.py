@@ -88,6 +88,26 @@ class LlmService:
         async for token in self._stream(messages, model, cfg, client):
             yield token
 
+    async def complete(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+        cfg: ModelConfig | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> str:
+        """非流式生成：累积 token 返回完整文本（供 query rewrite / expansion 等内部调用）。
+
+        复用 :meth:`_stream` 的底层调用与鉴权逻辑；模型配置错误同样抛出
+        :class:`ModelConfigError` 供上层透传。
+        """
+        cfg = cfg or ModelConfig.from_settings()
+        if not cfg.has_llm():
+            raise ModelConfigError("未配置 LLM API Key，请在 AI 配置页填写后重试")
+        parts: list[str] = []
+        async for tok in self._stream(messages, model, cfg, client):
+            parts.append(tok)
+        return "".join(parts)
+
     async def _stream(
         self,
         messages: list[dict],

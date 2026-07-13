@@ -291,6 +291,12 @@ LLM 生成回答（SSE 流式输出）
 引用溯源（标注来源文档 + 页码）
 ```
 
+> **普通问答增强（A 档，2026-07-14，对齐 WeKnora KnowledgeQA）**：rag 模式检索前对 query 做 LLM 改写（rewrite）+ 召回不足时扩展检索（expansion），提升「措辞不一致」场景的召回鲁棒性。仅作用于 rag 模式（`retrieve(enhance=True)`）；Agent 模式不开启（Agent 内部由 LLM 自生成子查询，二次改写会画蛇添足）。
+> - **query rewrite**：`services/query_rewrite.py:rewrite_query` 用一次 LLM 调用把口语化 / 长问句改写成检索友好的关键词短句；模型配置错误（`ModelConfigError`）向上抛出由路由转 `MODEL_CONFIG_ERROR`，其他异常降级用原话检索。
+> - **query expansion**：主检索结果数 `< retrieval_expansion_min`（默认 3）时，`expand_query` 生成 1~2 个语义不同角度的扩展 query，分别检索后 RRF 合并兜底；任何异常降级不扩展。
+> - 开关：`core/config.py` 的 `enable_query_rewrite` / `enable_query_expansion`（默认开），可独立关闭。`retrieve` 的 L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）；rewrite / expansion 失败均不阻断主流程（配置错误除外）。
+> - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
+
 ### 5.3 Agent 多步推理（M4-1）
 
 采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），基于 LLM 文本协议（Thought / Action / Action Input / Final Answer），与腾讯 WeKnora 的自研 ReAct 引擎思路一致。

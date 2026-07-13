@@ -90,7 +90,7 @@ async def chat_stream(body: ChatStreamRequest):
         if body.mode == "rag":
             try:
                 results = await rag_service.retrieve(
-                    body.question, body.kb_ids, body.tenant_id, top_n=5, cfg=cfg
+                    body.question, body.kb_ids, body.tenant_id, top_n=5, cfg=cfg, enhance=True
                 )
                 sources = [asdict(r) for r in results]
                 if results:

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     retrieval_bm25_min_relevance: float = 1.0     # BM25 分数门槛（关键词强相关时放宽向量门槛）
     retrieval_rerank_min_relevance: float = 0.10  # Rerank 相关性分数门槛（配置 rerank 时使用）
 
+    # 普通问答增强（对齐 WeKnora KnowledgeQA 的 query rewrite + query expansion）：
+    # 仅作用于 rag 模式（retrieve(enhance=True) 时触发），Agent 模式不开启（Agent 内部
+    # 由 LLM 自生成子查询，不做二次改写，避免画蛇添足）。
+    enable_query_rewrite: bool = True    # 检索前用 LLM 把口语化问题改写成检索友好 query
+    enable_query_expansion: bool = True  # 主检索召回不足时用 LLM 生成扩展查询再检索并 RRF 合并
+    retrieval_expansion_min: int = 3     # 主检索结果数 < 此值才触发 expansion（避免无谓额外调用）
+
     # 检索无结果兜底策略（对齐 WeKnora）：知识库/文档为空或检索不匹配时
     #  - fixed：直接返回固定文案（不调用 LLM，省成本）
     #  - model（默认）：交给 LLM 用通用知识兜底，但须在回答中声明「知识库暂无相关内容」

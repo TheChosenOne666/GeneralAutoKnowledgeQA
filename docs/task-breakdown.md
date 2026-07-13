@@ -706,6 +706,20 @@ Python（AI 服务）
 - **依赖**: M2-5
 - **产出**: 复杂问题多步推理回答（知识库检索工具）
 
+### M4-A 普通问答增强（query rewrite + expansion，对齐 WeKnora KnowledgeQA）2026-07-14 ✅ 已完成
+
+> 背景：用户口语化 / 长问句（如「算法入职前期准备要做什么」）与文档表述（「一、入职基础准备」）措辞差异大，纯字面检索召回弱；WeKnora 普通问答用 query rewrite + expansion 让两种模式都对措辞鲁棒。本项目此前普通问答用用户原话直接检索，缺该能力。Agent 模式由 LLM 自生成子查询，不二次改写。
+
+- **Python（ai-service）**：
+  - 新增 `services/query_rewrite.py`：`rewrite_query`（一次 LLM 调用把口语问题改写成检索友好关键词短句）+ `expand_query`（主检索召回不足时生成 1~2 个语义不同角度的扩展 query）。失败策略：模型配置错误（`ModelConfigError`）向上抛出（rewrite 在主检索前，应透传让用户重配）；其他异常降级（rewrite 返回原话、expand 返回空列表），不阻断主流程。
+  - `services/llm.py`：新增非流式 `complete()` 方法（累积 token 返回完整文本），供 rewrite / expansion 复用，复用 `_stream` 底层调用与鉴权，模型配置错误同样抛 `ModelConfigError`。
+  - `services/rag.py`：`retrieve` 新增 `enhance: bool = False` 参数；`enhance=True` 时先 `rewrite_query` 改写 `search_query`，主检索结果数 `< retrieval_expansion_min`（默认 3）时再 `expand_query` 并 RRF 合并兜底；抽取 `_search_core`（向量 + BM25 + RRF，返回融合结果与向量/BM25 最高分用于相关性门槛）；rerank 使用改写后的 `search_query`。L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）。
+  - `core/config.py`：新增 `enable_query_rewrite`（默认 True）、`enable_query_expansion`（默认 True）、`retrieval_expansion_min=3` 三个开关。
+  - `routers/chat.py`：rag 模式调用 `retrieve(..., enhance=True)`；Agent 模式不传（保持默认 False）。
+- **前端**：无需改动（rag 模式 `mode=rag` 自动增强，开关在 Python 配置层，无新交互）。
+- **测试**：新增 `tests/test_query_rewrite.py`——`QueryRewriteTest`（5 例：rewrite 成功 / 通用异常降级原话 / 配置错误上抛 / expand 返回列表 / expand 异常返回空）+ `RetrieveEnhanceTest`（2 例：enhance=True 触发改写且召回非空、enhance=False 不调改写）；`tests/test_chat.py` 补充 `_fake_complete` 桩覆盖 enhance 路径。全量 Python 单测 52 通过（3 例 `test_document_processor` 因 `asyncio.get_event_loop()` 在新区 Python 已弃用，属预存环境无关失败，非本次引入）。
+- **未改动**：Agent 架构、L1/L2/L3 缓存结构、相关性门槛逻辑、Java 后端、前端。
+
 ---
 
 ### M4-2 共享/个人知识库完善 [全栈] P1 · 1d ✅ 完成

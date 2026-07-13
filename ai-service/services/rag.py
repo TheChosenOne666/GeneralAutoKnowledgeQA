@@ -20,6 +20,7 @@ from core.redis_client import get_redis
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
 from services.model_config import ModelConfig, ModelConfigError
+from services.query_rewrite import expand_query, rewrite_query
 from services.vector_store import RetrievalResult
 
 
@@ -40,6 +41,7 @@ class RagService:
         tenant_id: str,
         top_n: int = 5,
         cfg: ModelConfig | None = None,
+        enhance: bool = False,
     ) -> list[RetrievalResult]:
         """完整检索流程：混合检索 → RRF 融合 → Rerank 精排。
 
@@ -51,6 +53,10 @@ class RagService:
             kb_ids: 知识库 ID 列表
             tenant_id: 租户 ID
             top_n: 最终返回的结果数
+            enhance: 普通问答增强（对齐 WeKnora KnowledgeQA）。为 True 时先对 query
+                做 LLM 改写（rewrite），主检索召回不足时再做 LLM 扩展检索（expansion）
+                并 RRF 合并。仅 rag 模式开启；Agent 模式不传（避免二次改写 LLM 自生成
+                的子查询，画蛇添足）。
 
         Returns:
             精排后的检索结果列表
@@ -65,32 +71,45 @@ class RagService:
         except Exception as e:
             logger.warning(f"读取检索缓存失败，降级实时检索: {e}")
 
-        # 1. Query 向量化
-        query_vec = await embedding_service.embed_text(query, cfg)
+        # A1 query rewrite：口语化问题改写为检索友好 query（仅 enhance 且开启开关时）
+        search_query = query
+        if enhance and settings.enable_query_rewrite:
+            try:
+                rewritten = await rewrite_query(query, cfg=cfg)
+            except ModelConfigError:
+                raise
+            except Exception as e:
+                logger.warning(f"query rewrite 失败，降级原话检索: {e}")
+                rewritten = query
+            if rewritten and rewritten != query:
+                logger.info(f"[检索诊断] query 改写: {query!r} -> {rewritten!r}")
+                search_query = rewritten
 
-        # 2. 向量检索 Top-K=20
-        vec_results = await vector_store_module.vector_store_service.search(
-            query_vec, kb_ids, tenant_id, top_k=20
+        merged, best_vec, best_bm25 = await self._search_core(
+            search_query, kb_ids, tenant_id, cfg
         )
 
-        # 3. BM25 关键词检索 Top-K=20
-        bm25_results = await vector_store_module.vector_store_service.keyword_search(
-            query, kb_ids, tenant_id, top_k=20
-        )
-
-        # 相关性门槛所需信号：RRF 融合会覆盖原始分数，故先取向量/BM25 原始最高分
-        best_vec = vec_results[0].score if vec_results else 0.0
-        best_bm25 = bm25_results[0].score if bm25_results else 0.0
-
-        # 4. RRF 融合去重
-        merged = self._rrf([vec_results, bm25_results])
+        # A2 query expansion：主检索召回不足时，生成扩展 query 再检索并 RRF 合并兜底
+        if enhance and settings.enable_query_expansion and len(merged) < settings.retrieval_expansion_min:
+            try:
+                expansions = await expand_query(query, cfg=cfg)
+            except Exception as e:
+                logger.warning(f"query expansion 失败，跳过: {e}")
+                expansions = []
+            for eq in expansions:
+                m2, bv2, bb2 = await self._search_core(eq, kb_ids, tenant_id, cfg)
+                if m2:
+                    merged = self._rrf([merged, m2])
+                    best_vec = max(best_vec, bv2)
+                    best_bm25 = max(best_bm25, bb2)
+                    logger.info(f"[检索诊断] expansion query={eq!r} 命中={len(m2)}")
 
         # 5. Rerank 精排（未配置 rerank_api_key 则跳过）
         rerank_key = (cfg.rerank_api_key if cfg and cfg.rerank_api_key else None) or settings.rerank_api_key
         rerank_applied = False
         if rerank_key:
             merged, rerank_applied = await self._rerank(
-                query,
+                search_query,
                 merged,
                 top_n,
                 rerank_key,
@@ -102,7 +121,7 @@ class RagService:
 
         # 诊断日志：打印召回信号，便于排查「知识库有内容却检索不到」
         logger.info(
-            f"[检索诊断] query={query!r} kb_ids={kb_ids} tenant={tenant_id} "
+            f"[检索诊断] query={query!r} search_query={search_query!r} kb_ids={kb_ids} tenant={tenant_id} "
             f"vec_top={best_vec:.3f} bm25_top={best_bm25:.3f} "
             f"merged={len(merged)} rerank={'on' if rerank_key else 'off'}"
         )
@@ -128,6 +147,38 @@ class RagService:
         except Exception as e:
             logger.warning(f"写入检索缓存失败，忽略: {e}")
         return merged
+
+    async def _search_core(
+        self,
+        query: str,
+        kb_ids: list[str],
+        tenant_id: str,
+        cfg: ModelConfig | None,
+    ) -> tuple[list[RetrievalResult], float, float]:
+        """单次混合检索：Query 向量化 + 向量检索 + BM25 + RRF 融合。
+
+        返回 ``(融合结果, 向量最高分, BM25 最高分)``。向量 / BM25 最高分用于
+        相关性门槛判定（RRF 分数会覆盖原始分数，故先在此取原始最高信号）。
+        """
+        # 1. Query 向量化
+        query_vec = await embedding_service.embed_text(query, cfg)
+
+        # 2. 向量检索 Top-K=20
+        vec_results = await vector_store_module.vector_store_service.search(
+            query_vec, kb_ids, tenant_id, top_k=20
+        )
+
+        # 3. BM25 关键词检索 Top-K=20
+        bm25_results = await vector_store_module.vector_store_service.keyword_search(
+            query, kb_ids, tenant_id, top_k=20
+        )
+
+        best_vec = vec_results[0].score if vec_results else 0.0
+        best_bm25 = bm25_results[0].score if bm25_results else 0.0
+
+        # 4. RRF 融合去重
+        merged = self._rrf([vec_results, bm25_results])
+        return merged, best_vec, best_bm25
 
     async def _rerank(
         self,

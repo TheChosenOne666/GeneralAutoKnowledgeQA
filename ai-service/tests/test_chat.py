@@ -17,6 +17,7 @@ import services.vector_store as vs_mod
 from core.config import settings
 from main import app
 from services.document_processor import document_processor
+from services.llm import llm_service
 from services.vector_store import InMemoryVectorStore
 
 VEC = [0.1, 0.2, 0.3, 0.4]  # 固定 4 维向量，保证检索可命中
@@ -33,6 +34,11 @@ async def _fake_embed_batch(texts, cfg=None, client=None):
 async def _fake_stream_generate(question, context="", model=None, history=None, cfg=None, client=None, no_kb_content=False):
     yield "熊"
     yield "答"
+
+
+async def _fake_complete(messages, model=None, cfg=None, client=None):
+    """改写视为原话（no-op），供 enhance=True 路径在单测中不触发真实 LLM 调用。"""
+    return messages[-1].get("content", "")
 
 
 async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
@@ -79,10 +85,11 @@ class ChatRagTest(unittest.TestCase):
         ) as f:
             f.write(text)
             path = f.name
-        # 桩替换 Embedding / LLM，避免真实模型 Key 依赖；覆盖文档处理与流式问答两阶段
+        # 桩替换 Embedding / LLM（含改写 complete），避免真实模型 Key 依赖；
+        # 覆盖文档处理与流式问答两阶段
         with self._patch_services(), patch(
             "services.llm.llm_service.stream_generate", _fake_stream_generate
-        ):
+        ), patch("services.llm.llm_service.complete", _fake_complete):
             asyncio.run(document_processor.process(path, "txt", "kb1", "doc1", "t1"))
             os.unlink(path)
 
@@ -117,7 +124,7 @@ class ChatRagTest(unittest.TestCase):
         ]
         with self._patch_services(), patch(
             "services.llm.llm_service.stream_generate", _fake_stream_generate
-        ):
+        ), patch("services.llm.llm_service.complete", _fake_complete):
             asyncio.run(document_processor.process(path, "txt", "kb1", "doc1", "t1"))
             os.unlink(path)
 
