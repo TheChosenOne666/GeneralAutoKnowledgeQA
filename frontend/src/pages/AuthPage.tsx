@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
+import { useToast } from '@/components/Toast'
 import { userApi } from '@/api/user'
 import type { InviteInfoVO } from '@/types'
 
@@ -17,6 +18,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 export default function AuthPage() {
   const { login, register, acceptInvite } = useAuth()
+  const { success } = useToast()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const inviteToken = searchParams.get('token')
@@ -28,7 +30,6 @@ export default function AuthPage() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [pwdStrength, setPwdStrength] = useState(0)
@@ -153,7 +154,6 @@ export default function AuthPage() {
     setMode(newMode)
     setConfirmPassword('')
     setError('')
-    setSuccess('')
     setShowPassword(false)
     setShowConfirmPassword(false)
   }
@@ -179,15 +179,17 @@ export default function AuthPage() {
     try {
       if (mode === 'login') {
         await login(email, password)
+        success('登录成功')
         navigate('/chat')
       } else if (inviteToken) {
         await acceptInvite(inviteToken, name, email, password)
+        success('加入成功')
         navigate('/chat')
       } else {
         await register(name, email, password)
         // 注册成功：不自动登录，切回登录表单让用户手动登录
         setMode('login')
-        setSuccess('注册成功，请登录')
+        success('注册成功，请登录')
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '操作失败'
@@ -282,9 +284,6 @@ export default function AuthPage() {
             </div>
           )}
 
-          {success && (
-            <div className="mb-4 px-4 py-2 rounded-lg bg-emerald-50 text-emerald-700 text-sm fade-in">{success}</div>
-          )}
           {error && (
             <div className="mb-4 px-4 py-2 rounded-lg bg-red-50 text-red-600 text-sm fade-in">{error}</div>
           )}

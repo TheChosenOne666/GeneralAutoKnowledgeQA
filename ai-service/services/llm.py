@@ -55,6 +55,35 @@ class LlmService:
         )
         messages.append({"role": "user", "content": user_content})
 
+        async for token in self._stream(messages, model, cfg, client):
+            yield token
+
+    async def stream_messages(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+        cfg: ModelConfig | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """给定完整 messages 列表流式生成（逐 token yield）。
+
+        M4-1 Agent ReAct 循环使用：每轮把累积的推理转录作为 messages 传入，
+        由调用方控制 system / history / 工具观察的完整上下文。
+        """
+        cfg = cfg or ModelConfig.from_settings()
+        if not cfg.has_llm():
+            raise ModelConfigError("未配置 LLM API Key，请在 AI 配置页填写后重试")
+        async for token in self._stream(messages, model, cfg, client):
+            yield token
+
+    async def _stream(
+        self,
+        messages: list[dict],
+        model: str | None,
+        cfg: ModelConfig,
+        client: httpx.AsyncClient | None,
+    ) -> AsyncGenerator[str, None]:
+        """流式调用 OpenAI 兼容 chat/completions 的核心实现（共享于上述两个方法）。"""
         base_url = cfg.llm_base_url or settings.llm_base_url
         model_name = model or cfg.llm_model or settings.llm_model
         _llm_key = cfg.llm_api_key or ""

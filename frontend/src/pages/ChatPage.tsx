@@ -26,10 +26,24 @@ function isModelConfigured(cfg: AIConfig | null, key: 'llm' | 'embedding'): bool
   return Boolean(provider && model)
 }
 
+/** 单条 Agent 推理步骤（M4-1 智能推理模式）。*/
+interface AgentStep {
+  step: number
+  type: 'thought' | 'action' | 'observation'
+  content: string
+  tool?: string
+  input?: string
+  success?: boolean
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   sources?: SourceItem[]
+  /** M4-1：智能推理（Agent）模式的推理步骤树。*/
+  agentSteps?: AgentStep[]
+  /** 该消息产生时使用的问答模式。*/
+  mode?: 'rag' | 'agent'
   /** 消息时间（YYYY-MM-DD HH:mm），用于展示在用户消息下方。*/
   time?: string
 }
@@ -76,6 +90,76 @@ function SourceCard({ source }: { source: SourceItem }) {
   )
 }
 
+/** 单步推理步骤的图标与配色（M4-1 智能推理）。*/
+const STEP_META: Record<AgentStep['type'], { label: string; icon: JSX.Element; badge: string }> = {
+  thought: {
+    label: '思考',
+    badge: 'bg-violet-100 text-violet-700',
+    icon: (
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+    ),
+  },
+  action: {
+    label: '调用工具',
+    badge: 'bg-amber-100 text-amber-700',
+    icon: (
+      <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437 1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z" />
+    ),
+  },
+  observation: {
+    label: '观察结果',
+    badge: 'bg-emerald-100 text-emerald-700',
+    icon: (
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
+    ),
+  },
+}
+
+/** 推理过程面板 — 展示 Agent 多步推理的 Think/Act/Observe 步骤树。*/
+function AgentSteps({ steps }: { steps: AgentStep[] }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <div className="mt-3 pt-3 border-t border-emerald-200">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-brand-600 transition"
+      >
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+        </svg>
+        推理过程（{steps.length} 步）
+        <svg className={`w-3 h-3 transition-transform ${open ? '' : '-rotate-90'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+        </svg>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {steps.map((s, i) => {
+            const meta = STEP_META[s.type]
+            const fail = s.type === 'observation' && s.success === false
+            return (
+              <div key={i} className="rounded-lg bg-white/70 border border-emerald-100 px-3 py-2">
+                <div className="flex items-center gap-2 mb-1">
+                  <svg className={`w-3.5 h-3.5 flex-shrink-0 ${fail ? 'text-red-500' : 'text-brand-500'}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    {meta.icon}
+                  </svg>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${fail ? 'bg-red-100 text-red-600' : meta.badge}`}>{meta.label}</span>
+                  {s.tool && <span className="text-[10px] text-slate-400 truncate">@{s.tool}</span>}
+                </div>
+                {s.type === 'action' && s.input ? (
+                  <pre className="text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{s.input}</pre>
+                ) : (
+                  <p className="text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{s.content}</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const SUGGESTIONS = [
   '文档"这是一个测试文档.docx"的具体内容是什么？',
   '如何编辑首页文档中的愿景和目标部分？',
@@ -91,6 +175,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
+  // M4-1：问答模式（普通 RAG / 智能推理 Agent），默认普通问答
+  const [mode, setMode] = useState<'rag' | 'agent'>('rag')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const loadToken = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -216,7 +302,7 @@ export default function ChatPage() {
     setStreaming(true)
     setModelConfigError(false)
     followRef.current = true // 发送后主动跳到底部并跟随 AI 回复
-    setMessages((prev) => [...prev, { role: 'user', content: text, time: formatTime(new Date()) }, { role: 'assistant', content: '' }])
+    setMessages((prev) => [...prev, { role: 'user', content: text, time: formatTime(new Date()) }, { role: 'assistant', content: '', mode }])
     scrollToBottom('smooth')
 
     try {
@@ -226,6 +312,7 @@ export default function ChatPage() {
         history,
         controller.signal,
         selectedModel || undefined,
+        mode,
       )
       const decoder = new TextDecoder()
       let buffer = ''
@@ -262,6 +349,26 @@ export default function ChatPage() {
             const parsed = JSON.parse(data)
             if (currentEvent === 'sources' && Array.isArray(parsed.sources)) {
               updateLast({ sources: parsed.sources as SourceItem[] })
+            } else if (currentEvent === 'agent_step' && parsed) {
+              // M4-1：智能推理步骤（thought / action / observation）累积展示
+              setMessages((prev) => {
+                const next = [...prev]
+                const idx = next.length - 1
+                const m = next[idx]
+                if (m?.role === 'assistant') {
+                  const steps = [...(m.agentSteps || [])]
+                  steps.push({
+                    step: parsed.step,
+                    type: parsed.type,
+                    content: parsed.content || '',
+                    tool: parsed.tool,
+                    input: parsed.input,
+                    success: parsed.success,
+                  })
+                  next[idx] = { ...m, agentSteps: steps }
+                }
+                return next
+              })
             } else if (currentEvent === 'token' && parsed.content) {
               aiContent += parsed.content
               updateLast({ content: aiContent })
@@ -402,9 +509,12 @@ export default function ChatPage() {
                               {msg.content}
                             </ReactMarkdown>
                           ) : (
-                            streaming && i === messages.length - 1 && '思考中...'
+                            streaming && i === messages.length - 1 && !msg.agentSteps?.length && '思考中...'
                           )}
                         </div>
+                      )}
+                      {msg.role === 'assistant' && msg.agentSteps && msg.agentSteps.length > 0 && (
+                        <AgentSteps steps={msg.agentSteps} />
                       )}
                       {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                         <div className="mt-3 pt-3 border-t border-emerald-200 space-y-2">
@@ -459,23 +569,31 @@ export default function ChatPage() {
                 autoResize()
               }}
               onKeyDown={handleKeyDown}
-              placeholder="输入问题，将基于知识库和网络搜索回答"
+              placeholder={mode === 'agent' ? '输入问题，AI 将多步推理并检索知识库回答' : '输入问题，将基于知识库和网络搜索回答'}
               className="w-full px-5 py-4 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none max-h-[200px] overflow-y-auto"
               rows={1}
               disabled={streaming}
             />
             <div className="px-3 pb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {/* 智能推理 */}
-                <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-slate-600 text-xs font-medium hover:bg-emerald-50 hover:text-brand-700 cursor-pointer transition">
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
-                  </svg>
-                  智能推理
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                  </svg>
-                </button>
+                {/* M4-1：问答模式切换（普通 RAG / 智能推理 Agent） */}
+                <div className="flex items-center gap-0.5 bg-emerald-50 border border-emerald-200 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setMode('rag')}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'rag' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
+                  >
+                    普通问答
+                  </button>
+                  <button
+                    onClick={() => setMode('agent')}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'agent' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+                    </svg>
+                    智能推理
+                  </button>
+                </div>
                 {/* 图片 */}
                 <button className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-50 cursor-pointer transition" title="图片">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">

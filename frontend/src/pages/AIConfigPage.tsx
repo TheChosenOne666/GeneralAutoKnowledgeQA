@@ -1,8 +1,10 @@
 /** AI 模型配置页 — 按 04-ai-config.html 设计稿，接通后端读取/保存。 */
 
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { aiConfigApi } from '@/api/aiConfig'
 import { useAuth } from '@/hooks/useAuth'
+import { useToast } from '@/components/Toast'
 import type { AIConfig, AIConfigUpdateRequest } from '@/types'
 
 const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek']
@@ -116,12 +118,15 @@ function Field({
   value,
   onChange,
   placeholder,
+  autoComplete = 'off',
 }: {
   label: string
   type?: string
   value: string
   onChange: (v: string) => void
   placeholder?: string
+  /** 默认 off，阻止浏览器把登录保存的账号密码自动填入本页（M4 修复）。密码类字段传 new-password。*/
+  autoComplete?: string
 }) {
   return (
     <div>
@@ -131,6 +136,7 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder ?? label}
+        autoComplete={autoComplete}
         className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-700"
       />
     </div>
@@ -171,6 +177,8 @@ function ProviderSelect({
 
 export default function AIConfigPage() {
   const { user } = useAuth()
+  const { success } = useToast()
+  const navigate = useNavigate()
   const isSuperAdmin = user?.role === 'super_admin'
   /** 配置作用域：超管可在「我的配置」与「平台默认配置」间切换。*/
   const [scope, setScope] = useState<'user' | 'platform'>('user')
@@ -245,7 +253,11 @@ export default function AIConfigPage() {
           : await aiConfigApi.updateConfig(toRequest(form))
       setConfig(updated)
       setForm(toForm(updated))
-      setFeedback({ type: 'success', msg: scope === 'platform' ? '平台默认配置已保存' : '配置已保存' })
+      success(scope === 'platform' ? '平台默认配置已保存' : '配置保存成功')
+      // 普通用户保存成功后，顶部绿色提示并自动跳转到对话页
+      if (scope !== 'platform') {
+        window.setTimeout(() => navigate('/chat'), 1200)
+      }
     } catch (err) {
       setFeedback({ type: 'error', msg: `保存失败：${err instanceof Error ? err.message : '请稍后重试'}` })
     } finally {
@@ -379,7 +391,7 @@ export default function AIConfigPage() {
                   </div>
                 )}
               </div>
-              <Field label="API Key" type="password" value={form.llmApiKey} onChange={(v) => set({ llmApiKey: v })} placeholder={config?.llmProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
+              <Field label="API Key" type="password" autoComplete="new-password" value={form.llmApiKey} onChange={(v) => set({ llmApiKey: v })} placeholder={config?.llmProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
               <Field label="API Endpoint" value={form.llmBaseUrl} onChange={(v) => set({ llmBaseUrl: v })} placeholder="https://ark.cn-beijing.volces.com/api/v3" />
               <Field label="温度" type="number" value={form.llmTemperature} onChange={(v) => set({ llmTemperature: v })} placeholder="0.7" />
               <Field label="最大 Token" type="number" value={form.llmMaxTokens} onChange={(v) => set({ llmMaxTokens: v })} placeholder="4096" />
@@ -392,7 +404,7 @@ export default function AIConfigPage() {
             <div className="space-y-3">
               <ProviderSelect label="提供商" value={form.embeddingProvider} options={EMBEDDING_PROVIDERS} onChange={applyEmbeddingProviderDefaults} />
               <Field label="模型" value={form.embeddingModel} onChange={(v) => set({ embeddingModel: v })} placeholder="doubao-embedding" />
-              <Field label="API Key" type="password" value={form.embeddingApiKey} onChange={(v) => set({ embeddingApiKey: v })} placeholder={config?.embeddingProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
+              <Field label="API Key" type="password" autoComplete="new-password" value={form.embeddingApiKey} onChange={(v) => set({ embeddingApiKey: v })} placeholder={config?.embeddingProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
               <Field label="API Endpoint" value={form.embeddingBaseUrl} onChange={(v) => set({ embeddingBaseUrl: v })} placeholder="https://ark.cn-beijing.volces.com/api/v3" />
               <Field label="向量维度" type="number" value={form.embeddingDimension} onChange={(v) => set({ embeddingDimension: v })} placeholder="1536" />
             </div>
@@ -414,7 +426,7 @@ export default function AIConfigPage() {
               </div>
               <div>
                 <label className="block text-xs text-slate-500 mb-1">API Key</label>
-                <input disabled type="password" className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-400" placeholder="API Key" />
+                <input disabled type="password" autoComplete="new-password" className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-400" placeholder="API Key" />
               </div>
             </div>
           </div>

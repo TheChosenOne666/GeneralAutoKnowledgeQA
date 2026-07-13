@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
+from services.agent import run_agent
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.rag import rag_service
@@ -62,6 +63,27 @@ async def chat_stream(body: ChatStreamRequest):
             logger.info(f"[M3-3诊断] ModelConfig已构建: llm={cfg.llm_provider}/{cfg.llm_model} "
                         f"emb={cfg.embedding_provider}/{cfg.embedding_model} "
                         f"has_llm_key={cfg.has_llm()} has_emb_key={cfg.has_embedding()}")
+        # M4-1：Agent 多步推理模式（自研 ReAct 循环）
+        if body.mode == "agent":
+            try:
+                async for evt in run_agent(
+                    question=body.question,
+                    kb_ids=body.kb_ids,
+                    tenant_id=body.tenant_id,
+                    model=body.model or None,
+                    history=body.history,
+                    cfg=cfg,
+                ):
+                    yield _sse(evt["event"], evt["data"])
+            except Exception as e:
+                logger.exception(f"Agent 执行异常: {e}")
+                yield _sse("error", {"error_type": "AGENT_ERROR", "message": str(e)})
+            yield _sse(
+                "done",
+                {"conversation_id": body.conversation_id, "sources": []},
+            )
+            return
+
         context = ""
         sources = []
         if body.mode == "rag":

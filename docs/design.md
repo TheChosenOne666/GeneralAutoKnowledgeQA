@@ -59,7 +59,7 @@
 | 异常处理 | **BusinessException + ThrowUtils + GlobalExceptionHandler** | 全局兜底 |
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
 | 缓存 | Redis | 三层缓存（L3 会话 / L1 检索 / L2 嵌入） |
-| **AI 服务** | **Python + FastAPI + LangChain** | RAG 检索、Agent 推理、文档处理 |
+| **AI 服务** | **Python + FastAPI**（RAG 检索 / 自研 ReAct Agent 推理 / 文档处理；LangChain 为可选依赖） | RAG 检索、Agent 推理、文档处理 |
 | 向量数据库 | Milvus | 文档向量存储与检索 |
 | 文档解析 | PyMuPDF（PDF）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
 
@@ -187,6 +187,8 @@ const menuItems = [
 - **前端**：新增 `TenantContext`（`context/TenantContext.tsx`），超管登录后加载全部租户并默认选中 `localStorage` 中已选（否则第一个）；切换器写入 `localStorage` 的 `xiongda_current_tenant`。`api/client.ts` 请求拦截器携带 `X-Tenant-ID` 头。`AppLayout` 仅对超管渲染租户切换器，并将其有效角色映射为可见 `tenant_admin` 菜单（知识库 / 成员管理），同时主内容区以 `currentTenantId` 为 `key` 重挂，触发各业务页重新加载该租户数据；`ChatContext` 在 `currentTenantId` 变化时清空并刷新对话列表。
 - **效果**：超管在侧边栏切到「租户A」后，知识库 / 成员管理 / 对话 / AI 模型配置均按租户A展示与操作，复用既有页面与接口，无需新建跨租户列表。
 
+**全局顶部 Toast 提示（2026-07-14）**：新增通用组件 `frontend/src/components/Toast.tsx`，由 `ToastProvider` 挂在 `main.tsx` 应用根部；固定页面顶部居中绿色（成功）/红色（失败）横幅，含图标，3 秒自动消失。登录/注册/邀请成功、AI 配置保存成功均调用 `useToast().success` 在顶部弹出绿色提示；普通用户保存 AI 配置成功后延迟 1.2 秒自动跳转 `/chat`。替代原先卡片内小横幅式的成功提示，统一为页面顶部绿色提示。
+
 ---
 
 ## 4. 知识库设计
@@ -285,7 +287,14 @@ LLM 生成回答（SSE 流式输出）
 引用溯源（标注来源文档 + 页码）
 ```
 
-### 5.3 Agent 多步推理
+### 5.3 Agent 多步推理（M4-1）
+
+采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），基于 LLM 文本协议（Thought / Action / Action Input / Final Answer），与腾讯 WeKnora 的自研 ReAct 引擎思路一致。
+
+- **触发方式**：问答页底部「普通问答 / 智能推理」分段切换，前端 `mode=agent` 经 Java 透传至 Python `/ai/chat/stream`（`ChatController` → `AiServiceClient` 早已支持 `mode` 透传，Java 无需改动）。
+- **循环**：`services/agent.py` 的 `run_agent` 每轮调用 `llm_service.stream_messages` 生成 ReAct 文本 → 解析 `parse_react` → 执行工具 → 回填 Observation，直到 `Final Answer` 或达到最大轮数（`MAX_AGENT_ITERATIONS=5`）。
+- **工具范围（M4-1）**：仅 `knowledge_base_search`（包 `rag_service.retrieve`）。联网搜索工具（`web_search`）留待 M4-3，届时仅新增一个工具注册 + 开关，架构零改动。
+- **SSE 事件契约**：`agent_step`（type=thought/action/observation，含 tool/input/success）、`sources`、`token`（最终答案流式）、`error`（MODEL_CONFIG_ERROR / AGENT_ERROR）、`done`。前端 `ChatPage.tsx` 的 `AgentSteps` 组件将推理步骤渲染为可折叠的步骤树。
 
 复杂问题触发 ReAct Agent：
 
@@ -295,9 +304,9 @@ LLM 生成回答（SSE 流式输出）
 示例：
 Q: "我们公司的年假政策是什么？和病假有什么区别？"
 Thought: 需要查找年假和病假政策
-Action: search("年假政策")
+Action: knowledge_base_search  Action Input: {"query": "年假政策"}
 Observation: 找到员工手册第3章...
-Action: search("病假政策")
+Action: knowledge_base_search  Action Input: {"query": "病假政策"}
 Observation: 找到员工手册第4章...
 Thought: 对比两者差异
 Final Answer: 年假...病假...区别...

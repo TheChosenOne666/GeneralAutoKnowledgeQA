@@ -34,13 +34,14 @@ export const chatApi = {
       .get<BaseResponse<Message[]>>('/chat/message/list', { params: { conversationId } })
       .then((r) => r.data.data),
 
-  /** SSE 流式问答 — 返回 ReadableStream reader。可传 signal 主动中断，model 指定对话模型。*/
+  /** SSE 流式问答 — 返回 ReadableStream reader。可传 signal 主动中断，model 指定对话模型，mode 指定问答模式。*/
   streamChat: async (
     content: string,
     conversationId?: string,
     history?: ChatHistoryItem[],
     signal?: AbortSignal,
     model?: string,
+    mode?: 'rag' | 'agent',
   ) => {
     const token = getToken()
     const response = await fetch('/api/chat/message/stream', {
@@ -52,7 +53,7 @@ export const chatApi = {
       body: JSON.stringify({
         content,
         conversationId: conversationId ? conversationId : null,
-        mode: 'rag',
+        mode: mode ?? 'rag',
         history: history ?? [],
         model: model ? model : null,
       }),
