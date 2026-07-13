@@ -972,4 +972,12 @@ M3 全部 ──→ M4-8 部署
 **背景**：第 11 项初版在「历史记录」标题下加了时间范围 `<select>` 筛选下拉（30 档：全部/今天/昨天/近3天/近7天/1个月内…2年内），用户反馈下拉框布局突兀、观感不舒服。
 **调整**：移除筛选下拉框，改为用户期望的「原本那样的分组标题灰色字体 + 超过 7 天用可折叠小箭头」交互（见第 11 项最终形态）。纯前端改动，不触碰后端接口。
 
+### 13. Bug 修复：点击历史会话全部显示「加载历史消息失败」（2026-07-13）
+**问题**：点击左侧任意有消息的历史会话，聊天区统一显示「加载历史消息失败，请稍后重试。」；空会话正常。
+**根因**：`GET /api/chat/message/list` 后端返回正常（`code:0`，真实数据已验证），问题在 `ChatPage.tsx` 的 `.then` 回调里抛异常被 `.catch` 捕获并统一显示该提示。具体：`MessageVO.createTime` 后端为 `Date`，经 JSON 序列化后变成**数字时间戳**（如 `1783923822524`）；`listMessages` 中 `formatTime(m.createTime)` 调用时，`formatTime(input: string | Date)` 对 number 走 `d = input`（即 number），随后 `d.getTime()` 抛 `TypeError`。空会话 `data:[]` 不进 map，故不报错——与「有消息会话全失败、空会话正常」现象完全吻合（用真实会话 ID 直连后端验证：返回 `code:0` 且数据完整）。
+**修复**（`frontend/src/pages/ChatPage.tsx` + `frontend/src/types/index.ts`）：
+- `formatTime` 入参由 `string | Date` 扩展为 `string | number | Date`，number 分支 `new Date(input)` 正确还原时间。
+- `Message.createTime` 类型由 `string` 改为 `string | number`，与后端实际返回（数字时间戳）对齐，避免类型声明误导。
+**验证**：`npm run build`（`tsc -b && vite build`）通过 EXIT=0、lint 0 错误；dev server HMR 已热更新，刷新历史会话可正常加载消息与时间。
+
 

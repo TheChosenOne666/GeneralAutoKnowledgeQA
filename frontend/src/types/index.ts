@@ -70,7 +70,8 @@ export interface Message {
   content: string
   sources: string | null
   model: string | null
-  createTime: string
+  /** 后端返回数字时间戳（JSON 序列化 Date 所得）或字符串，前端统一兼容。*/
+  createTime: string | number
 }
 
 /** 引用来源（RAG 检索片段，后端以 JSON 字符串存于 Message.sources）。*/

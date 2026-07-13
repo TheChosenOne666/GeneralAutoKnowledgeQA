@@ -35,8 +35,13 @@ interface ChatMessage {
 }
 
 /** 将时间格式化为「YYYY-MM-DD HH:mm」。*/
-function formatTime(input: string | Date): string {
-  const d = typeof input === 'string' ? new Date(input) : input
+function formatTime(input: string | number | Date): string {
+  const d =
+    typeof input === 'number'
+      ? new Date(input)
+      : typeof input === 'string'
+        ? new Date(input)
+        : input
   if (isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
