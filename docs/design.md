@@ -149,6 +149,10 @@ public Object doInterceptor(ProceedingJoinPoint joinPoint, AuthCheck authCheck) 
 // tenant_admin → 读写
 ```
 
+> **M4-2 共享/个人知识库（2026-07-14 完成）**：前述数据级权限已落地。
+> - **后端（M3-1 已完成并单测覆盖）**：`service/KbPermission.java` 的 `assertCanCreate` / `assertCanWrite` 集中实现——共享库仅 `tenant_admin` / `super_admin` 可创建与写入（上传/删除文档），个人库仅 owner 可写，超管跨租户完全放行，并叠加租户隔离第一维度；`DocumentServiceImpl.uploadDocument` / `deleteDocument` 与 `KnowledgeBaseServiceImpl.createKnowledgeBase` 均调用校验，`KbPermissionTest` 12 例覆盖全部路径。
+> - **前端（本次补齐）**：`KnowledgeBasePage.tsx` 引入 `useAuth()` 取当前角色，计算 `canWrite`（共享库仅管理员为真、个人库全员为真，因个人库列表仅返回本人库）；据此隐藏「新建知识库 / 上传文档 / 文档删除」按钮与上传区，普通成员在共享库下呈**只读模式**，并显示横幅提示「仅租户管理员可维护」；个人库保持完整管理（创建/上传/删除）。后端校验为最终防线，前后端一致。
+
 ### 3.3 菜单动态渲染
 
 前端根据用户角色动态渲染侧边栏菜单：

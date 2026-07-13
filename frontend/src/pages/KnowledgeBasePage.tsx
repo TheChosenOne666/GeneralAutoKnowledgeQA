@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { knowledgeApi } from '@/api/knowledge'
+import { useAuth } from '@/hooks/useAuth'
 import type { Document, KnowledgeBase } from '@/types'
 
 const STATUS_CONFIG: Record<string, { text: string; cls: string; icon: string }> = {
@@ -51,6 +52,10 @@ export default function KnowledgeBasePage() {
   const [viewLoading, setViewLoading] = useState(false)
   const [viewError, setViewError] = useState('')
   const navigate = useNavigate()
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'tenant_admin' || user?.role === 'super_admin'
+  // 共享库仅租户管理员 / 平台超管可维护；个人库仅展示本人库，全员可维护
+  const canWrite = tab === 'personal' ? true : isAdmin
 
   // 是否存在因 AI 模型配置错误（API Key/模型名/向量维度填错）导致处理失败的文档
   const hasModelConfigError = documents.some((d) => d.modelConfigError)
@@ -182,26 +187,28 @@ export default function KnowledgeBasePage() {
             </select>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowCreate(true)}
-            className="px-4 py-2 border border-emerald-200 text-slate-600 text-sm font-semibold rounded-lg flex items-center gap-2 hover:bg-emerald-50 transition"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-            新建知识库
-          </button>
-          <button
-            onClick={() => selectedKb ? fileInputRef.current?.click() : alert('请先选择或创建知识库')}
-            className="px-4 py-2 bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-[0_8px_32px_rgba(16,185,129,0.3)] hover:opacity-90 transition"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-            </svg>
-            上传文档
-          </button>
-        </div>
+        {canWrite && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreate(true)}
+              className="px-4 py-2 border border-emerald-200 text-slate-600 text-sm font-semibold rounded-lg flex items-center gap-2 hover:bg-emerald-50 transition"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              新建知识库
+            </button>
+            <button
+              onClick={() => selectedKb ? fileInputRef.current?.click() : alert('请先选择或创建知识库')}
+              className="px-4 py-2 bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-[0_8px_32px_rgba(16,185,129,0.3)] hover:opacity-90 transition"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              上传文档
+            </button>
+          </div>
+        )}
         <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} accept=".pdf,.docx,.md,.txt" />
       </div>
 
@@ -223,6 +230,16 @@ export default function KnowledgeBasePage() {
             >
               去配置
             </button>
+          </div>
+        )}
+
+        {/* 共享库只读提示：普通成员仅可浏览与问答，无法上传/删除 */}
+        {tab === 'shared' && !isAdmin && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            <svg className="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+            </svg>
+            只读模式：共享知识库仅租户管理员可维护，你当前可浏览与问答，但无法上传或删除文档。
           </div>
         )}
 
@@ -259,11 +276,14 @@ export default function KnowledgeBasePage() {
               </svg>
             </div>
             <p className="text-slate-500 text-sm mb-4">暂无{tab === 'shared' ? '共享' : '个人'}知识库</p>
-            <button onClick={() => setShowCreate(true)} className="px-4 py-2 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold">新建知识库</button>
+            {canWrite && (
+              <button onClick={() => setShowCreate(true)} className="px-4 py-2 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 text-white text-sm font-semibold">新建知识库</button>
+            )}
           </div>
         ) : (
           <>
-            {/* 上传区 */}
+            {/* 上传区（仅可写角色可见） */}
+            {canWrite && (
             <div
               onClick={() => fileInputRef.current?.click()}
               className="border-2 border-dashed border-emerald-200 rounded-2xl p-8 text-center mb-6 bg-emerald-50/30 hover:border-brand-400 hover:bg-emerald-50/50 transition cursor-pointer"
@@ -276,6 +296,7 @@ export default function KnowledgeBasePage() {
               <div className="text-brand-700 font-semibold text-base mb-1">拖拽文件到此处，或点击选择文件</div>
               <div className="text-slate-500 text-sm">支持 PDF / Word / Markdown / TXT · 单文件最大 50MB</div>
             </div>
+            )}
 
             {/* 文档表格 */}
             <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden">
@@ -329,7 +350,9 @@ export default function KnowledgeBasePage() {
                         </td>
                         <td className="px-4 py-3.5 text-sm text-slate-500">{formatTime(doc.createTime)}</td>
                         <td className="px-4 py-3.5">
-                          <button onClick={() => handleDelete(doc.id)} className="px-2.5 py-1 rounded-md bg-red-50 text-red-600 text-xs font-semibold hover:bg-red-100 transition">删除</button>
+                          {canWrite && (
+                            <button onClick={() => handleDelete(doc.id)} className="px-2.5 py-1 rounded-md bg-red-50 text-red-600 text-xs font-semibold hover:bg-red-100 transition">删除</button>
+                          )}
                         </td>
                       </tr>
                     )

@@ -703,14 +703,13 @@ Python（AI 服务）
 
 ---
 
-### M4-2 共享/个人知识库完善 [全栈] P1 · 1d
+### M4-2 共享/个人知识库完善 [全栈] P1 · 1d ✅ 完成
 
-- **Java**: 知识库 scope 权限校验细化
-- **Java**: 共享库仅 tenant_admin 可上传/删除
-- **前端**: 共享库只读模式（普通成员隐藏上传/删除按钮）
-- **前端**: 个人库完整管理
+- **Java（M3-1 已落地，本次确认已覆盖）**：`service/KbPermission.java` 的 `assertCanCreate` / `assertCanWrite` 已完成 scope 权限校验细化 —— 共享库仅 `tenant_admin` / `super_admin` 可创建与上传/删除，个人库仅 owner 可写，超管跨租户放行，叠加租户隔离；`DocumentServiceImpl` 上传/删除、`KnowledgeBaseServiceImpl.createKnowledgeBase` 均调用校验。`KbPermissionTest` 12 例覆盖创建/写入/租户隔离/超管放行全部路径。
+- **前端（本次补齐）**：`KnowledgeBasePage.tsx` 引入 `useAuth()` 取角色，计算 `canWrite`（共享库仅管理员为真、个人库全员为真）；据此隐藏「新建知识库 / 上传文档 / 文档删除」按钮与上传区，普通成员在共享库下呈**只读模式**并显示「仅租户管理员可维护」横幅；个人库保持完整管理（创建/上传/删除）。前端隐藏为体验层，后端 `KbPermission` 校验为最终防线，前后端一致。
+- **验证**：`npm run build` 通过（tsc + vite，564 模块，0 错误）；后端 `KbPermissionTest` 12 例全过。浏览器端需以普通成员账号登录验证共享库只读效果（环境无现成 member 账号，待联调）。
 - **依赖**: M3-1
-- **产出**: 共享/个人库权限正确
+- **产出**: 共享/个人库权限正确（创建/写仅管理员、个人库仅 owner，读全员开放）
 
 ---
 
