@@ -8,6 +8,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
 import com.xiongda.model.entity.AiConfig;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -134,6 +135,52 @@ public class AiServiceClient {
                 .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
                 .timeout(java.time.Duration.ofMinutes(10))
                 .block();
+    }
+
+    /**
+     * 提取文档按页分段文本（供前端预览真实翻页，M4-4 增强）。
+     *
+     * <p>纯本地解析，不依赖模型配置；PDF 用真实页码，docx/txt/md 用估算页码。
+     * Python 服务不可用或解析失败时返回空列表，由调用方降级到已存全文估算。</p>
+     *
+     * @param filePath 文件绝对路径
+     * @param fileType 文件类型（pdf / docx / md / txt）
+     * @return 每页的 {page_no, text} 列表；失败返回空列表
+     */
+    public List<Map<String, Object>> extractPages(String filePath, String fileType) {
+        Map<String, Object> requestBody = new LinkedHashMap<>();
+        requestBody.put("file_path", filePath);
+        requestBody.put("file_type", fileType);
+        try {
+            Map<String, Object> resp = webClient.post()
+                    .uri("/ai/document/extract-pages")
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(java.time.Duration.ofMinutes(2))
+                    .block();
+            if (resp == null || !"ok".equals(resp.get("status"))) {
+                log.warn("[文档诊断] Python extract-pages 失败 file={} reason={}",
+                        filePath, resp == null ? "null" : resp.get("error"));
+                return List.of();
+            }
+            Object pagesObj = resp.get("pages");
+            if (pagesObj instanceof List<?> pages) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Object p : pages) {
+                    if (p instanceof Map<?, ?> m) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> pageMap = (Map<String, Object>) m;
+                        result.add(pageMap);
+                    }
+                }
+                return result;
+            }
+            return List.of();
+        } catch (Exception e) {
+            log.warn("[文档诊断] 调 Python extract-pages 异常 file={} : {}", filePath, e.getMessage());
+            return List.of();
+        }
     }
 
     /**

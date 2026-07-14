@@ -129,6 +129,9 @@ async def chat_stream(body: ChatStreamRequest):
             except ModelConfigError as e:
                 logger.warning(f"模型配置错误（检索阶段）：{e}")
                 yield _sse("error", {"error_type": "MODEL_CONFIG_ERROR", "message": str(e)})
+                # 配置已确认错误，直接结束（不再无谓重试 LLM，避免重复 error 事件）
+                yield _sse("done", {"conversation_id": body.conversation_id, "sources": []})
+                return
             except Exception as e:
                 logger.warning(f"RAG 检索失败，降级为无上下文问答: {e}")
                 sources = []

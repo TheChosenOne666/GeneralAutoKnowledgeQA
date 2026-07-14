@@ -9,6 +9,8 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { chatApi } from '@/api/chat'
 import { aiConfigApi } from '@/api/aiConfig'
+import { knowledgeApi } from '@/api/knowledge'
+import type { FileStatus, DocumentPage } from '@/api/knowledge'
 import { useChat } from '@/context/ChatContext'
 import type { ChatHistoryItem, Message, SourceItem, AIConfig } from '@/types'
 
@@ -72,9 +74,10 @@ function parseSources(raw: string | null): SourceItem[] {
   }
 }
 
-/** 引用来源卡片 — 文件名 + 页码（或 URL）+ 查看原文（展开检索片段，M4-3 支持联网搜索结果）。*/
+/** 引用来源卡片 — 文件名 + 页码（或 URL）+ 查看原文（展开检索片段），M4-3 支持联网搜索结果，M4-4 支持查看原文件。 */
 function SourceCard({ source }: { source: SourceItem }) {
   const [open, setOpen] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
   const isWeb = source.kb_id === 'web'
   return (
     <div className="rounded-lg bg-white/70 border border-emerald-100 px-3 py-2">
@@ -98,7 +101,202 @@ function SourceCard({ source }: { source: SourceItem }) {
         )}
         <span className="text-[10px] text-brand-500 flex-shrink-0">{open ? '收起' : '查看原文'}</span>
       </button>
-      {open && <p className="mt-2 text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{source.content}</p>}
+      {open && (
+        <>
+          <p className="mt-2 text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{source.content}</p>
+          {!isWeb && source.doc_id && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowPreview(true) }}
+              className="mt-2 inline-flex items-center gap-1 text-[11px] text-brand-600 hover:text-brand-700 font-medium transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+              </svg>
+              查看原文件
+            </button>
+          )}
+        </>
+      )}
+      {showPreview && (
+        <DocumentPreviewModal
+          docId={source.doc_id}
+          page={source.page}
+          onClose={() => setShowPreview(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** 文档原文件预览弹窗（M4-4 增强）。
+ * 统一用后端「真实分页」文本翻页，覆盖所有可上传格式（pdf/docx/txt/md）：
+ * - PDF：后端 PyMuPDF 逐页真实页码
+ * - DOCX / TXT / MD：后端按 CHARS_PER_PAGE 估算页码
+ * 均与问答引用来源的页码口径一致，实现精准翻页。*/
+function DocumentPreviewModal({ docId, page, onClose }: { docId: string; page: number; onClose: () => void }) {
+  const [pages, setPages] = useState<DocumentPage[]>([])
+  const [pagesLoading, setPagesLoading] = useState(true)
+  // 预览前置校验状态：文件缺失/被改时给出提示，仍可用已提取文本预览
+  const [fileStatus, setFileStatus] = useState<'checking' | 'ok' | 'missing' | 'changed' | 'error'>('checking')
+  const [statusMessage, setStatusMessage] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
+  const [scale, setScale] = useState(1)
+  const [jumpInput, setJumpInput] = useState('')
+
+  // 文件状态校验（缺失/被改提示，不阻塞预览）
+  useEffect(() => {
+    let cancelled = false
+    knowledgeApi
+      .checkDocumentFileStatus(docId)
+      .then((data: FileStatus | null | undefined) => {
+        if (cancelled) return
+        if (!data || data.exists === false) {
+          setFileStatus('missing')
+          setStatusMessage(data?.message || '原文件不可用，预览基于已提取文本')
+        } else if (data.changed) {
+          setFileStatus('changed')
+          setStatusMessage(data.message || '原文件可能已被修改，预览内容可能与知识库索引不一致')
+        } else {
+          setFileStatus('ok')
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFileStatus('error')
+          setStatusMessage('无法校验文件状态，请稍后重试')
+        }
+      })
+    return () => { cancelled = true }
+  }, [docId])
+
+  // 加载真实分页（PDF 真实页码 / docx-txt-md 估算页码，均与引用来源一致）
+  useEffect(() => {
+    let cancelled = false
+    setPagesLoading(true)
+    knowledgeApi
+      .getDocumentPages(docId)
+      .then((ps) => {
+        if (cancelled) return
+        setPages(ps && ps.length ? ps : [])
+      })
+      .catch(() => {
+        if (!cancelled) setPages([])
+      })
+      .finally(() => {
+        if (!cancelled) setPagesLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [docId])
+
+  const totalPages = pages.length
+
+  // 打开时定位到引用来源对应的页码
+  useEffect(() => {
+    if (page > 0) setCurrentPage(Math.min(Math.max(1, page), totalPages || 1))
+  }, [page, totalPages])
+
+  // 跳转到指定页（来自页码输入框）
+  const goToPage = (p: number) => {
+    if (!Number.isFinite(p)) return
+    setCurrentPage(Math.min(Math.max(1, Math.floor(p)), totalPages))
+    setJumpInput('')
+  }
+
+  const currentText = totalPages ? (pages[currentPage - 1]?.text ?? '') : ''
+  const showPager = totalPages > 0
+  const showBanner = fileStatus === 'missing' || fileStatus === 'changed' || fileStatus === 'error'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-2xl w-[90vw] max-w-4xl h-[85vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 flex-shrink-0">
+          <h3 className="text-sm font-semibold text-slate-700">
+            原文件预览 {showPager ? `（第 ${currentPage} / ${totalPages} 页）` : page > 0 ? `（第 ${page} 页）` : ''}
+          </h3>
+          <button onClick={onClose} className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {showBanner && (
+            <div className={`px-5 py-2 text-[12px] flex items-start gap-2 flex-shrink-0 ${fileStatus === 'error' ? 'bg-rose-50 border-b border-rose-200 text-rose-800' : 'bg-amber-50 border-b border-amber-200 text-amber-800'}`}>
+              <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+              </svg>
+              <span>{statusMessage}</span>
+            </div>
+          )}
+          {showPager && (
+            <div className="flex items-center gap-2 px-5 py-2 border-b border-slate-100 bg-slate-50/60 flex-shrink-0">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage <= 1}
+                className="px-2 py-1 rounded text-xs text-slate-600 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="上一页"
+              >
+                ‹
+              </button>
+              <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">第 {currentPage} / {totalPages} 页</span>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages}
+                className="px-2 py-1 rounded text-xs text-slate-600 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="下一页"
+              >
+                ›
+              </button>
+              <span className="w-px h-4 bg-slate-200" />
+              <input
+                value={jumpInput}
+                onChange={(e) => setJumpInput(e.target.value.replace(/[^\d]/g, ''))}
+                onKeyDown={(e) => { if (e.key === 'Enter') goToPage(Number(jumpInput)) }}
+                placeholder="跳页"
+                className="w-14 px-2 py-1 rounded border border-slate-200 text-xs text-slate-600 focus:outline-none focus:border-brand-400"
+              />
+              <span className="w-px h-4 bg-slate-200" />
+              <button
+                onClick={() => setScale((s) => Math.max(0.7, Number((s - 0.1).toFixed(2))))}
+                className="w-6 h-6 rounded text-xs text-slate-600 hover:bg-slate-200 transition-colors"
+                title="缩小"
+              >
+                -
+              </button>
+              <span className="text-xs text-slate-500 tabular-nums whitespace-nowrap">{Math.round(scale * 100)}%</span>
+              <button
+                onClick={() => setScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(2))))}
+                className="w-6 h-6 rounded text-xs text-slate-600 hover:bg-slate-200 transition-colors"
+                title="放大"
+              >
+                +
+              </button>
+            </div>
+          )}
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {pagesLoading && totalPages === 0 ? (
+              <div className="h-full flex items-center justify-center text-sm text-slate-400">正在加载原文件…</div>
+            ) : totalPages > 0 ? (
+              <div className="h-full overflow-auto p-5">
+                <pre
+                  className="text-slate-600 whitespace-pre-wrap font-sans leading-relaxed"
+                  style={{ fontSize: `${scale}rem` }}
+                >
+                  {currentText}
+                </pre>
+              </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center gap-3 px-6 text-center">
+                <p className="text-sm text-slate-500 leading-relaxed">暂无可预览内容，请稍后重试或重新上传该文档</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -128,9 +326,14 @@ const STEP_META: Record<AgentStep['type'], { label: string; icon: JSX.Element; b
   },
 }
 
-/** 推理过程面板 — 展示 Agent 多步推理的 Think/Act/Observe 步骤树。*/
+/** 推理过程面板 — 展示 Agent 多步推理的 Think/Act/Observe 步骤树。
+ *
+ * 默认折叠：普通问答时不再强行刷出一大坨推理细节，保持阅读清爽；
+ * observation 仅显示首行摘要（检索命中数），因为该内容是喂给模型的中间
+ * 检索数据，对用户无阅读价值且极长，展开后仍不展示全文以避免刷屏。
+ */
 function AgentSteps({ steps }: { steps: AgentStep[] }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   return (
     <div className="mt-3 pt-3 border-t border-emerald-200">
       <button
@@ -161,6 +364,10 @@ function AgentSteps({ steps }: { steps: AgentStep[] }) {
                 </div>
                 {s.type === 'action' && s.input ? (
                   <pre className="text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{s.input}</pre>
+                ) : s.type === 'observation' ? (
+                  <p className="text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">
+                    {fail ? s.content : s.content?.split('\n')[0]}
+                  </p>
                 ) : (
                   <p className="text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{s.content}</p>
                 )}
@@ -194,6 +401,9 @@ export default function ChatPage() {
   const loadToken = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // 新会话流式刚结束、用 done 事件注册 activeId 时，内存中已有完整回复，
+  // 置此标记跳过 useEffect[activeId] 的后端重载，避免与后端异步落库竞争把回复清空
+  const skipReloadRef = useRef(false)
   const navigate = useNavigate()
   // 自动滚动：发送后跳到底部、流式回复时跟随底部动态加载
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -261,6 +471,13 @@ export default function ChatPage() {
 
   // 选中会话变化时加载历史消息
   useEffect(() => {
+    // 流式刚结束、新会话注册 activeId：内存中已有完整回复，跳过从后端重载，
+    // 避免与后端异步落库竞争把刚流式渲染的助手回复覆盖成空白（仅跳过本次）
+    if (skipReloadRef.current) {
+      skipReloadRef.current = false
+      setStreaming(false)
+      return
+    }
     // 切换会话：取消进行中的流式并恢复输入态，避免输入框卡在禁用
     abortRef.current?.abort()
     setStreaming(false)
@@ -392,13 +609,20 @@ export default function ChatPage() {
                 setModelConfigError(true)
               }
               updateLast({ content: `错误：${msg}` })
+              // 收到错误事件立即结束流式：避免一直停在"思考中"且输入框无法恢复
+              break
             } else if (currentEvent === 'done') {
               if (parsed.conversation_id && !convId) {
                 convId = parsed.conversation_id
                 setConversationId(convId)
               }
               if (convId) {
-                if (!activeId) setActiveId(convId)
+                if (!activeId) {
+                  // 新会话：内存中已有完整回复，跳过重新加载，避免与后端异步落库
+                  // 竞争把刚流式渲染的助手回复覆盖成空白
+                  skipReloadRef.current = true
+                  setActiveId(convId)
+                }
                 void refresh()
               }
             }

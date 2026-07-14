@@ -20,6 +20,7 @@ markdown==3.7
 
 # Vector DB
 pymilvus==2.5.3
+asyncpg==0.31.0
 
 # Utils
 pydantic==2.10.4

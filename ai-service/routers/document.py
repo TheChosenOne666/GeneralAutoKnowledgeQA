@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from services.document_processor import document_processor
 from services.model_config import ModelConfig, ModelConfigError
+from services.vector_store import vector_store_service
 
 router = APIRouter()
 
@@ -19,6 +20,13 @@ class ProcessRequest(BaseModel):
     kb_id: str
     tenant_id: str
     ai_config: dict | None = None  # 用户 AI 模型配置（由 Java 透传）
+
+
+class ExtractPagesRequest(BaseModel):
+    """提取分页请求（Java 后端预览时调用，纯本地解析不依赖模型）。"""
+
+    file_path: str
+    file_type: str  # pdf / docx / md / txt
 
 
 @router.post("/document/process")
@@ -72,3 +80,36 @@ async def process_document(body: ProcessRequest):
             "status": "failed",
             "error": str(e),
         }
+
+
+@router.post("/document/extract-pages")
+async def extract_pages(body: ExtractPagesRequest):
+    """提取文档按页分段文本（供前端预览真实翻页，M4-4 增强）。
+
+    - PDF：PyMuPDF 逐页真实页码
+    - DOCX / TXT / MD：按 CHARS_PER_PAGE 估算页码
+    纯本地解析，不依赖模型配置；失败时返回 status=failed，由 Java 端降级到已存全文。
+    """
+    try:
+        pages = await document_processor.extract_pages(body.file_path, body.file_type)
+        return {
+            "status": "ok",
+            "pages": [{"page_no": p.page, "text": p.text} for p in pages],
+        }
+    except FileNotFoundError as e:
+        logger.warning(f"提取分页文件不存在 file_path={body.file_path}: {e}")
+        return {"status": "failed", "error": f"文件不存在: {body.file_path}"}
+    except Exception as e:
+        logger.warning(f"提取分页失败 file_path={body.file_path}: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
+@router.delete("/document/{doc_id}")
+async def delete_document(doc_id: str):
+    """删除文档时同步清理其向量（避免 PG 中残留孤立向量）。"""
+    try:
+        await vector_store_service.delete_by_doc(doc_id)
+        return {"doc_id": doc_id, "status": "deleted"}
+    except Exception as e:
+        logger.warning(f"删除文档向量失败 doc_id={doc_id}: {e}")
+        return {"doc_id": doc_id, "status": "failed", "error": str(e)}

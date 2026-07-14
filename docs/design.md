@@ -60,7 +60,7 @@
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
 | 缓存 | Redis | 三层缓存（L3 会话 / L1 检索 / L2 嵌入） |
 | **AI 服务** | **Python + FastAPI**（RAG 检索 / 自研 ReAct Agent 推理 / 文档处理；LangChain 为可选依赖） | RAG 检索、Agent 推理、文档处理 |
-| 向量数据库 | Milvus | 文档向量存储与检索 |
+| 向量数据库 | Postgres pgvector（默认持久化，对齐 WeKnora）/ Milvus（可选）/ 内存（演示） | 文档向量存储与检索，重启不丢知识 |
 | 文档解析 | PyMuPDF（PDF）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
 
 ---
@@ -476,7 +476,7 @@ multi-rag-employee/
 │   └── services/
 │       ├── llm.py                  # LangChain LLM 流式
 │       ├── embedding.py
-│       ├── vector_store.py         # Milvus
+│       ├── vector_store.py         # 向量存储：PgVectorStore(pgvector 持久化,默认)/ Milvus / 内存
 │       ├── rag.py                  # 混合检索 + Rerank
 │       └── document_processor.py
 ├── frontend/
@@ -499,6 +499,7 @@ multi-rag-employee/
 
 > **模块结构变更（截至 2026-07-13）**：开发期间新增/调整的模块（详见 task-breakdown.md）：
 > - Python：新增 `core/redis_client.py`（Redis 异步客户端单例）、`routers/cache.py`（`POST /ai/cache/invalidate` 失效接口）、`services/model_config.py`（`ModelConfigError` 模型配置错误类型，M3-3 取消静默降级）、`services/web_search.py`（联网搜索，M4-3，基于 DuckDuckGo Lite HTML，无需 API Key）。
+> - Python（2026-07-14 向量持久化）：新增 `core/pg_client.py`（Postgres 异步连接池单例）；`services/vector_store.py` 新增 `PgVectorStore`（pgvector 持久化，默认启用，重启不丢知识）+ BM25 兜底（启动从 PG 预热）；`main.py` 生命周期建表 + BM25 预热；`routers/document.py` 新增 `DELETE /ai/document/{doc_id}` 清孤立向量（详见 task-breakdown.md M2-8）。
 > - Java：新增 `service/KbPermission.java`（RBAC 数据级权限集中规则，M3-1）、`TenantInvitation` 实体与 Mapper + 邀请链路（M3-2）；`AiServiceClient` 增加 `toAiConfigMap` + `invalidateCache`（M3-2/M2-7）；`ChatServiceImpl` 增加 L3 会话缓存读写与失效（M2-7）。
 > - 前端：新增 `frontend/src/api/user.ts`、`frontend/src/context/ChatContext.tsx`（会话持久化）、`frontend/src/components/AppLayout.tsx`（历史记录按时间分组 + 7 天以上可折叠）；`MembersPage.tsx` 由静态假数据重写为接真实 API。
 > - M3-4 审计日志：Java 新增 `annotation/AuditLog.java`（注解）+ `aop/AuditLogAspect.java`（`@AfterReturning` 切面，自动抓用户/IP/UA 并脱敏记录，埋点于 UserService/DocumentServiceImpl/AiConfigServiceImpl）；`AuditLogService.recordLog` 改 `REQUIRES_NEW` 独立事务并补 `userAgent`；`AuditLogController` 查询补 `userEmail`/时间范围筛选并返回 `Page<AuditLogVO>`；新增 `GET /api/user/logout`（仅记录登出审计）。前端新增 `frontend/src/api/audit.ts`、`pages/AuditLogPage.tsx`（筛选栏 + 表格 + JSON 详情展开 + 分页）。
@@ -606,6 +607,7 @@ Python event_generator（routers/chat.py）
 > **前端停止生成（已修复）**：流式未正常结束（如 LLM 响应极慢、HMR 热更新保留状态）会让 `streaming` 卡在 `true`，导致输入框 `disabled` 无法输入。改用 `AbortController`：`streamChat` 透传 `signal`，生成中显示「停止」按钮可主动中断（`AbortError` 不报错、保留已生成内容）；切换会话时 `useEffect` 自动 `abort()` 旧流并重置 `streaming`，恢复输入态。
 > **未配置模型常驻提示（M3-3 前端）**：进入问答页即调用 `GET /api/ai-config/`，按「provider 与 model 均非空」判定 LLM / Embedding 是否已配置（API Key 不在前端可见范围，故不纳入判定）；任一未配置则在消息区顶部渲染常驻琥珀色横幅并列出缺失项（仅 LLM / 仅 Embedding / 两者皆缺），附「去配置」跳转到 `/ai-config`。接口异常时静默忽略，不打扰对话。
 > **模型配置正确性运行时检测（M3-3 已实现）**：上述常驻提示只覆盖"字段是否为空"。M3-3 额外覆盖**配置填了但填错**的情况——API Key 错误 / 模型名错误 / 提供商不匹配 / 向量维度不匹配，会导致上传文档向量化失败或对话 LLM 调用失败。落地：① Python 新增 `ModelConfigError` 并真正消费用户配置、**取消静默降级**（无 Key 直接抛错而非造假向量/假回答），调用失败 / 维度不匹配抛此错误；② Java `AiServiceClient.toAiConfigMap` 把配置以 `ai_config` 透传 Python，失败时解析 `error_type==MODEL_CONFIG_ERROR` 置 `document.modelConfigError`；③ 前端 `ChatPage` 解析 SSE `event: error` 的 `MODEL_CONFIG_ERROR` 渲染红色「模型配置不正确」横幅 + 跳转，`KnowledgeBasePage` 在文档 `modelConfigError` 时同样提示。与存在性常驻横幅构成"存在性+正确性"两层提示。
+> **模型配置错误的前端快速恢复（2026-07-14 修复）**：对话 LLM 调用失败触发 `MODEL_CONFIG_ERROR` 时，前端 `ChatPage` 收到 `event: error` 立即 `break` 结束流式，使输入框恢复、不再卡在"思考中"；同时 Python `llm.py` 将 httpx 连接超时收紧为 10s、`base_url` 为空时立即抛错，避免请求悬挂导致前端长时间等待。`routers/chat.py` 在检索阶段命中 `ModelConfigError` 时补发 `done` 并结束，避免重复 `event: error`。
 
 ### 9.4 SSE 事件流协议
 
@@ -667,6 +669,9 @@ data: {"conversation_id": "1234567890", "sources": [...]}
 |---|---|---|---|
 | 前端 | Java | `/api/chat/message/stream` | SSE（port 5173 → 8080） |
 | 前端 | Java | 会话/知识库/用户 CRUD | REST + JWT |
+| 前端 | Java | `/api/knowledge/document/file/{docId}` | HTTP 文件流（M4-4 预览，iframe） |
+| 前端 | Java | `/api/knowledge/document/file/status/{docId}` | 预览前置校验：检测原文件是否被删 / 被改，返回 `{exists, changed, message}`（避免 Whitelabel 错误页） |
+| 前端 | Java | `/api/knowledge/document/pages?docId=` | 真实分页预览（M4-4 增强）：返回 `[{pageNo, text}]`，PDF 真实页码 / docx-txt-md 估算页码，与引用来源一致；AI 不可用时降级用已存全文估算 |
 | Java | Python | `/ai/chat/stream` | HTTP SSE 透传（WebClient） |
 | Java | Python | `/ai/document/process` | HTTP（异步触发） |
 | Java | Python | `/ai/cache/invalidate` | HTTP（文档变更清 L1） |

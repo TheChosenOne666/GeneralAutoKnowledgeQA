@@ -14,6 +14,7 @@ import com.xiongda.model.entity.Tenant;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
+import com.xiongda.model.vo.PageContentVO;
 import com.xiongda.service.AiConfigService;
 import com.xiongda.service.DocumentService;
 import com.xiongda.service.KbPermission;
@@ -22,6 +23,7 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -168,6 +170,51 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // 仅同租户可读（与问答权限一致，普通成员亦可查看）
         ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限查看该文档");
         return doc.getContent();
+    }
+
+    /** 与 ai-service/services/document_processor.py 的 CHARS_PER_PAGE 保持一致（降级估算分页用）。*/
+    private static final int CHARS_PER_PAGE = 1500;
+
+    @Override
+    public List<PageContentVO> getDocumentPages(Long docId, Long tenantId, User user) {
+        Document doc = this.getById(docId);
+        ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
+        ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限查看该文档");
+
+        // 优先调 AI 服务真实解析（PDF 真实页码 / docx/txt/md 估算页码，与引用来源一致）
+        List<Map<String, Object>> pages = aiServiceClient.extractPages(doc.getFilePath(), doc.getFileType());
+        if (pages != null && !pages.isEmpty()) {
+            List<PageContentVO> result = new ArrayList<>(pages.size());
+            int fallbackNo = 1;
+            for (Map<String, Object> p : pages) {
+                PageContentVO vo = new PageContentVO();
+                Object pageNo = p.get("page_no");
+                vo.setPageNo(pageNo instanceof Number ? ((Number) pageNo).intValue() : fallbackNo);
+                Object text = p.get("text");
+                vo.setText(text == null ? "" : text.toString());
+                result.add(vo);
+                fallbackNo++;
+            }
+            return result;
+        }
+        // 降级：AI 不可用/失败，用已存全文按 CHARS_PER_PAGE 估算分页
+        String content = doc.getContent();
+        if (content == null || content.isEmpty()) {
+            return List.of();
+        }
+        List<PageContentVO> fallback = new ArrayList<>();
+        int n = content.length();
+        int idx = 0;
+        int pageNo = 1;
+        while (idx < n) {
+            int end = Math.min(n, idx + CHARS_PER_PAGE);
+            PageContentVO vo = new PageContentVO();
+            vo.setPageNo(pageNo++);
+            vo.setText(content.substring(idx, end));
+            fallback.add(vo);
+            idx = end;
+        }
+        return fallback;
     }
 
     /**

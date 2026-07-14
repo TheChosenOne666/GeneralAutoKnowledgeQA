@@ -126,6 +126,9 @@ class LlmService:
         ``{"type": "token", "content": ...}`` 与流末 ``{"type": "tool_calls", "calls": [...]}``。
         """
         base_url = cfg.llm_base_url or settings.llm_base_url
+        if not base_url:
+            # 提前快速失败：未配置 Base URL 时不应发起悬挂请求（避免前端一直"思考中"）
+            raise ModelConfigError("未配置 LLM Base URL，请在 AI 配置页填写后重试")
         model_name = model or cfg.llm_model or settings.llm_model
         _llm_key = cfg.llm_api_key or ""
         _llm_tail = "***" + _llm_key[-4:] if _llm_key else "null"
@@ -140,7 +143,10 @@ class LlmService:
         }
         try:
             if client is None:
-                async with httpx.AsyncClient(timeout=60.0) as c:
+                # connect 短超时：配置错误（地址不可达/挂起）时快速失败，避免前端长时间"思考中"
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+                ) as c:
                     async with c.stream(
                         "POST", f"{base_url}/chat/completions", headers=headers, json=json_body
                     ) as response:

@@ -29,10 +29,18 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
 
-    # Vector DB
-    vector_store_type: str = "memory"  # memory（默认，零依赖）/ milvus（需装 pymilvus + 启动服务）
+    # Vector DB —— 默认 pgvector（Postgres 持久化，对齐 WeKnora，重启不丢知识）
+    # 可选：memory（零依赖演示）/ milvus（需装 pymilvus + 启动服务）
+    vector_store_type: str = "pgvector"
     milvus_host: str = "localhost"
     milvus_port: int = 19530
+
+    # Postgres（向量持久化存储，默认与 Java 后端同源；可用 .env 覆盖）
+    pg_host: str = "localhost"
+    pg_port: int = 5432
+    pg_user: str = "postgres"
+    pg_password: str = "postgres123!@#"
+    pg_db: str = "xiongda"
 
     # Chunking
     chunk_size: int = 512

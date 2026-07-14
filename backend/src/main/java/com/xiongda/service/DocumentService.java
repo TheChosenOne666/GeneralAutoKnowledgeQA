@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import com.xiongda.model.entity.Document;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
+import com.xiongda.model.vo.PageContentVO;
 
 import java.util.List;
 
@@ -66,6 +67,14 @@ public interface DocumentService extends IService<Document> {
      * 获取文档提取全文（仅同租户可读，按知识库 scope 鉴权）。
      */
     String getDocumentContent(Long docId, Long tenantId, User user);
+
+    /**
+     * 获取文档按页分段的文本（供前端预览真实翻页，M4-4 增强）。
+     *
+     * <p>优先调 AI 服务真实解析（PDF 真实页码 / docx/txt/md 估算页码，与引用来源一致）；
+     * AI 不可用或失败时降级到已存全文按 CHARS_PER_PAGE 估算分页。</p>
+     */
+    List<PageContentVO> getDocumentPages(Long docId, Long tenantId, User user);
 
     /**
      * 异步触发文档处理 — 调用 Python AI 服务提取文本并分块。
