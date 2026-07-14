@@ -1,6 +1,7 @@
 /** 知识库 API — 对接 Java 后端。*/
 
 import { api } from './client'
+import type { AxiosProgressEvent } from 'axios'
 import type { BaseResponse, Document, KnowledgeBase } from '@/types'
 
 /** 文档原文件预览前置校验结果（删除 / 被修改检测）。*/
@@ -36,13 +37,17 @@ export const knowledgeApi = {
   listDocuments: (kbId: string) =>
     api.get<BaseResponse<Document[]>>('/knowledge/document/list', { params: { kbId } }).then((r) => r.data.data),
 
-  /** 上传文档。*/
-  uploadDocument: (kbId: string, file: File) => {
+  /** 上传文档。
+   * @param onProgress 可选，上传进度回调（百分比 0-100），依赖 axios onUploadProgress。*/
+  uploadDocument: (kbId: string, file: File, onProgress?: (pct: number) => void) => {
     const formData = new FormData()
     formData.append('file', file)
     return api
       .post<BaseResponse<string>>(`/knowledge/document/upload?kbId=${kbId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (e: AxiosProgressEvent) => {
+          if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+        },
       })
       .then((r) => r.data.data)
   },

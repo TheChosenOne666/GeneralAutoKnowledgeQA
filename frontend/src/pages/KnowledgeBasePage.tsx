@@ -42,6 +42,7 @@ export default function KnowledgeBasePage() {
   const [selectedKb, setSelectedKb] = useState<KnowledgeBase | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
   const [, setLoading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newKbName, setNewKbName] = useState('')
@@ -127,11 +128,14 @@ export default function KnowledgeBasePage() {
     const file = e.target.files?.[0]
     if (!file || !selectedKb) return
     setError('')
+    setUploadProgress(0)
     try {
-      await knowledgeApi.uploadDocument(selectedKb.id, file)
+      await knowledgeApi.uploadDocument(selectedKb.id, file, (pct) => setUploadProgress(pct))
+      setUploadProgress(null)
       await loadDocuments(selectedKb.id)
       await loadKbList(tab) // 同步知识库文档数
     } catch (err: unknown) {
+      setUploadProgress(null)
       setError(err instanceof Error ? err.message : '上传失败')
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -298,6 +302,22 @@ export default function KnowledgeBasePage() {
             </div>
             )}
 
+            {/* 上传进度条（仅上传中显示） */}
+            {uploadProgress !== null && (
+              <div className="mb-6 rounded-xl border border-brand-200 bg-brand-50/40 px-4 py-3">
+                <div className="flex items-center justify-between text-sm mb-2">
+                  <span className="text-brand-700 font-medium">正在上传文档…</span>
+                  <span className="text-brand-600 font-semibold">{uploadProgress}%</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-brand-100 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-brand-600 to-brand-500 transition-all duration-200"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* 文档表格 */}
             <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden">
               <table className="w-full">
@@ -309,10 +329,22 @@ export default function KnowledgeBasePage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-emerald-50">
-                  {documents.length === 0 && (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">暂无文档，点击上方区域上传</td></tr>
-                  )}
-                  {documents.map((doc) => {
+                  {documents.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-12">
+                        <div className="flex flex-col items-center justify-center text-center">
+                          <div className="w-14 h-14 rounded-2xl bg-emerald-50 flex items-center justify-center mb-3">
+                            <svg className="w-7 h-7 text-brand-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                            </svg>
+                          </div>
+                          <p className="text-slate-500 text-sm">该知识库暂无文档</p>
+                          {canWrite && <p className="text-slate-400 text-xs mt-1">点击上方区域上传 PDF / Word / Markdown / TXT</p>}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    documents.map((doc) => {
                     const st = STATUS_CONFIG[doc.status] || STATUS_CONFIG.pending
                     const iconCls = FILE_ICONS[doc.fileType] || 'text-slate-500'
                     return (
@@ -356,7 +388,7 @@ export default function KnowledgeBasePage() {
                         </td>
                       </tr>
                     )
-                  })}
+                  }))}
                 </tbody>
               </table>
             </div>
