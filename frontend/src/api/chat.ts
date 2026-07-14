@@ -41,7 +41,7 @@ export const chatApi = {
     history?: ChatHistoryItem[],
     signal?: AbortSignal,
     model?: string,
-    mode?: 'rag' | 'agent',
+    mode?: 'rag' | 'web' | 'agent',
   ) => {
     const token = getToken()
     const response = await fetch('/api/chat/message/stream', {

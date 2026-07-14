@@ -781,13 +781,37 @@ Python（AI 服务）
 
 ---
 
-### M4-3 问答模式切换 [全栈] P2 · 0.5d
+### M4-3 问答模式切换（RAG / 联网 / Agent）[全栈] P2 · 0.5d ✅ 完成
 
-- 知识库问答模式（RAG）
-- 网络搜索模式（联网搜索 + LLM 总结）
-- 前端模式切换按钮
-- **依赖**: M4-1
-- **产出**: 可切换问答模式
+> 背景：原仅「知识库问答（rag）」和「智能推理（agent）」两种模式，缺少联网搜索能力。M4-3 新增 `web` 模式支持互联网搜索，并为 Agent 新增 `web_search` 工具，使 Agent 可在知识库搜索结果不满意时自动切换联网搜索。
+
+- **Python（ai-service）**：
+  - 新增 `services/web_search.py`：`web_search(query, max_results)` 基于 httpx + DuckDuckGo Lite HTML 搜索（无需 API Key），返回 `[{title, url, snippet}]`；含 `format_search_results` 格式化搜索结果为 LLM 可读上下文。网络超时/不可达时返回空列表，不阻断主流程。DDG Lite HTML 解析兼容 a+span 成对与独立 a 标签两种结构，URL 去重归一化。
+  - `services/agent.py`：
+    - `TOOLS` 新增 `web_search` 工具定义（OpenAI 兼容 function-calling 格式），`description` 说明「当知识库无结果或需实时信息时使用」。
+    - `_execute_tool` 新增 `web_search` 分支：调 `web_search` → 格式化为观察文本 → 返回 web 来源列表（`kb_id="web"`, `doc_id=url`）。检索空结果返回约束文本「请勿编造」。
+    - 系统提示更新：优先知识库 → 无结果时用联网搜索 → 联网结果应注明来源 URL。`_extract_query` / `_resolve_query` 无变化（web_search 同样复用 query 解析）。
+  - `routers/chat.py`：
+    - `ChatStreamRequest.mode` 注释改为 `rag / web / agent`。
+    - 新增 `web` 模式处理：`web_search` → 格式化上下文 → `stream_generate` → SSE 推送 `sources`（含 title / url / snippet）和 `token`。搜索异常降级为无上下文问答；`fixed` 兜底与 rag 模式相同。
+  - `services/llm.py`：`stream_generate` 新增 `context_source` 参数（`"kb"` 或 `"web"`），影响无内容兜底提示文案（知识库 → 联网搜索）。向后兼容（默认 `"kb"`）。
+  - `core/config.py`：新增 `enable_web_search` / `web_search_max_results=5` / `web_search_timeout=15.0` 三项配置。
+- **前端（React/TS）**：
+  - `ChatPage.tsx`：模式切换从两档（普通问答/智能推理）改为三档（知识库/联网搜索/智能推理），placeholder 按模式动态切换。
+  - `ChatMessage.mode` 类型扩展为 `'rag' | 'web' | 'agent'`。
+  - `api/chat.ts`：`streamChat` 的 `mode` 参数类型扩展为 `'rag' | 'web' | 'agent'`。
+- **Java**：无需改动——`ChatRequest.mode` 是 `String` 无校验，`AiServiceClient` 直接透传 `"web"` 到 Python。注释更新为 `rag / web / agent`。
+- **测试**：
+  - 新增 `tests/test_web_search.py` — `WebSearchParseTest`（9 例：解析/裁剪/空HTML/无效链接/去重/URL归一化/HTML剥离）+ `WebSearchIntegrationTest`（3 例：搜索有结果/网络超时/空查询）+ `FormatResultsTest`（2 例：格式化有结果/空结果）。共 14 例全部通过。
+  - `tests/test_chat.py`：`_fake_stream_generate` 和 `_SpyStreamGenerate` 更新签名兼容 `context_source`，原有测试无回归。
+- **全量 Python 单测**：88 passed / 4 failed（4 例失败均为预存问题，与 M4-3 无关）。
+- **依赖**: M4-1（Agent）, M4-B（function calling）
+- **产出**: 三种问答模式可随时切换；Agent 具备联网搜索能力，知识库无结果时自动联网
+
+#### M4-3 Bug 修复（2026-07-14）
+- **联网搜索结果前端不显示标题**：`routers/chat.py` 和 `services/agent.py` 构建 web 来源列表时，字段名误用 `"filename"`（应为 `"source"`），导致前端 `SourceCard` 的 `source.source` 为 `undefined`，标题栏为空。已修改两处为 `"source"`，与 `RetrievalResult` dataclass 和前端 `SourceItem` 接口对齐。
+- **联网搜索结果"第0页"显示不合理**：`SourceCard` 对 web 结果（`kb_id="web"`）改用地球图标 + URL 域名替代页码展示，`doc_id` 作为 URL 链接。知识库结果保持原有页码样式不变。
+- **测试**：修改后 chat/agent/web_search 共 41 单测全过；前端 `npx tsc --noEmit` 通过、0 lint 错误。
 
 ---
 

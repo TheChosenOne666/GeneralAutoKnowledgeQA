@@ -43,7 +43,7 @@ interface ChatMessage {
   /** M4-1：智能推理（Agent）模式的推理步骤树。*/
   agentSteps?: AgentStep[]
   /** 该消息产生时使用的问答模式。*/
-  mode?: 'rag' | 'agent'
+  mode?: 'rag' | 'web' | 'agent'
   /** 消息时间（YYYY-MM-DD HH:mm），用于展示在用户消息下方。*/
   time?: string
 }
@@ -72,17 +72,30 @@ function parseSources(raw: string | null): SourceItem[] {
   }
 }
 
-/** 引用来源卡片 — 文件名 + 页码 + 查看原文（展开检索片段，原文件查看见 M4-4）。*/
+/** 引用来源卡片 — 文件名 + 页码（或 URL）+ 查看原文（展开检索片段，M4-3 支持联网搜索结果）。*/
 function SourceCard({ source }: { source: SourceItem }) {
   const [open, setOpen] = useState(false)
+  const isWeb = source.kb_id === 'web'
   return (
     <div className="rounded-lg bg-white/70 border border-emerald-100 px-3 py-2">
       <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 text-left">
-        <svg className="w-4 h-4 text-brand-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-        </svg>
+        {isWeb ? (
+          <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
+          </svg>
+        ) : (
+          <svg className="w-4 h-4 text-brand-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+          </svg>
+        )}
         <span className="text-xs font-medium text-slate-600 truncate flex-1">{source.source}</span>
-        <span className="text-[10px] text-slate-400 flex-shrink-0">第 {source.page} 页</span>
+        {isWeb ? (
+          <span className="text-[10px] text-blue-500 flex-shrink-0 truncate max-w-[120px]" title={source.doc_id}>
+            {source.doc_id?.replace(/^https?:\/\//, '')}
+          </span>
+        ) : (
+          <span className="text-[10px] text-slate-400 flex-shrink-0">第 {source.page} 页</span>
+        )}
         <span className="text-[10px] text-brand-500 flex-shrink-0">{open ? '收起' : '查看原文'}</span>
       </button>
       {open && <p className="mt-2 text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{source.content}</p>}
@@ -175,8 +188,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
-  // M4-1：问答模式（普通 RAG / 智能推理 Agent），默认普通问答
-  const [mode, setMode] = useState<'rag' | 'agent'>('rag')
+  // 问答模式（知识库 / 联网搜索 / 智能推理 Agent），默认知识库
+  const [mode, setMode] = useState<'rag' | 'web' | 'agent'>('rag')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const loadToken = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -569,20 +582,32 @@ export default function ChatPage() {
                 autoResize()
               }}
               onKeyDown={handleKeyDown}
-              placeholder={mode === 'agent' ? '输入问题，AI 将多步推理并检索知识库回答' : '输入问题，将基于知识库和网络搜索回答'}
+              placeholder={
+                mode === 'agent'
+                  ? '输入问题，AI 将多步推理并检索知识库和网络回答'
+                  : mode === 'web'
+                    ? '输入问题，将从互联网搜索最新信息回答'
+                    : '输入问题，将基于知识库回答'
+              }
               className="w-full px-5 py-4 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none max-h-[200px] overflow-y-auto"
               rows={1}
               disabled={streaming}
             />
             <div className="px-3 pb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {/* M4-1：问答模式切换（普通 RAG / 智能推理 Agent） */}
+                {/* 问答模式切换（知识库 / 联网搜索 / 智能推理 Agent，M4-3） */}
                 <div className="flex items-center gap-0.5 bg-emerald-50 border border-emerald-200 rounded-lg p-0.5">
                   <button
                     onClick={() => setMode('rag')}
                     className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'rag' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
                   >
-                    普通问答
+                    知识库
+                  </button>
+                  <button
+                    onClick={() => setMode('web')}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'web' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
+                  >
+                    联网搜索
                   </button>
                   <button
                     onClick={() => setMode('agent')}

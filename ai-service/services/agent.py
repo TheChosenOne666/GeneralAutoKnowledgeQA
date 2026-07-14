@@ -32,6 +32,7 @@ from services.agent_intelligence import (
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.rag import rag_service
+from services.web_search import web_search, format_search_results
 
 MAX_AGENT_ITERATIONS = 5
 
@@ -48,14 +49,17 @@ _RE_THOUGHT = re.compile(
 
 _SYSTEM_PROMPT = """你是熊答，一个企业知识问答助手，具备多步推理能力。
 
-当需要查找资料、确认事实或获取文档内容时，请调用 knowledge_base_search 工具检索企业知识库，
+当需要查找企业资料、确认事实或获取文档内容时，请调用 knowledge_base_search 工具检索知识库。
+当知识库无相关内容、或用户询问时效性/外部信息时，请调用 web_search 联网搜索。
 综合检索结果给出准确回答。工具参数 query 应简洁明确，表达用户真正想了解的信息。
 
 回答要求：
-- 不要编造知识库中不存在的内容
-- 若工具检索明确返回「未找到相关内容」，请如实告知用户知识库中无相关信息，不得编造或使用通用知识虚构
+- 优先使用知识库信息，知识库无结果时再用联网搜索
+- 不要编造不存在的内容
+- 若所有检索均未找到相关内容，请如实告知用户，不得编造或使用通用知识虚构
 - 最终回答直接面向用户，简洁准确、使用中文
-- 仅在信息已充分时给出最终答案；若需更多资料，继续调用工具检索
+- 仅在信息已充分时给出最终答案；若需更多资料，继续调用对应工具检索
+- 联网搜索结果应注明来源 URL
 
 （降级说明：若当前环境无法调用工具，请用纯文本按以下格式逐轮回答：
 Thought: 你的思考
@@ -64,8 +68,8 @@ Action Input: {"query": "要检索的问题"}
 或最终：Final Answer: 给用户的完整回答）
 """
 
-# OpenAI 兼容 function-calling 工具定义（M4-B）。新增工具（如 M4-3 web_search）
-# 仅需在此追加一项 + 在 _execute_tool 增加对应分支，调用方零改动。
+# OpenAI 兼容 function-calling 工具定义（M4-B）。
+# M4-3 新增 web_search：当知识库无相关内容或需要实时信息时，联网搜索。
 TOOLS: list[dict] = [
     {
         "type": "function",
@@ -83,7 +87,27 @@ TOOLS: list[dict] = [
                 "required": ["query"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "联网搜索以获取实时信息或知识库中没有的内容。"
+                "当知识库检索无结果、或用户需要最新资讯时使用此工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，简洁明确。",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -240,7 +264,7 @@ async def _execute_tool(
 
     arguments 兼容两种来源：function calling 的标准 JSON 字符串，或 ReAct 降级的
     Action Input 文本（含围栏 / 多余文字），统一由 :func:`_resolve_query` 解析。
-    M4-1 仅支持 knowledge_base_search；未知工具返回可恢复的观察（让模型换思路）。
+    支持 knowledge_base_search（M4-1）和 web_search（M4-3）。未知工具返回可恢复的观察。
     """
     if tool_name == "knowledge_base_search":
         query = _resolve_query(arguments)
@@ -274,7 +298,42 @@ async def _execute_tool(
         observation = f"检索到 {len(results)} 条相关内容：\n" + "\n".join(lines)
         return observation, sources, False
 
-    return f"未知工具：{tool_name}（当前仅支持 knowledge_base_search）。", [], False
+    # M4-3：联网搜索工具
+    if tool_name == "web_search":
+        query = _resolve_query(arguments)
+        logger.info(f"[Agent诊断] 工具={tool_name} 解析query={query!r}")
+        if not query:
+            return "工具参数错误：未提供有效查询。", [], False
+        try:
+            results = await web_search(
+                query, max_results=settings.web_search_max_results
+            )
+        except Exception as e:
+            logger.warning(f"Agent 联网搜索失败: {e}")
+            return f"联网搜索失败：{e}。请尝试其他检索方式。", [], False
+
+        if not results:
+            return (
+                "联网搜索未找到相关内容。"
+                "请勿编造，直接说明「未搜索到相关信息」。"
+            ), [], False
+
+        observation = format_search_results(results)
+        web_sources: list[dict] = []
+        for r in results:
+            web_sources.append({
+                "source": r.get("title", "网络来源") or "网络来源",
+                "page": 0,
+                "content": r.get("snippet", "")[:300],
+                "score": 0.0,
+                "doc_id": r.get("url", ""),
+                "kb_id": "web",
+            })
+        return observation, web_sources, False
+
+    return (
+        f"未知工具：{tool_name}（当前支持 knowledge_base_search 和 web_search）。"
+    ), [], False
 
 
 async def run_agent(

@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     agent_memory_min_messages: int = 4  # history 至少 N 条消息才触发 memory 固化
     agent_context_max_chars: int = 12000  # messages 字符数超此阈值触发压缩（≈6k tokens）
 
+    # M4-3 联网搜索配置
+    enable_web_search: bool = True
+    web_search_max_results: int = 5  # 每次联网搜索返回条数
+    web_search_timeout: float = 15.0  # 联网搜索超时秒数
+
 
     # Redis（与 Java 后端共用同一实例，作为 L1 检索结果 / L2 嵌入向量缓存层）
     redis_host: str = "localhost"

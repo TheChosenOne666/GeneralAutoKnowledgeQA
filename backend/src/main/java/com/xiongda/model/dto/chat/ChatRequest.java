@@ -23,7 +23,7 @@ public class ChatRequest implements Serializable {
     private String model;
 
     /**
-     * rag / search / agent（M4-1 智能推理多步推理）
+     * rag / web / agent（M4-3 新增 web 联网搜索模式）
      */
     private String mode = "rag";
 

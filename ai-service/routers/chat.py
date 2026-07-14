@@ -18,6 +18,7 @@ from core.config import settings
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.rag import rag_service
+from services.web_search import web_search, format_search_results
 
 router = APIRouter()
 
@@ -29,7 +30,7 @@ class ChatStreamRequest(BaseModel):
     conversation_id: str = ""
     kb_ids: list[str] = []
     model: str = ""
-    mode: str = "rag"  # rag / search
+    mode: str = "rag"  # rag / web / agent
     tenant_id: str = ""
     history: list[dict] = []  # 多轮对话历史（不含当前问题）
     ai_config: dict | None = None  # 用户 AI 模型配置（由 Java 透传）
@@ -85,8 +86,36 @@ async def chat_stream(body: ChatStreamRequest):
             )
             return
 
+        # M4-3：联网搜索模式
         context = ""
         sources = []
+        if body.mode == "web":
+            try:
+                results = await web_search(
+                    body.question,
+                    max_results=settings.web_search_max_results,
+                )
+                if results:
+                    sources = [
+                        {
+                            "source": r.get("title", "网络来源") or "网络来源",
+                            "page": 0,
+                            "content": r.get("snippet", "")[:300],
+                            "score": 0.0,
+                            "doc_id": r.get("url", ""),
+                            "kb_id": "web",
+                        }
+                        for r in results
+                    ]
+                    context = format_search_results(results)
+                else:
+                    sources = []
+                    context = ""
+            except Exception as e:
+                logger.warning(f"联网搜索失败，降级为无上下文问答: {e}")
+                sources = []
+                context = ""
+
         if body.mode == "rag":
             try:
                 results = await rag_service.retrieve(
@@ -108,11 +137,11 @@ async def chat_stream(body: ChatStreamRequest):
         if sources:
             yield _sse("sources", {"sources": sources})
 
-        # 检索无结果兜底（对齐 WeKnora）：
+        # 检索/搜索无结果兜底：
         #  - fixed：直接返回固定文案，不调用 LLM（省成本）
-        #  - model（默认）：交给 LLM 用通用知识兜底，并在 system 指令中声明「知识库暂无相关内容」
+        #  - model（默认）：交给 LLM 用通用知识兜底，并在 system 指令中声明无相关内容
         if not sources and settings.fallback_strategy == "fixed":
-            logger.info("检索无结果，走 fixed 兜底返回固定文案")
+            logger.info(f"{body.mode} 模式无结果，走 fixed 兜底返回固定文案")
             yield _sse("token", {"content": settings.fallback_response})
             yield _sse(
                 "done",
@@ -128,6 +157,7 @@ async def chat_stream(body: ChatStreamRequest):
                 history=body.history,
                 cfg=cfg,
                 no_kb_content=not sources,
+                context_source="kb" if body.mode == "rag" else "web",
             ):
                 yield _sse("token", {"content": token})
         except ModelConfigError as e:

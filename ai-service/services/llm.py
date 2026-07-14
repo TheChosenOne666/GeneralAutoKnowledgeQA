@@ -26,30 +26,33 @@ class LlmService:
         cfg: ModelConfig | None = None,
         client: httpx.AsyncClient | None = None,
         no_kb_content: bool = False,
+        context_source: str = "kb",
     ) -> AsyncGenerator[str, None]:
         """流式生成回答，逐 token yield。
 
         Args:
             question: 用户问题
-            context: RAG 检索到的上下文（M1-8 无 RAG 时为空）
+            context: 检索到的上下文（M1-8 无 RAG 时为空）
             model: 模型名称（可选，覆盖配置）
             history: 多轮对话历史（可选，[{role, content}]，不含当前问题）
             cfg: 运行时模型配置（由 Java 透传）；为空用 env 兜底
             client: 可选 httpx 客户端（测试注入 mock）
-            no_kb_content: 检索无结果兜底标记。为 True 时知识库未检索到相关内容，
-                在 system 指令中要求 LLM 用通用知识兜底并声明「知识库暂无相关内容」，严禁编造。
+            no_kb_content: 检索无结果兜底标记。为 True 时在 system 指令中声明无相关内容。
+            context_source: 上下文来源，"kb"（知识库）或 "web"（联网搜索，M4-3）。
         """
         cfg = cfg or ModelConfig.from_settings()
         if not cfg.has_llm():
             raise ModelConfigError("未配置 LLM API Key，请在 AI 配置页填写后重试")
 
+        ctx_label = "知识库" if context_source == "kb" else "联网搜索"
+
         system_content = "你是熊答，一个企业知识问答助手。请简洁准确地回答问题。"
         if no_kb_content:
             system_content += (
-                "\n\n注意：本次检索中知识库未找到与用户问题相关的内容。"
+                f"\n\n注意：本次{ctx_label}未找到与用户问题相关的内容。"
                 "请基于你的通用知识作答，并在回答开头明确告知用户："
-                "「知识库中暂无相关内容，以下回答基于通用知识，仅供参考」。\n"
-                "严禁编造或声称内容来自知识库。"
+                f"「{ctx_label}中暂无相关内容，以下回答基于通用知识，仅供参考」。\n"
+                "严禁编造或声称内容来自知识库或搜索结果。"
             )
 
         messages: list[dict] = [

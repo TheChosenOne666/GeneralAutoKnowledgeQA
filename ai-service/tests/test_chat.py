@@ -31,7 +31,10 @@ async def _fake_embed_batch(texts, cfg=None, client=None):
     return [list(VEC) for _ in texts]
 
 
-async def _fake_stream_generate(question, context="", model=None, history=None, cfg=None, client=None, no_kb_content=False):
+async def _fake_stream_generate(
+    question, context="", model=None, history=None, cfg=None, client=None,
+    no_kb_content=False, context_source="kb",
+):
     yield "熊"
     yield "答"
 
@@ -46,21 +49,26 @@ async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
 
 
 class _SpyStreamGenerate:
-    """记录 stream_generate 调用参数，用于校验兜底分支是否注入 no_kb_content。"""
+    """记录 stream_generate 调用参数，用于校验兜底分支。"""
 
     def __init__(self):
         self.calls = 0
         self.kwargs = None
 
-    async def __call__(self, question, context="", model=None, history=None, cfg=None, client=None, no_kb_content=False):
+    async def __call__(
+        self, question, context="", model=None, history=None, cfg=None,
+        client=None, no_kb_content=False, context_source="kb",
+    ):
         self.calls += 1
-        self.kwargs = {
-            "question": question,
-            "context": context,
-            "no_kb_content": no_kb_content,
-        }
+        self.kwargs = dict(
+            question=question,
+            context=context,
+            no_kb_content=no_kb_content,
+            context_source=context_source,
+        )
         yield "熊"
         yield "答"
+
 
 
 class ChatRagTest(unittest.TestCase):
