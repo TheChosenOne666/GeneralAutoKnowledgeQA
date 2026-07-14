@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     fallback_strategy: str = "model"
     fallback_response: str = "知识库暂无相关内容，如有疑问请在知识库中补充相关文档后重试。"
 
+    # Agent 智能增强（M4-C 轻量增强）：
+    # - memory 固化：长对话时从历史提取关键事实为记忆块注入 system prompt
+    # - reflection 反思：每轮工具调用后 LLM 自评信息是否足够回答
+    # - 上下文压缩：messages 超长时压缩旧观察，防超出 LLM 上下文窗口
+    enable_agent_memory: bool = True
+    enable_agent_reflection: bool = True
+    enable_agent_compression: bool = True
+    agent_memory_min_messages: int = 4  # history 至少 N 条消息才触发 memory 固化
+    agent_context_max_chars: int = 12000  # messages 字符数超此阈值触发压缩（≈6k tokens）
+
 
     # Redis（与 Java 后端共用同一实例，作为 L1 检索结果 / L2 嵌入向量缓存层）
     redis_host: str = "localhost"

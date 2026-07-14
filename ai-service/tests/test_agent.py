@@ -1,8 +1,9 @@
-"""Agent 服务单元测试（M4-B function calling）。
+"""Agent 服务单元测试（M4-B function calling + M4-C 智能增强）。
 
-用桩替换 LLM（stream_agent_turn）与检索（rag_service.retrieve），聚焦：
+用桩替换 LLM（stream_agent_turn / complete）与检索（rag_service.retrieve），聚焦：
 - function calling 主路径：tool_calls → 执行工具 → 回填 → 多轮 → 最终答案流式
 - ReAct 文本降级路径：模型不支持 tools 时 parse_react 仍驱动多步推理
+- M4-C 增强路径：memory 固化 + reflection 反思 + 上下文压缩
 - 工具参数解析（_resolve_query，兼容 function calling JSON 与 ReAct 文本）
 - 事件协议（agent_step / token / sources / error）
 
@@ -25,6 +26,21 @@ from services.agent import (
 )
 from services.model_config import ModelConfig, ModelConfigError
 from services.vector_store import RetrievalResult
+
+
+# ── 无操作桩（禁用增强，供非增强测试用） ──
+
+async def _noop_consolidate_memory(history, question, cfg):
+    return ""
+
+async def _noop_reflect(question, observation, iteration, cfg):
+    return {"can_answer": False, "reason": ""}
+
+async def _noop_compress(messages, cfg, keep_recent=6):
+    return messages
+
+def _noop_estimate_chars(messages):
+    return len(str(messages))
 
 
 class _FakeAgentTurn:
@@ -126,7 +142,10 @@ class FunctionCallingTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             events = asyncio.run(
                 _collect(
                     run_agent(
@@ -166,7 +185,10 @@ class FunctionCallingTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ):
+        ), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             events = asyncio.run(
                 _collect(
                     run_agent(
@@ -214,7 +236,10 @@ class FunctionCallingTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ), patch("services.agent.rag_service.retrieve", _boom):
+        ), patch("services.agent.rag_service.retrieve", _boom), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             events = asyncio.run(
                 _collect(
                     run_agent(
@@ -254,7 +279,10 @@ class FallbackReactTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             events = asyncio.run(
                 _collect(
                     run_agent(
@@ -298,7 +326,10 @@ class FallbackReactTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ), patch("services.agent.rag_service.retrieve", _fake_retrieve_empty):
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve_empty), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             events = asyncio.run(
                 _collect(
                     run_agent(
@@ -393,7 +424,10 @@ class AgentRouteTest(unittest.TestCase):
         )
         with patch(
             "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
-        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
             with self.client.stream(
                 "POST",
                 "/ai/chat/stream",
@@ -414,6 +448,226 @@ class AgentRouteTest(unittest.TestCase):
         self.assertIn("event: token", body)
         self.assertIn("event: done", body)
         self.assertIn("knowledge_base_search", body)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# M4-C 增强路径集成测试
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _fake_complete_memory_block(messages, **kwargs):
+    return "- 用户是算法工程师\n- 之前讨论过 Python 版本为 3.10+"
+
+async def _fake_complete_reflect_can_answer(messages, **kwargs):
+    return '{"can_answer": true, "reason": "检索结果充分"}'
+
+async def _fake_complete_reflect_cannot_answer(messages, **kwargs):
+    return '{"can_answer": false, "reason": "检索结果不足"}'
+
+async def _fake_complete_compress(messages, cfg=None, keep_recent=6):
+    """模拟压缩：截掉旧消息，注入摘要。"""
+    system_msgs = [m for m in messages if m["role"] == "system"]
+    recent = messages[-keep_recent:]
+    old_users = [
+        m for m in messages[len(system_msgs):-keep_recent] if m["role"] == "user"
+    ]
+    result = list(system_msgs)
+    result.extend(old_users)
+    result.append({"role": "system", "content": "[历史摘要] 前几轮检索了 Python 环境配置相关文档。"})
+    result.extend(recent)
+    return result
+
+def _real_estimate_chars(messages):
+    """真实估算函数，用于触发压缩。"""
+    return sum(
+        len(m.get("content") or "") + len(m.get("tool_calls") or "")
+        for m in messages
+    )
+
+
+class AgentEnhanceMemoryTest(unittest.TestCase):
+    """memory 固化：长对话时从历史提取记忆块注入系统提示。"""
+
+    def test_memory_block_injected_on_long_history(self):
+        fake = _FakeAgentTurn(
+            [[{"type": "token", "content": "根据记忆，你是算法工程师，需要 Python 3.10+。"}]]
+        )
+        history = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好"},
+            {"role": "user", "content": "算法入职需要准备什么"},
+            {"role": "assistant", "content": "需要 Python 和 IDE"},
+            {"role": "user", "content": "Python 版本"},
+            {"role": "assistant", "content": "3.10+"},
+        ]
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch(
+            "services.agent.consolidate_memory", _fake_complete_memory_block
+        ), patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="IDE 用什么",
+                        kb_ids=[],
+                        tenant_id="t1",
+                        model=None,
+                        history=history,
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("算法工程师", token_text)
+        self.assertIn("3.10", token_text)
+
+
+class AgentEnhanceReflectTest(unittest.TestCase):
+    """reflection 反思：工具观察后 LLM 自评，信息足够时引导最终答案。"""
+
+    def test_reflection_guides_final_answer_on_adequate_info(self):
+        fake = _FakeAgentTurn(
+            [
+                # 第 0 轮：调用工具检索
+                [
+                    {"type": "token", "content": "需要检索"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "Python 环境配置"}',
+                            }
+                        ],
+                    },
+                ],
+                # 第 1 轮：reflection 判定信息充足，注入 system 提示后模型产出最终答案
+                [{"type": "token", "content": "Python 3.10+，推荐 PyCharm。"}],
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _fake_complete_reflect_can_answer), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="Python 环境配置",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("3.10", token_text)
+        # 应产出 sources（第 0 轮检索有结果）
+        sources_evts = [e for e in events if e["event"] == "sources"]
+        self.assertTrue(sources_evts)
+
+    def test_reflection_not_triggered_when_info_insufficient(self):
+        fake = _FakeAgentTurn(
+            [
+                [
+                    {"type": "token", "content": "需要检索"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "x"}',
+                            }
+                        ],
+                    },
+                ],
+                # 反思判定不足 → 不注入 system 提示，模型继续检索
+                [
+                    {"type": "token", "content": "需要更多检索"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_2",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "y"}',
+                            }
+                        ],
+                    },
+                ],
+                [{"type": "token", "content": "找到了相关信息。"}],
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _fake_complete_reflect_cannot_answer), \
+           patch("services.agent.estimate_chars", _noop_estimate_chars):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="复杂问题",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        # 应有多轮工具调用
+        actions = [
+            e for e in events
+            if e["event"] == "agent_step" and e["data"]["type"] == "action"
+        ]
+        self.assertGreaterEqual(len(actions), 2)
+
+
+class AgentEnhanceCompressTest(unittest.TestCase):
+    """上下文压缩：messages 超长时压缩旧轮次，防溢出上下文窗口。"""
+
+    def test_compression_triggered_on_large_context(self):
+        fake = _FakeAgentTurn(
+            [[{"type": "token", "content": "回答: 压缩后仍能正常回答。"}]]
+        )
+        # 构造大量消息触发压缩阈值
+        history = [
+            {"role": "user", "content": f"第{i}个问题"}
+            for i in range(20)
+        ]
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve), \
+           patch("services.agent.consolidate_memory", _noop_consolidate_memory), \
+           patch("services.agent.reflect", _noop_reflect), \
+           patch("services.agent.estimate_chars", _real_estimate_chars), \
+           patch("services.agent.compress_context", _fake_complete_compress):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="总结",
+                        kb_ids=[],
+                        tenant_id="t1",
+                        model=None,
+                        history=history,
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("压缩后仍能正常回答", token_text)
 
 
 if __name__ == "__main__":

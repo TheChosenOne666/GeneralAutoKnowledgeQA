@@ -726,6 +726,35 @@ Python（AI 服务）
 - **依赖**: M4-1
 - **产出**: Agent 使用原生 function calling 可靠解析工具调用，ReAct 文本降级作为兜底
 
+### M4-C Agent 智能增强（memory 固化 + reflection 反思 + 上下文压缩）[Python] P2 · 0.5d ✅ 完成
+
+> 背景：Agent 在多轮长对话中容易丢失上文上下文；工具检索后缺少自评机制，可能做不必要多轮或过早中断；messages 累积过多可能超出 LLM 上下文窗口。M4-C 引入三项轻量增强，借鉴 EventAgentReflection 反思循环与 memoryConsolidator 压缩思路，各自由 config 开关独立控制。
+
+- **memory 固化**（`consolidate_memory`）：
+  - 当 `history` 消息数 ≥ `agent_memory_min_messages`（默认 4）时，用一次轻量 LLM 调用从历史提取关键事实与用户意图，压缩为 3~5 条要点的记忆块。
+  - 记忆块作为 `[对话记忆]` 系统消息注入 messages（system prompt 之后、历史之前），使 Agent 在长对话中不丢失上下文。
+  - 失败降级：返回空字符串，不阻断主流程；配置错误抛 `ModelConfigError` 向上透传。
+- **reflection 反思**（`reflect`）：
+  - 每轮工具调用后，LLM 自评检索结果是否足以回答用户问题，输出 `{"can_answer": bool, "reason": str}`。
+  - `can_answer=true` 时注入 system 指令引导下一轮 LLM 直接产出最终答案（不再调用工具），避免无效多轮。
+  - JSON 解析失败时默认 `can_answer=false` 继续检索；配置错误向上透传。
+- **上下文压缩**（`compress_context`）：
+  - 每轮 LLM 调用前估算 messages 字符数（`estimate_chars`），超 `agent_context_max_chars`（默认 12000，≈6k tokens）时触发。
+  - 压缩策略：保留 system + 用户问题原文 + 最近 6 条消息原貌；对旧轮次 assistant/tool 消息做摘要压缩（一次 LLM 调用），注入 `[历史摘要]` 系统消息。
+  - 压缩后消息数 / 字符数均有日志记录；可压缩内容 < 300 字符时跳过；失败降级返回原列表。
+- **配置**（`core/config.py`）：
+  - `enable_agent_memory`（默认 True）/ `enable_agent_reflection`（默认 True）/ `enable_agent_compression`（默认 True）
+  - `agent_memory_min_messages=4` / `agent_context_max_chars=12000`
+- **agent.py 集成**：
+  - `_build_messages` 新增 `memory_block` 参数注入记忆块。
+  - `run_agent` 循环前：memory 固化；每轮 LLM 调用前：上下文压缩检查；每轮观察后（FC 与 ReAct 两路径均覆盖）：reflection 判断。
+- **测试**：
+  - 新增 `tests/test_agent_intelligence.py`——`MemoryConsolidationTest`（5 例：历史足够/不足/空/None/LLM异常）、`ReflectionTest`（4 例：can_answer true/false/JSON 带多余文字/纯文本容错）、`ContextCompressionTest`（5 例：压缩减少消息数/太短不压/可压内容太少跳过/失败回退/字符估算）。共 14 例全部通过。
+  - `tests/test_agent.py` 新增 `AgentEnhanceMemoryTest` / `AgentEnhanceReflectTest` / `AgentEnhanceCompressTest`（共 4 例集成测试，覆盖 memory 记忆注入/reflection 引导最终答案/reflection 信息不足继续/压缩触发）。原有 18 例已补充 noop 桩保持行为不变。
+- **全量 Python 单测**：74 passed / 4 failed（4 例失败均为预存问题，与 M4-C 无关）。
+- **依赖**: M4-B
+- **产出**: Agent 长对话记忆不丢失、信息充分时自动终结、上下文窗口安全（事件协议不变，前端/Java 无需改动）
+
 ### M4-A 普通问答增强（query rewrite + expansion，对齐 WeKnora KnowledgeQA）2026-07-14 ✅ 已完成
 
 > 背景：用户口语化 / 长问句（如「算法入职前期准备要做什么」）与文档表述（「一、入职基础准备」）措辞差异大，纯字面检索召回弱；WeKnora 普通问答用 query rewrite + expansion 让两种模式都对措辞鲁棒。本项目此前普通问答用用户原话直接检索，缺该能力。Agent 模式由 LLM 自生成子查询，不二次改写。

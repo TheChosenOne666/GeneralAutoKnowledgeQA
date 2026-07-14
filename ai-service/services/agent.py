@@ -22,6 +22,13 @@ from typing import AsyncGenerator
 
 from loguru import logger
 
+from core.config import settings
+from services.agent_intelligence import (
+    compress_context,
+    consolidate_memory,
+    estimate_chars,
+    reflect,
+)
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.rag import rag_service
@@ -174,8 +181,16 @@ def _extract_query(tool_input: str) -> str:
     return s
 
 
-def _build_messages(question: str, history: list[dict] | None) -> list[dict]:
+def _build_messages(
+    question: str,
+    history: list[dict] | None,
+    memory_block: str = "",
+) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if memory_block:
+        messages.append(
+            {"role": "system", "content": f"[对话记忆]\n{memory_block}"}
+        )
     for h in history or []:
         role = h.get("role")
         if role in ("user", "assistant"):
@@ -279,16 +294,56 @@ async def run_agent(
       - sources: {"sources": [...]}
       - token: {"content": "..."}
       - error: {"error_type": "MODEL_CONFIG_ERROR"|"AGENT_ERROR", "message": "..."}
+
+    M4-C：集成三项轻量增强（各自由 config 开关控制）：
+      - memory 固化：长对话时从 history 提取关键事实为记忆块
+      - reflection 反思：每轮工具观察后 LLM 自评信息充分性，足够时引导产出最终答案
+      - 上下文压缩：messages 超长时压缩旧轮次观察，防超出 LLM 上下文窗口
     """
     sources: list[dict] = []
-    messages = _build_messages(question, history)
+
+    # ── C1: Memory 固化 ──
+    memory_block = ""
+    if settings.enable_agent_memory:
+        try:
+            memory_block = await consolidate_memory(
+                history or [], question, cfg
+            )
+        except ModelConfigError as e:
+            logger.warning(f"memory 固化阶段模型配置错误: {e}")
+            yield {
+                "event": "error",
+                "data": {"error_type": "MODEL_CONFIG_ERROR", "message": str(e)},
+            }
+            return
+        except Exception as e:
+            logger.warning(f"memory 固化失败（降级继续）: {e}")
+
+    messages = _build_messages(question, history, memory_block=memory_block)
 
     for i in range(MAX_AGENT_ITERATIONS):
-        # 单轮流式生成：收集思考文本与（若有）工具调用，思考以整段回显、答案以 token 流
+        # ── C3: 上下文压缩（每轮 LLM 调用前检查） ──
+        if settings.enable_agent_compression:
+            try:
+                if estimate_chars(messages) > settings.agent_context_max_chars:
+                    messages = await compress_context(messages, cfg)
+            except ModelConfigError as e:
+                logger.warning(f"上下文压缩阶段模型配置错误: {e}")
+                yield {
+                    "event": "error",
+                    "data": {"error_type": "MODEL_CONFIG_ERROR", "message": str(e)},
+                }
+                return
+            except Exception as e:
+                logger.warning(f"上下文压缩失败（降级继续）: {e}")
+
+        # 单轮流式生成：收集思考文本与（若有）工具调用
         thought_text = ""
         tool_calls: list[dict] = []
         try:
-            async for ev in llm_service.stream_agent_turn(messages, TOOLS, model=model, cfg=cfg):
+            async for ev in llm_service.stream_agent_turn(
+                messages, TOOLS, model=model, cfg=cfg
+            ):
                 if ev["type"] == "token":
                     thought_text += ev["content"]
                 elif ev["type"] == "tool_calls":
@@ -301,25 +356,36 @@ async def run_agent(
             }
             return
 
-        # 主路径：原生 function calling
+        # ── 主路径：原生 function calling ──
         if tool_calls:
             if thought_text.strip():
                 yield {
                     "event": "agent_step",
-                    "data": {"step": i, "type": "thought", "content": thought_text.strip()},
+                    "data": {
+                        "step": i,
+                        "type": "thought",
+                        "content": thought_text.strip(),
+                    },
                 }
             reached_config_error = False
+            last_observation = ""
             for call in tool_calls:
                 name = call.get("name", "")
                 args = call.get("arguments", "")
                 call_id = call.get("id") or f"call_{i}"
                 yield {
                     "event": "agent_step",
-                    "data": {"step": i, "type": "action", "tool": name, "input": args},
+                    "data": {
+                        "step": i,
+                        "type": "action",
+                        "tool": name,
+                        "input": args,
+                    },
                 }
                 observation, new_sources, is_config_error = await _execute_tool(
                     name, args, kb_ids, tenant_id, cfg
                 )
+                last_observation = observation
                 yield {
                     "event": "agent_step",
                     "data": {
@@ -334,7 +400,7 @@ async def run_agent(
                     break
                 if new_sources:
                     sources.extend(new_sources)
-                # 回填 function calling 协议要求的消息（assistant 带 tool_calls + tool 结果）
+                # 回填 function calling 协议
                 messages.append(
                     {
                         "role": "assistant",
@@ -349,17 +415,56 @@ async def run_agent(
                     }
                 )
                 messages.append(
-                    {"role": "tool", "tool_call_id": call_id, "content": observation}
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": observation,
+                    }
                 )
             if reached_config_error:
                 yield {
                     "event": "error",
-                    "data": {"error_type": "MODEL_CONFIG_ERROR", "message": observation},
+                    "data": {
+                        "error_type": "MODEL_CONFIG_ERROR",
+                        "message": last_observation,
+                    },
                 }
                 return
+
+            # ── C2: Reflection 反思（工具观察后 LLM 自评） ──
+            if settings.enable_agent_reflection and last_observation:
+                try:
+                    refl = await reflect(question, last_observation, i, cfg)
+                    if refl.get("can_answer"):
+                        logger.info(
+                            f"Agent reflection: 信息已足够 → 引导产出最终答案 "
+                            f"(reason={refl.get('reason')})"
+                        )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "检索信息已足够回答用户问题。"
+                                    "请基于以上所有检索结果直接给出简洁准确的 Final Answer，"
+                                    "不要再调用工具。"
+                                ),
+                            }
+                        )
+                except ModelConfigError as e:
+                    logger.warning(f"reflection 阶段模型配置错误: {e}")
+                    yield {
+                        "event": "error",
+                        "data": {
+                            "error_type": "MODEL_CONFIG_ERROR",
+                            "message": str(e),
+                        },
+                    }
+                    return
+                except Exception as e:
+                    logger.warning(f"reflection 失败，降级继续: {e}")
             continue  # 工具已执行，进入下一轮推理
 
-        # 降级路径：本轮无 tool_calls（模型不支持 function calling），按 ReAct 文本解析
+        # ── 降级路径：本轮无 tool_calls（模型不支持 function calling） ──
         step = parse_react(thought_text)
         if step.thought:
             yield {
@@ -405,15 +510,45 @@ async def run_agent(
             return
         if new_sources:
             sources.extend(new_sources)
+
         # Observe（降级）：回填 Observation 文本，进入下一轮
         messages.append({"role": "assistant", "content": thought_text})
         messages.append({"role": "user", "content": f"Observation: {observation}"})
+
+        # ── C2: Reflection（降级路径也做反思） ──
+        if settings.enable_agent_reflection and observation:
+            try:
+                refl = await reflect(question, observation, i, cfg)
+                if refl.get("can_answer"):
+                    logger.info(
+                        f"Agent reflection(降级): 信息已足够 → 引导产出最终答案"
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": "检索信息已足够，请直接给出 Final Answer，不要再调用工具。",
+                        }
+                    )
+            except ModelConfigError as e:
+                yield {
+                    "event": "error",
+                    "data": {
+                        "error_type": "MODEL_CONFIG_ERROR",
+                        "message": str(e),
+                    },
+                }
+                return
+            except Exception as e:
+                logger.warning(f"reflection(降级) 失败: {e}")
 
     # 超出最大轮数：兜底提示
     logger.warning("Agent 达到最大推理轮数仍未产出最终答案")
     yield {
         "event": "token",
         "data": {
-            "content": "抱歉，我未能在限定步骤内得出完整结论，请尝试拆分问题或补充更多信息。"
+            "content": (
+                "抱歉，我未能在限定步骤内得出完整结论，"
+                "请尝试拆分问题或补充更多信息。"
+            )
         },
     }
