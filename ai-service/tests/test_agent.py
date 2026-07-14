@@ -1,7 +1,12 @@
-"""Agent 服务单元测试（M4-1）。
+"""Agent 服务单元测试（M4-B function calling）。
 
-用桩替换 LLM（stream_messages）与检索（rag_service.retrieve），聚焦 ReAct 循环、
-工具解析、事件协议（agent_step / token / sources / error），不依赖真实模型 Key。
+用桩替换 LLM（stream_agent_turn）与检索（rag_service.retrieve），聚焦：
+- function calling 主路径：tool_calls → 执行工具 → 回填 → 多轮 → 最终答案流式
+- ReAct 文本降级路径：模型不支持 tools 时 parse_react 仍驱动多步推理
+- 工具参数解析（_resolve_query，兼容 function calling JSON 与 ReAct 文本）
+- 事件协议（agent_step / token / sources / error）
+
+不依赖真实模型 Key。
 """
 
 import asyncio
@@ -11,26 +16,31 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from main import app
-from services.agent import parse_react, run_agent, _execute_tool, _extract_query
-from services.model_config import ModelConfig
+from services.agent import (
+    _execute_tool,
+    _extract_query,
+    _resolve_query,
+    parse_react,
+    run_agent,
+)
+from services.model_config import ModelConfig, ModelConfigError
 from services.vector_store import RetrievalResult
 
 
-class _FakeLLM:
-    """按调用顺序返回脚本化 ReAct 文本，逐块 yield 模拟流式。"""
+class _FakeAgentTurn:
+    """按调用顺序返回脚本化事件流（token / tool_calls），模拟 stream_agent_turn。"""
 
-    def __init__(self, responses: list[str]):
-        self._responses = list(responses)
+    def __init__(self, turns: list[list[dict]]):
+        self._turns = list(turns)
         self._i = 0
         self.calls = 0
 
-    async def stream_messages(self, messages, model=None, cfg=None, client=None):
-        idx = min(self._i, len(self._responses) - 1)
+    async def stream_agent_turn(self, messages, tools, model=None, cfg=None, client=None):
+        idx = min(self._i, len(self._turns) - 1)
         self._i += 1
         self.calls += 1
-        text = self._responses[idx]
-        for i in range(0, len(text), 8):
-            yield text[i : i + 8]
+        for ev in self._turns[idx]:
+            yield ev
 
 
 async def _fake_retrieve(query, kb_ids, tenant_id, top_n=5, cfg=None):
@@ -47,15 +57,15 @@ async def _fake_retrieve(query, kb_ids, tenant_id, top_n=5, cfg=None):
     ]
 
 
+async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
+    return []
+
+
 async def _collect(events_gen) -> list[dict]:
     out = []
     async for e in events_gen:
         out.append(e)
     return out
-
-
-async def _fake_retrieve_empty(query, kb_ids, tenant_id, top_n=5, cfg=None):
-    return []
 
 
 class ToolEmptyKbTest(unittest.TestCase):
@@ -77,16 +87,217 @@ class ToolEmptyKbTest(unittest.TestCase):
         self.assertIn("严禁编造", observation)
         self.assertIn("2 个知识库", observation)
 
-    def test_agent_empty_kb_observation_flow(self):
-        """端到端：Agent 检索空结果时，observation 事件携带不编造约束。"""
-        fake_llm = _FakeLLM(
+    def test_resolve_query_from_function_calling_json(self):
+        self.assertEqual(
+            _resolve_query('{"query": "算法入职前期准备"}'), "算法入职前期准备"
+        )
+
+    def test_resolve_query_from_react_fenced_text(self):
+        # 降级：ReAct 文本（含 ```json 围栏）也应能解析出 query
+        self.assertEqual(
+            _resolve_query('```json\n{"query": "算法入职前期准备"}\n```'),
+            "算法入职前期准备",
+        )
+
+    def test_resolve_query_empty(self):
+        self.assertEqual(_resolve_query(""), "")
+        self.assertEqual(_resolve_query("   "), "")
+
+
+class FunctionCallingTest(unittest.TestCase):
+    def test_multi_round_emits_steps_and_sources(self):
+        fake = _FakeAgentTurn(
             [
-                'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "x"}',
-                "Thought: 检索为空\nFinal Answer: 知识库中未找到相关信息。",
+                [
+                    {"type": "token", "content": "需要检索知识库"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "熊答是什么"}',
+                            }
+                        ],
+                    },
+                ],
+                [{"type": "token", "content": "熊答是企业知识问答助手。"}],
             ]
         )
         with patch(
-            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="熊答是什么",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+
+        types = [e["event"] for e in events]
+        self.assertIn("agent_step", types)
+        self.assertIn("sources", types)
+        self.assertIn("token", types)
+
+        steps = [e for e in events if e["event"] == "agent_step"]
+        self.assertEqual(steps[0]["data"]["type"], "thought")
+        self.assertEqual(steps[0]["data"]["step"], 0)
+        self.assertEqual(steps[1]["data"]["type"], "action")
+        self.assertEqual(steps[1]["data"]["tool"], "knowledge_base_search")
+        self.assertEqual(steps[2]["data"]["type"], "observation")
+        self.assertTrue(steps[2]["data"]["success"])
+
+        sources_evt = [e for e in events if e["event"] == "sources"][0]
+        self.assertEqual(len(sources_evt["data"]["sources"]), 1)
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("企业知识问答助手", token_text)
+
+    def test_single_round_final_no_action(self):
+        fake = _FakeAgentTurn(
+            [[{"type": "token", "content": "熊答是助手。"}]]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="你是谁",
+                        kb_ids=[],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        step_types = [
+            s["data"].get("type")
+            for s in events
+            if s["event"] == "agent_step"
+        ]
+        self.assertNotIn("action", step_types)
+        self.assertIn("token", [e["event"] for e in events])
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("熊答是助手", token_text)
+
+    def test_config_error_yields_error_event(self):
+        async def _boom(*args, **kwargs):
+            raise ModelConfigError("Embedding Key 错误")
+
+        fake = _FakeAgentTurn(
+            [
+                [
+                    {"type": "token", "content": "需要检索"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "x"}',
+                            }
+                        ],
+                    },
+                ],
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _boom):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="x",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        err = [e for e in events if e["event"] == "error"]
+        self.assertTrue(err, "应产出 error 事件")
+        self.assertEqual(err[0]["data"]["error_type"], "MODEL_CONFIG_ERROR")
+
+
+class FallbackReactTest(unittest.TestCase):
+    """模型不支持 function calling（返回纯 ReAct 文本，无 tool_calls）时降级仍工作。"""
+
+    def test_react_text_fallback_multi_round(self):
+        fake = _FakeAgentTurn(
+            [
+                [
+                    {
+                        "type": "token",
+                        "content": 'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "熊答是什么"}',
+                    }
+                ],
+                [
+                    {
+                        "type": "token",
+                        "content": "Thought: 根据检索结果可以回答\nFinal Answer: 熊答是企业知识问答助手。",
+                    }
+                ],
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
+        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
+            events = asyncio.run(
+                _collect(
+                    run_agent(
+                        question="熊答是什么",
+                        kb_ids=["kb1"],
+                        tenant_id="t1",
+                        model=None,
+                        history=[],
+                        cfg=ModelConfig(),
+                    )
+                )
+            )
+        types = [e["event"] for e in events]
+        self.assertIn("agent_step", types)
+        self.assertIn("sources", types)
+        self.assertIn("token", types)
+        steps = [e for e in events if e["event"] == "agent_step"]
+        self.assertEqual(steps[1]["data"]["type"], "action")
+        self.assertEqual(steps[1]["data"]["tool"], "knowledge_base_search")
+        token_text = "".join(
+            e["data"]["content"] for e in events if e["event"] == "token"
+        )
+        self.assertIn("企业知识问答助手", token_text)
+
+    def test_react_empty_kb_observation_flow(self):
+        fake = _FakeAgentTurn(
+            [
+                [
+                    {
+                        "type": "token",
+                        "content": 'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "x"}',
+                    }
+                ],
+                [
+                    {
+                        "type": "token",
+                        "content": "Thought: 检索为空\nFinal Answer: 知识库中未找到相关信息。",
+                    }
+                ],
+            ]
+        )
+        with patch(
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
         ), patch("services.agent.rag_service.retrieve", _fake_retrieve_empty):
             events = asyncio.run(
                 _collect(
@@ -129,125 +340,59 @@ class ParseReactTest(unittest.TestCase):
         self.assertIn("熊答", s.final_answer)
 
 
-class AgentRunTest(unittest.TestCase):
-    def test_multi_round_reasoning_emits_steps_and_sources(self):
-        fake_llm = _FakeLLM(
-            [
-                'Thought: 需要检索知识库\nAction: knowledge_base_search\nAction Input: {"query": "熊答是什么"}',
-                "Thought: 根据检索结果可以回答\nFinal Answer: 熊答是企业知识问答助手。",
-            ]
+class ExtractQueryTest(unittest.TestCase):
+    """_extract_query 容错：覆盖 LLM 常见输出形态（之前仅覆盖干净 JSON）。"""
+
+    def test_clean_json(self):
+        self.assertEqual(_extract_query('{"query": "算法入职前期准备"}'), "算法入职前期准备")
+
+    def test_markdown_fenced_json(self):
+        self.assertEqual(
+            _extract_query('```json\n{"query": "算法入职前期准备"}\n```'),
+            "算法入职前期准备",
         )
-        with patch(
-            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
-        ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
-            events = asyncio.run(
-                _collect(
-                    run_agent(
-                        question="熊答是什么",
-                        kb_ids=["kb1"],
-                        tenant_id="t1",
-                        model=None,
-                        history=[],
-                        cfg=ModelConfig(),
-                    )
-                )
-            )
 
-        types = [e["event"] for e in events]
-        self.assertIn("agent_step", types)
-        self.assertIn("sources", types)
-        self.assertIn("token", types)
+    def test_json_with_surrounding_text(self):
+        s = '这是我的检索：\n{"query": "算法岗入职准备"}\n请检索'
+        self.assertEqual(_extract_query(s), "算法岗入职准备")
 
-        # 验证步骤顺序：thought(0) → action(0) → observation(0) → thought(1) → sources → token
-        steps = [e for e in events if e["event"] == "agent_step"]
-        self.assertEqual(steps[0]["data"]["type"], "thought")
-        self.assertEqual(steps[0]["data"]["step"], 0)
-        self.assertEqual(steps[1]["data"]["type"], "action")
-        self.assertEqual(steps[1]["data"]["tool"], "knowledge_base_search")
-        self.assertEqual(steps[2]["data"]["type"], "observation")
-        self.assertTrue(steps[2]["data"]["success"])
+    def test_first_json_object_when_trailing_text(self):
+        s = '{"query": "算法入职准备"} 我需要相关知识'
+        self.assertEqual(_extract_query(s), "算法入职准备")
 
-        # 检索来源被汇总
-        sources_evt = [e for e in events if e["event"] == "sources"][0]
-        self.assertEqual(len(sources_evt["data"]["sources"]), 1)
-        # 最终答案以 token 流出
-        token_text = "".join(
-            e["data"]["content"] for e in events if e["event"] == "token"
-        )
-        self.assertIn("企业知识问答助手", token_text)
+    def test_plain_text_fallback(self):
+        self.assertEqual(_extract_query("算法入职前期准备"), "算法入职前期准备")
 
-    def test_single_round_final_answer_no_action(self):
-        fake_llm = _FakeLLM(["Thought: 直接回答\nFinal Answer: 熊答是助手。"])
-        with patch(
-            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
-        ):
-            events = asyncio.run(
-                _collect(
-                    run_agent(
-                        question="你是谁",
-                        kb_ids=[],
-                        tenant_id="t1",
-                        model=None,
-                        history=[],
-                        cfg=ModelConfig(),
-                    )
-                )
-            )
-        types = [e["event"] for e in events]
-        self.assertNotIn(
-            "action",
-            [s["data"].get("type") for s in events if s["event"] == "agent_step"],
-        )
-        self.assertIn("token", types)
-        token_text = "".join(
-            e["data"]["content"] for e in events if e["event"] == "token"
-        )
-        self.assertIn("熊答是助手", token_text)
-
-    def test_retrieve_config_error_yields_error_event(self):
-        async def _boom(*args, **kwargs):
-            from services.model_config import ModelConfigError
-
-            raise ModelConfigError("Embedding Key 错误")
-
-        fake_llm = _FakeLLM(
-            [
-                'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "x"}',
-            ]
-        )
-        with patch(
-            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
-        ), patch("services.agent.rag_service.retrieve", _boom):
-            events = asyncio.run(
-                _collect(
-                    run_agent(
-                        question="x",
-                        kb_ids=["kb1"],
-                        tenant_id="t1",
-                        model=None,
-                        history=[],
-                        cfg=ModelConfig(),
-                    )
-                )
-            )
-        err = [e for e in events if e["event"] == "error"]
-        self.assertTrue(err, "应产出 error 事件")
-        self.assertEqual(err[0]["data"]["error_type"], "MODEL_CONFIG_ERROR")
+    def test_empty_input(self):
+        self.assertEqual(_extract_query(""), "")
+        self.assertEqual(_extract_query("   "), "")
 
 
 class AgentRouteTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_agent_mode_sse(self):
-        fake_llm = _FakeLLM(
+    def test_agent_mode_sse_function_calling(self):
+        fake = _FakeAgentTurn(
             [
-                'Thought: 需要检索\nAction: knowledge_base_search\nAction Input: {"query": "熊答是什么"}',
-                "Thought: 可回答\nFinal Answer: 熊答是企业知识问答助手。",
+                [
+                    {"type": "token", "content": "需要检索知识库"},
+                    {
+                        "type": "tool_calls",
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "knowledge_base_search",
+                                "arguments": '{"query": "熊答是什么"}',
+                            }
+                        ],
+                    },
+                ],
+                [{"type": "token", "content": "熊答是企业知识问答助手。"}],
             ]
         )
         with patch(
-            "services.agent.llm_service.stream_messages", fake_llm.stream_messages
+            "services.agent.llm_service.stream_agent_turn", fake.stream_agent_turn
         ), patch("services.agent.rag_service.retrieve", _fake_retrieve):
             with self.client.stream(
                 "POST",
@@ -269,36 +414,6 @@ class AgentRouteTest(unittest.TestCase):
         self.assertIn("event: token", body)
         self.assertIn("event: done", body)
         self.assertIn("knowledge_base_search", body)
-
-
-class ExtractQueryTest(unittest.TestCase):
-    """_extract_query 容错：覆盖 LLM 常见输出形态（之前仅覆盖干净 JSON）。"""
-
-    def test_clean_json(self):
-        self.assertEqual(_extract_query('{"query": "算法入职前期准备"}'), "算法入职前期准备")
-
-    def test_markdown_fenced_json(self):
-        # LLM 常用 ```json 代码块包裹 Action Input
-        self.assertEqual(
-            _extract_query('```json\n{"query": "算法入职前期准备"}\n```'),
-            "算法入职前期准备",
-        )
-
-    def test_json_with_surrounding_text(self):
-        s = '这是我的检索：\n{"query": "算法岗入职准备"}\n请检索'
-        self.assertEqual(_extract_query(s), "算法岗入职准备")
-
-    def test_first_json_object_when_trailing_text(self):
-        # LLM 在 JSON 后追加解释
-        s = '{"query": "算法入职准备"} 我需要相关知识'
-        self.assertEqual(_extract_query(s), "算法入职准备")
-
-    def test_plain_text_fallback(self):
-        self.assertEqual(_extract_query("算法入职前期准备"), "算法入职前期准备")
-
-    def test_empty_input(self):
-        self.assertEqual(_extract_query(""), "")
-        self.assertEqual(_extract_query("   "), "")
 
 
 if __name__ == "__main__":

@@ -706,6 +706,26 @@ Python（AI 服务）
 - **依赖**: M2-5
 - **产出**: 复杂问题多步推理回答（知识库检索工具）
 
+### M4-B Agent 原生 Function Calling 升级 [Python] P1 · 0.5d ✅ 完成
+
+> 背景：M4-1 Agent 基于自研 ReAct 文本协议（Thought / Action / Action Input），依赖正则解析 LLM 输出，脆弱易错。M4-B 升级为 OpenAI 兼容的原生 function calling，LLM 直接返回结构化 `tool_calls`，解析可靠；同时保留 ReAct 文本降级路径，兼容用户配置了不支持 function calling 的模型。
+
+- **llm.py**：
+  - `_stream` 新增 `tools` 参数：传 tools 时在请求体附加 `tools` + `tool_choice: "auto"`，切换至 `_iter_tokens_with_tools` 解析。
+  - 新增 `stream_agent_turn(messages, tools, ...)`：Agent 单轮生成入口，yield `{"type": "token", "content": ...}` 文本令牌与 `{"type": "tool_calls", "calls": [{"id", "name", "arguments"}]}` 流末事件。
+  - 新增 `_iter_tokens_with_tools`：按 `index` 累积流式 `delta.tool_calls` 分片（id / name / arguments 逐片拼接），流末一次性 yield 完整工具调用列表；文本 token 列正常透传。
+- **agent.py**：
+  - 新增 `TOOLS` 全局工具定义（OpenAI 兼容 function-calling 格式，当前仅 `knowledge_base_search`，M4-3 web_search 仅需追加一项 + 一个分支）。
+  - 重构 `run_agent` 为双路径：优先原生 function calling（本轮 LLM 返回 `tool_calls` → 调用工具 → 回填 `assistant(tool_calls)` + `tool` 消息），降级走 ReAct 文本解析（`parse_react` + Observation 文本回填）。两条路径共用同一事件协议（`agent_step` / `sources` / `token` / `error`）。
+  - 新增 `_resolve_query`：统一解析 function calling 标准 JSON 与 ReAct Action Input 文本（兼容代码块围栏），供 `_execute_tool` 共用。
+  - 更新 `_SYSTEM_PROMPT`：增加 function calling 调用指令 + ReAct 降级说明。
+  - `parse_react` / `_extract_query` 保留不变（降级与容错解析仍需要）。
+- **chat.py / 前端**：事件协议不变，无需任何改动。`routers/chat.py` Agent 分支仅做 `async for evt in run_agent(...): yield _sse(evt["event"], evt["data"])`，不感知内部路径切换。前端 `ChatPage.tsx` 的 `agent_step` 解析字段（`step/type/content/tool/input/success`）无变化。`stream_messages` 保留供其他内部调用（如 query rewrite），Agent 改用 `stream_agent_turn`。
+- **测试**：重写 `test_agent.py`——`FunctionCallingTest`（3 例：多轮 tool_calls + source + token、单轮直答、配置错误 yield error）、`FallbackReactTest`（2 例：ReAct 降级多轮、空间检索流）、`ParseReactTest`（3 例保留）、`ExtractQueryTest`（6 例保留）、`ToolEmptyKbTest`（3 例新增：工具空结果约束、_resolve_query JSON/ReAct/空输入）、`AgentRouteTest`（1 例完整 SSE 契约通过）。共 18 例，无回归。
+- **全量 Python 单测**：56 passed / 4 failed，4 例失败均为预存问题与 M4-B 无关（3 例 `test_document_processor` Windows 下 asyncio 事件循环兼容、1 例 `test_query_rewrite` L1 缓存污染导致 mock 未调用）。
+- **依赖**: M4-1
+- **产出**: Agent 使用原生 function calling 可靠解析工具调用，ReAct 文本降级作为兜底
+
 ### M4-A 普通问答增强（query rewrite + expansion，对齐 WeKnora KnowledgeQA）2026-07-14 ✅ 已完成
 
 > 背景：用户口语化 / 长问句（如「算法入职前期准备要做什么」）与文档表述（「一、入职基础准备」）措辞差异大，纯字面检索召回弱；WeKnora 普通问答用 query rewrite + expansion 让两种模式都对措辞鲁棒。本项目此前普通问答用用户原话直接检索，缺该能力。Agent 模式由 LLM 自生成子查询，不二次改写。

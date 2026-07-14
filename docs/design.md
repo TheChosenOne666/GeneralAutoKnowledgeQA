@@ -297,15 +297,19 @@ LLM 生成回答（SSE 流式输出）
 > - 开关：`core/config.py` 的 `enable_query_rewrite` / `enable_query_expansion`（默认开），可独立关闭。`retrieve` 的 L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）；rewrite / expansion 失败均不阻断主流程（配置错误除外）。
 > - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
 
-### 5.3 Agent 多步推理（M4-1）
+### 5.3 Agent 多步推理（M4-1 + M4-B function calling 升级）
 
-采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），基于 LLM 文本协议（Thought / Action / Action Input / Final Answer），与腾讯 WeKnora 的自研 ReAct 引擎思路一致。
+M4-1 采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），与腾讯 WeKnora 的自研 ReAct 引擎思路一致，基于 LLM 文本协议（Thought / Action / Action Input / Final Answer）。M4-B 升级为 **OpenAI 兼容原生 function calling**，LLM 直接返回结构化 `tool_calls`，解析可靠，同时保留 ReAct 文本降级路径兼容不支持 function calling 的模型。
 
 - **触发方式**：问答页底部「普通问答 / 智能推理」分段切换，前端 `mode=agent` 经 Java 透传至 Python `/ai/chat/stream`（`ChatController` → `AiServiceClient` 早已支持 `mode` 透传，Java 无需改动）。
-- **循环**：`services/agent.py` 的 `run_agent` 每轮调用 `llm_service.stream_messages` 生成 ReAct 文本 → 解析 `parse_react` → 执行工具 → 回填 Observation，直到 `Final Answer` 或达到最大轮数（`MAX_AGENT_ITERATIONS=5`）。
-- **工具范围（M4-1）**：仅 `knowledge_base_search`（包 `rag_service.retrieve`）。联网搜索工具（`web_search`）留待 M4-3，届时仅新增一个工具注册 + 开关，架构零改动。
-- **Action Input 解析健壮性（2026-07-14 修复）**：`_extract_query` 兼容 LLM 常见输出形态——标准 JSON、被 ```` ```json ```` 代码块包裹的 JSON、前后混入解释文字、以及纯文本。旧实现 `json.loads` 失败后把整段脏字符串（含 ```` ``` ```` 围栏）当 query 去检索，导致 Agent 模式「知识库有内容却检索不到」（普通 RAG 模式用 `body.question` 不经此解析，故不受影响）。修复后先剥离围栏 → 提取首个 JSON 对象 → 退化为纯文本；并在 Agent 检索入口与 `rag.retrieve` 融合后增加诊断日志（`[Agent诊断]` / `[检索诊断]`），便于联调定位相关性门槛。
-- **SSE 事件契约**：`agent_step`（type=thought/action/observation，含 tool/input/success）、`sources`、`token`（最终答案流式）、`error`（MODEL_CONFIG_ERROR / AGENT_ERROR）、`done`。前端 `ChatPage.tsx` 的 `AgentSteps` 组件将推理步骤渲染为可折叠的步骤树。
+- **主路径（M4-B function calling）**：`run_agent` 每轮调用 `llm_service.stream_agent_turn(messages, TOOLS)` → 流式 yield 思考文本 token + 流末 tool_calls → 调用 `_execute_tool` 执行工具 → 回填 `assistant(tool_calls)` + `tool` 消息（标准 function-calling 协议），进入下一轮推理，直到模型产出纯文本答案（无 tool_calls）或达到最大轮数（`MAX_AGENT_ITERATIONS=5`）。
+  - `llm_service._iter_tokens_with_tools`：按 `index` 累积流式 `delta.tool_calls` 分片，流末一次性 yield 完整调用列表。
+  - `TOOLS` 全局定义（OpenAI 兼容格式）追加到请求体 `tools` + `tool_choice: "auto"`。
+- **降级路径（M4-1 ReAct 文本）**：本轮 LLM 未返回 tool_calls 时（模型不支持 function calling），用 `parse_react` 解析文本中的 Thought / Action / Action Input / Final Answer → 执行工具 → 回填 Observation 文本，直到 Final Answer。
+- **工具统一解析**：`_execute_tool` 通过 `_resolve_query` 兼容 function calling 标准 JSON 与 ReAct Action Input 文本（代码块围栏、多余文字等）。
+- **工具范围**：仅 `knowledge_base_search`（包 `rag_service.retrieve`）。联网搜索工具（`web_search`）留待 M4-3，届时仅需在 `TOOLS` 追加一个工具定义 + `_execute_tool` 新增一个分支，架构零改动。
+- **Action Input 解析健壮性**：`_extract_query` 兼容 LLM 常见输出形态——标准 JSON、被 ```` ```json ```` 代码块包裹的 JSON、前后混入解释文字、以及纯文本。
+- **SSE 事件契约**（M4-B 不变）：`agent_step`（type=thought/action/observation，含 tool/input/success）、`sources`、`token`（最终答案流式）、`error`（MODEL_CONFIG_ERROR / AGENT_ERROR）、`done`。前端 `ChatPage.tsx` 的 `AgentSteps` 组件将推理步骤渲染为可折叠的步骤树。`routers/chat.py` Agent 分支仅透传事件，不感知内部路径切换。
 
 复杂问题触发 ReAct Agent：
 

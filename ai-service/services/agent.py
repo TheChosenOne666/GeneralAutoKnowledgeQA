@@ -1,13 +1,17 @@
-"""Agent 服务 — 自研轻量 ReAct 多步推理（M4-1）。
+"""Agent 服务 — 多步推理（M4-B 升级为原生 function calling）。
 
-基于现有 LLM 流式补全（services.llm.stream_messages）实现 Think→Act→Observe 循环：
-- Think：LLM 输出 ReAct 格式（Thought / Action / Action Input / Final Answer）
-- Act：解析 Action 与参数，调用已注册工具
-- Observe：工具结果作为 Observation 回填，进入下一轮
-最终解析出 Final Answer 流式推送（token 事件），并汇总检索来源（sources 事件）。
+M4-1 为自研 ReAct 文本协议（Think→Act→Observe），靠正则解析 LLM 输出的
+Thought/Action/Action Input，脆弱易错（M4-1 修复 `_extract_query` 即为佐证）。
+M4-B 升级为 OpenAI 兼容的原生 function calling：LLM 直接返回结构化 tool_calls，
+解析可靠，彻底去掉对文本 Action 解析的依赖。
 
-工具范围（M4-1）：仅 knowledge_base_search（包 rag_service.retrieve）。
-联网搜索工具（web_search）留待 M4-3，届时仅需新增一个工具注册 + 开关，架构零改动
+为兼容「用户配置了不支持 function calling 的模型」这一场景，保留 ReAct 文本协议
+作为降级：当本轮 LLM 未返回 tool_calls（仅返回文本）时，仍用 parse_react /
+_extract_query 解析 Action / Final Answer。两条路径共用同一套事件协议
+（agent_step / sources / token / error），前端与 Java 无需改动。
+
+工具范围：仅 knowledge_base_search（包 rag_service.retrieve）。联网搜索工具
+（web_search）留待 M4-3，届时仅需新增 TOOLS 中一个工具定义 + 开关，架构零改动
 （与 WeKnora 的「注册表 + 白名单」思路一致）。
 """
 
@@ -36,25 +40,44 @@ _RE_THOUGHT = re.compile(
 )
 
 _SYSTEM_PROMPT = """你是熊答，一个企业知识问答助手，具备多步推理能力。
-当用户问题需要查找资料时，你可以使用工具逐步检索知识库，再综合给出答案。
 
-请严格按以下格式推理（每次只输出一轮）：
-Thought: 你的思考过程
+当需要查找资料、确认事实或获取文档内容时，请调用 knowledge_base_search 工具检索企业知识库，
+综合检索结果给出准确回答。工具参数 query 应简洁明确，表达用户真正想了解的信息。
+
+回答要求：
+- 不要编造知识库中不存在的内容
+- 若工具检索明确返回「未找到相关内容」，请如实告知用户知识库中无相关信息，不得编造或使用通用知识虚构
+- 最终回答直接面向用户，简洁准确、使用中文
+- 仅在信息已充分时给出最终答案；若需更多资料，继续调用工具检索
+
+（降级说明：若当前环境无法调用工具，请用纯文本按以下格式逐轮回答：
+Thought: 你的思考
 Action: knowledge_base_search
 Action Input: {"query": "要检索的问题"}
-...（工具返回 Observation 后，继续下一轮 Thought/Action，或给出最终答案）
-
-当你已掌握足够信息，输出：
-Thought: 总结思考
-Final Answer: 给用户的完整回答
-
-注意：
-- 只能使用 knowledge_base_search 这一个工具
-- Action Input 必须是 JSON，包含 query 字段
-- 不要编造知识库中不存在的内容
-- 若知识库检索明确返回「未找到相关内容」，请如实告知用户知识库中无相关信息，不得编造或使用通用知识虚构
-- Final Answer 直接面向用户，简洁准确、使用中文
+或最终：Final Answer: 给用户的完整回答）
 """
+
+# OpenAI 兼容 function-calling 工具定义（M4-B）。新增工具（如 M4-3 web_search）
+# 仅需在此追加一项 + 在 _execute_tool 增加对应分支，调用方零改动。
+TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_base_search",
+            "description": "检索企业知识库以回答用户问题。当需要查找资料、确认事实、获取文档内容时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "检索查询语句，应简洁明确，表达用户真正想了解的信息。",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
 
 
 @dataclass
@@ -170,20 +193,43 @@ def _chunk(text: str, size: int = 8):
         yield text[i : i + size]
 
 
+def _resolve_query(arguments: str) -> str:
+    """从工具参数解析检索 query（兼容 function calling JSON 与 ReAct 降级文本）。
+
+    - function calling：LLM 返回标准 JSON 字符串 ``{"query": "..."}`` → json.loads 取 query
+    - ReAct 降级：LLM 输出的 Action Input（可能含 ```json 围栏 / 多余文字）→ 退化为
+      :func:`_extract_query` 容错解析
+    """
+    s = (arguments or "").strip()
+    if not s:
+        return ""
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        return _extract_query(s)
+    if isinstance(obj, dict):
+        return (obj.get("query") or obj.get("q") or "").strip()
+    if isinstance(obj, str):
+        return obj.strip()
+    return ""
+
+
 async def _execute_tool(
     tool_name: str,
-    tool_input: str,
+    arguments: str,
     kb_ids: list[str],
     tenant_id: str,
     cfg: ModelConfig | None,
 ) -> tuple[str, list[dict], bool]:
     """执行工具，返回 (observation 文本, 来源列表, 是否模型配置错误)。
 
+    arguments 兼容两种来源：function calling 的标准 JSON 字符串，或 ReAct 降级的
+    Action Input 文本（含围栏 / 多余文字），统一由 :func:`_resolve_query` 解析。
     M4-1 仅支持 knowledge_base_search；未知工具返回可恢复的观察（让模型换思路）。
     """
     if tool_name == "knowledge_base_search":
-        query = _extract_query(tool_input)
-        logger.info(f"[Agent诊断] 原始ActionInput={tool_input!r} 清洗后query={query!r}")
+        query = _resolve_query(arguments)
+        logger.info(f"[Agent诊断] 工具={tool_name} 解析query={query!r}")
         if not query:
             return "工具参数错误：未提供有效查询。", [], False
         try:
@@ -224,9 +270,11 @@ async def run_agent(
     history: list[dict] | None,
     cfg: ModelConfig | None,
 ) -> AsyncGenerator[dict, None]:
-    """执行 ReAct Agent，逐事件 yield 字典（由路由封装为 SSE）。
+    """执行 Agent 多步推理，逐事件 yield 字典（由路由封装为 SSE）。
 
-    Yields 事件字典：
+    M4-B：优先走原生 function calling 主路径（LLM 返回 tool_calls 即调用工具并回填
+    function-calling 协议消息）；若本轮 LLM 未返回 tool_calls（模型不支持 function
+    calling），降级走 ReAct 文本解析（parse_react）。两条路径共用同一事件协议：
       - agent_step: {"step", "type": "thought"|"action"|"observation", "content"/"tool"/"input"/"success"}
       - sources: {"sources": [...]}
       - token: {"content": "..."}
@@ -236,12 +284,15 @@ async def run_agent(
     messages = _build_messages(question, history)
 
     for i in range(MAX_AGENT_ITERATIONS):
+        # 单轮流式生成：收集思考文本与（若有）工具调用，思考以整段回显、答案以 token 流
+        thought_text = ""
+        tool_calls: list[dict] = []
         try:
-            full = ""
-            async for tok in llm_service.stream_messages(
-                messages, model=model, cfg=cfg
-            ):
-                full += tok
+            async for ev in llm_service.stream_agent_turn(messages, TOOLS, model=model, cfg=cfg):
+                if ev["type"] == "token":
+                    thought_text += ev["content"]
+                elif ev["type"] == "tool_calls":
+                    tool_calls = ev["calls"]
         except ModelConfigError as e:
             logger.warning(f"Agent LLM 阶段模型配置错误: {e}")
             yield {
@@ -250,7 +301,66 @@ async def run_agent(
             }
             return
 
-        step = parse_react(full)
+        # 主路径：原生 function calling
+        if tool_calls:
+            if thought_text.strip():
+                yield {
+                    "event": "agent_step",
+                    "data": {"step": i, "type": "thought", "content": thought_text.strip()},
+                }
+            reached_config_error = False
+            for call in tool_calls:
+                name = call.get("name", "")
+                args = call.get("arguments", "")
+                call_id = call.get("id") or f"call_{i}"
+                yield {
+                    "event": "agent_step",
+                    "data": {"step": i, "type": "action", "tool": name, "input": args},
+                }
+                observation, new_sources, is_config_error = await _execute_tool(
+                    name, args, kb_ids, tenant_id, cfg
+                )
+                yield {
+                    "event": "agent_step",
+                    "data": {
+                        "step": i,
+                        "type": "observation",
+                        "content": observation,
+                        "success": not is_config_error,
+                    },
+                }
+                if is_config_error:
+                    reached_config_error = True
+                    break
+                if new_sources:
+                    sources.extend(new_sources)
+                # 回填 function calling 协议要求的消息（assistant 带 tool_calls + tool 结果）
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": thought_text.strip() or None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": args},
+                            }
+                        ],
+                    }
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": observation}
+                )
+            if reached_config_error:
+                yield {
+                    "event": "error",
+                    "data": {"error_type": "MODEL_CONFIG_ERROR", "message": observation},
+                }
+                return
+            continue  # 工具已执行，进入下一轮推理
+
+        # 降级路径：本轮无 tool_calls（模型不支持 function calling），按 ReAct 文本解析
+        step = parse_react(thought_text)
         if step.thought:
             yield {
                 "event": "agent_step",
@@ -265,7 +375,7 @@ async def run_agent(
                 yield {"event": "token", "data": {"content": chunk}}
             return
 
-        # Act：执行工具
+        # Act（降级）：执行工具
         yield {
             "event": "agent_step",
             "data": {
@@ -293,12 +403,10 @@ async def run_agent(
                 "data": {"error_type": "MODEL_CONFIG_ERROR", "message": observation},
             }
             return
-
         if new_sources:
             sources.extend(new_sources)
-
-        # Observe：回填 Observation，进入下一轮
-        messages.append({"role": "assistant", "content": full})
+        # Observe（降级）：回填 Observation 文本，进入下一轮
+        messages.append({"role": "assistant", "content": thought_text})
         messages.append({"role": "user", "content": f"Observation: {observation}"})
 
     # 超出最大轮数：兜底提示

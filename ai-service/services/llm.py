@@ -114,47 +114,49 @@ class LlmService:
         model: str | None,
         cfg: ModelConfig,
         client: httpx.AsyncClient | None,
-    ) -> AsyncGenerator[str, None]:
-        """流式调用 OpenAI 兼容 chat/completions 的核心实现（共享于上述两个方法）。"""
+        tools: list[dict] | None = None,
+    ):
+        """流式调用 OpenAI 兼容 chat/completions 的核心实现（共享于上游方法）。
+
+        ``tools`` 为空时逐 token yield 文本（供普通问答 / ReAct 降级）；
+        ``tools`` 给定时（M4-B function calling）yield 字典事件：
+        ``{"type": "token", "content": ...}`` 与流末 ``{"type": "tool_calls", "calls": [...]}``。
+        """
         base_url = cfg.llm_base_url or settings.llm_base_url
         model_name = model or cfg.llm_model or settings.llm_model
         _llm_key = cfg.llm_api_key or ""
         _llm_tail = "***" + _llm_key[-4:] if _llm_key else "null"
-        logger.info(f"[M3-3诊断] LLM请求 base_url={base_url} model={model_name} key尾4={_llm_tail}")
+        logger.info(f"[M3-3诊断] LLM请求 base_url={base_url} model={model_name} key尾4={_llm_tail} tools={'on' if tools else 'off'}")
+        json_body = {"model": model_name, "messages": messages, "stream": True}
+        if tools:
+            json_body["tools"] = tools
+            json_body["tool_choice"] = "auto"
+        headers = {
+            "Authorization": f"Bearer {cfg.llm_api_key}",
+            "Content-Type": "application/json",
+        }
         try:
             if client is None:
                 async with httpx.AsyncClient(timeout=60.0) as c:
                     async with c.stream(
-                        "POST",
-                        f"{base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {cfg.llm_api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model_name,
-                            "messages": messages,
-                            "stream": True,
-                        },
+                        "POST", f"{base_url}/chat/completions", headers=headers, json=json_body
                     ) as response:
-                        async for token in self._iter_tokens(response):
-                            yield token
+                        if tools:
+                            async for ev in self._iter_tokens_with_tools(response):
+                                yield ev
+                        else:
+                            async for token in self._iter_tokens(response):
+                                yield token
             else:
                 async with client.stream(
-                    "POST",
-                    f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {cfg.llm_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model_name,
-                        "messages": messages,
-                        "stream": True,
-                    },
+                    "POST", f"{base_url}/chat/completions", headers=headers, json=json_body
                 ) as response:
-                    async for token in self._iter_tokens(response):
-                        yield token
+                    if tools:
+                        async for ev in self._iter_tokens_with_tools(response):
+                            yield ev
+                    else:
+                        async for token in self._iter_tokens(response):
+                            yield token
         except httpx.HTTPError as e:
             raise ModelConfigError(f"LLM 调用失败（模型名或 API Key 可能错误）：{e}") from e
 
@@ -175,6 +177,67 @@ class LlmService:
                     yield content
             except (json.JSONDecodeError, KeyError, IndexError):
                 continue
+
+    async def stream_agent_turn(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+        cfg: ModelConfig | None = None,
+        client: httpx.AsyncClient | None = None,
+    ):
+        """Agent 单轮生成：流式 yield 文本 token 与工具调用事件（M4-B function calling）。
+
+        Yields:
+            - ``{"type": "token", "content": str}``：每片文本（思考 / 最终答案）
+            - ``{"type": "tool_calls", "calls": [{"id", "name", "arguments"}]}``：流末一次，
+              含本轮所有工具调用；``arguments`` 为累积的完整 JSON 字符串，由调用方解析。
+        """
+        cfg = cfg or ModelConfig.from_settings()
+        if not cfg.has_llm():
+            raise ModelConfigError("未配置 LLM API Key，请在 AI 配置页填写后重试")
+        async for ev in self._stream(messages, model, cfg, client, tools=tools):
+            yield ev
+
+    @staticmethod
+    async def _iter_tokens_with_tools(response: httpx.Response):
+        """解析 function-calling 流式响应：累积 tool_calls 分片同时透传 content token。
+
+        OpenAI 兼容 API 的 ``delta.tool_calls`` 采用分片增量（``index`` 标识同一调用，
+        ``function.arguments`` 逐片拼接），流末一次性产出完整工具调用列表。
+        """
+        response.raise_for_status()
+        acc: dict = {}
+        async for line in response.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+                delta = chunk["choices"][0]["delta"]
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+            content = delta.get("content")
+            if content:
+                yield {"type": "token", "content": content}
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                slot = acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] += fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
+        calls = [
+            {"id": s["id"] or f"call_{i}", "name": s["name"], "arguments": s["arguments"]}
+            for i, s in sorted(acc.items())
+        ]
+        if calls:
+            yield {"type": "tool_calls", "calls": calls}
 
 
 llm_service = LlmService()
