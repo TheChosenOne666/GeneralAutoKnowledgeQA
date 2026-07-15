@@ -12,7 +12,7 @@ import { aiConfigApi } from '@/api/aiConfig'
 import { knowledgeApi } from '@/api/knowledge'
 import type { FileStatus, DocumentPage } from '@/api/knowledge'
 import { useChat } from '@/context/ChatContext'
-import type { ChatHistoryItem, Message, SourceItem, AIConfig } from '@/types'
+import type { AgentStep, ChatHistoryItem, ChatMessage, Message, SourceItem, AIConfig } from '@/types'
 
 /** 模型类型展示名。*/
 const MODEL_LABELS: Record<'llm' | 'embedding', string> = {
@@ -28,28 +28,6 @@ function isModelConfigured(cfg: AIConfig | null, key: 'llm' | 'embedding'): bool
   return Boolean(provider && model)
 }
 
-/** 单条 Agent 推理步骤（M4-1 智能推理模式）。*/
-interface AgentStep {
-  step: number
-  type: 'thought' | 'action' | 'observation'
-  content: string
-  tool?: string
-  input?: string
-  success?: boolean
-}
-
-interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-  sources?: SourceItem[]
-  /** M4-1：智能推理（Agent）模式的推理步骤树。*/
-  agentSteps?: AgentStep[]
-  /** 该消息产生时使用的问答模式。*/
-  mode?: 'rag' | 'web' | 'agent'
-  /** 消息时间（YYYY-MM-DD HH:mm），用于展示在用户消息下方。*/
-  time?: string
-}
-
 /** 将时间格式化为「YYYY-MM-DD HH:mm」。*/
 function formatTime(input: string | number | Date): string {
   const d =
@@ -61,6 +39,20 @@ function formatTime(input: string | number | Date): string {
   if (isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** AI 思考时动态省略号：1 个点 → 2 个点 → 3 个点循环，避免气泡宽度跳动。*/
+function ThinkingDots() {
+  const [n, setN] = useState(1)
+  useEffect(() => {
+    const id = setInterval(() => setN((v) => (v % 3) + 1), 400)
+    return () => clearInterval(id)
+  }, [])
+  return (
+    <>
+      思考中<span className="inline-block w-[1.2em] text-left">{'.'.repeat(n)}</span>
+    </>
+  )
 }
 
 /** 解析后端以 JSON 字符串存储的来源（容错）。*/
@@ -392,20 +384,14 @@ const SUGGESTIONS = [
 ]
 
 export default function ChatPage() {
-  const { activeId, setActiveId, refresh } = useChat()
+  const { activeId, setActiveId, refresh, messages, setMessages, isStreaming, setStreaming, markLoaded, isLoaded } = useChat()
   const { user } = useAuth()
-  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState(false)
   // 问答模式（知识库 / 联网搜索 / 智能推理 Agent），默认知识库
   const [mode, setMode] = useState<'rag' | 'web' | 'agent'>('rag')
-  const [conversationId, setConversationId] = useState<string | null>(null)
   const loadToken = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
-  // 新会话流式刚结束、用 done 事件注册 activeId 时，内存中已有完整回复，
-  // 置此标记跳过 useEffect[activeId] 的后端重载，避免与后端异步落库竞争把回复清空
-  const skipReloadRef = useRef(false)
   const navigate = useNavigate()
   // 自动滚动：发送后跳到底部、流式回复时跟随底部动态加载
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -471,21 +457,29 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }
 
-  // 选中会话变化时加载历史消息
+  // 选中会话变化时加载历史消息。
+  // 消息状态已提升到 ChatContext（跨路由卸载保留）：若本会话已从后端加载过（loadedConvIds），
+  // 直接复用内存缓存，不再重新加载，避免路由切走再切回时把进行中的流式回复覆盖成空白。
   useEffect(() => {
-    // 流式刚结束、新会话注册 activeId：内存中已有完整回复，跳过从后端重载，
-    // 避免与后端异步落库竞争把刚流式渲染的助手回复覆盖成空白（仅跳过本次）
-    if (skipReloadRef.current) {
-      skipReloadRef.current = false
-      setStreaming(false)
+    // 已挂载时 activeId 变化（点击侧栏切换会话）：取消旧会话进行中的流式，避免跨会话串流。
+    // 注意：路由切走再切回会触发组件「重挂」，此时 abortRef 已被重置为 null，本句为 no-op，
+    // 进行中的流式仍在后台继续写入缓存——这正是「切回后继续看到 AI 回复」期望的行为。
+    abortRef.current?.abort()
+    if (!activeId) {
+      // 新会话（activeId 为空）：保留 PENDING 进行中消息——路由切走再切回时应保留，
+      // 仅当用户主动点击「新建对话」触发 setActiveId(null) 时才清空（见 ChatContext）。
+      // 切回时立即跳到底部并跟随后续 token，避免重挂后停在顶部看似「空白」。
+      followRef.current = true
+      atBottomRef.current = true
+      scrollToBottom('auto')
       return
     }
-    // 切换会话：取消进行中的流式并恢复输入态，避免输入框卡在禁用
-    abortRef.current?.abort()
-    setStreaming(false)
-    if (!activeId) {
-      setMessages([])
-      setConversationId(null)
+    if (isLoaded(activeId)) {
+      // 已加载过：直接复用缓存（含流式回复），不向后端重载
+      // 切回时跳到底部并跟随流式 token，保持「实时跟随 AI 回复」的体验
+      followRef.current = true
+      atBottomRef.current = true
+      scrollToBottom('auto')
       return
     }
     const token = ++loadToken.current
@@ -502,7 +496,7 @@ export default function ChatPage() {
             time: m.createTime ? formatTime(m.createTime) : undefined,
           })),
         )
-        setConversationId(activeId)
+        markLoaded(activeId)
         atBottomRef.current = true
         scrollToBottom('auto')
       })
@@ -510,7 +504,7 @@ export default function ChatPage() {
         if (token !== loadToken.current) return
         setMessages([{ role: 'assistant', content: '加载历史消息失败，请稍后重试。' }])
       })
-  }, [activeId])
+  }, [activeId, isLoaded, markLoaded])
 
   // AI 回复逐字追加（流式）时，若用户原本在底部或正处于主动跟随，则自动滚动到底部
   useEffect(() => {
@@ -520,10 +514,12 @@ export default function ChatPage() {
   }, [messages])
 
   const sendMessage = async (text: string) => {
-    if (!text.trim() || streaming) return
+    if (!text.trim() || isStreaming) return
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
+    // 发送时捕获当前会话 id：新会话为 null（流式 done 后才注册），已有会话为其 id
+    const convAtSend = activeId
     // 多轮历史：发送前已有的已完成消息（不含当前问题）
     const history: ChatHistoryItem[] = messages
       .filter((m) => m.content)
@@ -540,7 +536,7 @@ export default function ChatPage() {
     try {
       const reader = await chatApi.streamChat(
         text,
-        conversationId || undefined,
+        convAtSend ?? undefined,
         history,
         controller.signal,
         selectedModel || undefined,
@@ -549,7 +545,7 @@ export default function ChatPage() {
       const decoder = new TextDecoder()
       let buffer = ''
       let aiContent = ''
-      let convId = conversationId
+      let convId = convAtSend
       let currentEvent = ''
 
       const updateLast = (patch: Partial<ChatMessage>) =>
@@ -616,13 +612,11 @@ export default function ChatPage() {
             } else if (currentEvent === 'done') {
               if (parsed.conversation_id && !convId) {
                 convId = parsed.conversation_id
-                setConversationId(convId)
               }
               if (convId) {
-                if (!activeId) {
-                  // 新会话：内存中已有完整回复，跳过重新加载，避免与后端异步落库
-                  // 竞争把刚流式渲染的助手回复覆盖成空白
-                  skipReloadRef.current = true
+                if (!convAtSend) {
+                  // 新会话流式结束：注册 activeId，ChatContext 会迁移进行中消息并标记已加载，
+                  // 后续 useEffect[activeId] 跳过后端重载，避免覆盖内存中已渲染的完整回复
                   setActiveId(convId)
                 }
                 void refresh()
@@ -748,7 +742,7 @@ export default function ChatPage() {
                               {msg.content}
                             </ReactMarkdown>
                           ) : (
-                            streaming && i === messages.length - 1 && !msg.agentSteps?.length && '思考中...'
+                            isStreaming && i === messages.length - 1 && !msg.agentSteps?.length && <ThinkingDots />
                           )}
                         </div>
                       )}
@@ -817,7 +811,7 @@ export default function ChatPage() {
               }
               className="w-full px-5 py-4 bg-transparent text-sm text-slate-700 placeholder-slate-400 outline-none resize-none max-h-[200px] overflow-y-auto"
               rows={1}
-              disabled={streaming}
+              disabled={isStreaming}
             />
             <div className="px-3 pb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -892,7 +886,7 @@ export default function ChatPage() {
                     )}
                   </div>
                 )}
-                {streaming ? (
+                {isStreaming ? (
                   <button
                     onClick={() => abortRef.current?.abort()}
                     className="w-8 h-8 rounded-lg flex items-center justify-center bg-slate-400 text-white hover:bg-slate-500 cursor-pointer shadow-sm transition"
