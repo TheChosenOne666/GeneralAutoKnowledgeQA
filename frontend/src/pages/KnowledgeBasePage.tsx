@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { knowledgeApi } from '@/api/knowledge'
 import { useAuth } from '@/hooks/useAuth'
 import type { Document, KnowledgeBase } from '@/types'
@@ -474,9 +476,9 @@ export default function KnowledgeBasePage() {
               ) : viewError ? (
                 <div className="px-4 py-3 rounded-lg bg-red-50 text-red-600 text-sm">{viewError}</div>
               ) : (
-                <pre className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 font-sans">
-                  {viewContent}
-                </pre>
+                <div className="text-sm leading-relaxed text-slate-700 font-sans">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewContent}</ReactMarkdown>
+                </div>
               )}
             </div>
           </div>

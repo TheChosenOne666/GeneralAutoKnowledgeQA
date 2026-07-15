@@ -103,7 +103,9 @@ function SourceCard({ source }: { source: SourceItem }) {
       </button>
       {open && (
         <>
-          <p className="mt-2 text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{source.content}</p>
+          <div className="mt-2 text-xs text-slate-500 leading-relaxed">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{source.content}</ReactMarkdown>
+          </div>
           {!isWeb && source.doc_id && (
             <button
               onClick={(e) => { e.stopPropagation(); setShowPreview(true) }}
@@ -282,12 +284,12 @@ function DocumentPreviewModal({ docId, page, onClose }: { docId: string; page: n
               <div className="h-full flex items-center justify-center text-sm text-slate-400">正在加载原文件…</div>
             ) : totalPages > 0 ? (
               <div className="h-full overflow-auto p-5">
-                <pre
-                  className="text-slate-600 whitespace-pre-wrap font-sans leading-relaxed"
+                <div
+                  className="text-slate-600 font-sans leading-relaxed"
                   style={{ fontSize: `${scale}rem` }}
                 >
-                  {currentText}
-                </pre>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{currentText}</ReactMarkdown>
+                </div>
               </div>
             ) : (
               <div className="h-full flex flex-col items-center justify-center gap-3 px-6 text-center">
