@@ -56,6 +56,12 @@ export const knowledgeApi = {
   deleteDocument: (id: string) =>
     api.post<BaseResponse<boolean>>('/knowledge/document/delete', { id }).then((r) => r.data.data),
 
+  /** 批量删除文档。
+   * @param ids 文档 ID 列表；后端 fail-fast 全量鉴权，任一无权限即全部不删除。
+   * @returns 实际删除成功的数量。*/
+  batchDeleteDocuments: (ids: string[]) =>
+    api.post<BaseResponse<number>>('/knowledge/document/batch-delete', { ids }).then((r) => r.data.data),
+
   /** 取消文档处理（软取消，保留文档记录，清理已写向量并停止增强）。*/
   cancelDocument: (id: string) =>
     api.post<BaseResponse<boolean>>('/knowledge/document/cancel', { id }).then((r) => r.data.data),

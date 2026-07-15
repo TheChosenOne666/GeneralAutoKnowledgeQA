@@ -91,6 +91,29 @@ export interface ChatHistoryItem {
   content: string
 }
 
+/** 单条 Agent 推理步骤（M4-1 智能推理模式）。*/
+export interface AgentStep {
+  step: number
+  type: 'thought' | 'action' | 'observation'
+  content: string
+  tool?: string
+  input?: string
+  success?: boolean
+}
+
+/** 问答页单条消息（含流式中间态），跨路由切换保留于 ChatContext 内存缓存。*/
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  sources?: SourceItem[]
+  /** M4-1：智能推理（Agent）模式的推理步骤树。*/
+  agentSteps?: AgentStep[]
+  /** 该消息产生时使用的问答模式。*/
+  mode?: 'rag' | 'web' | 'agent'
+  /** 消息时间（YYYY-MM-DD HH:mm），用于展示在用户消息下方。*/
+  time?: string
+}
+
 /** AI 模型配置（对齐后端 AiConfigVO，字段为 camelCase；不含 API Key 明文）。*/
 export interface AIConfig {
   llmProvider: string | null

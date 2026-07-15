@@ -47,6 +47,10 @@ export default function KnowledgeBasePage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [, setLoading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
+  // 批量上传进度：当前第几个 / 共几个
+  const [uploadBatch, setUploadBatch] = useState<{ current: number; total: number } | null>(null)
+  // 批量删除：当前选中的文档 ID 集合
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newKbName, setNewKbName] = useState('')
@@ -107,6 +111,8 @@ export default function KnowledgeBasePage() {
   useEffect(() => {
     if (selectedKb) loadDocuments(selectedKb.id)
     else setDocuments([])
+    // 切换知识库时清空批量选择，避免跨库残留
+    setSelectedIds(new Set())
   }, [selectedKb, loadDocuments])
 
   const handleTabChange = (newTab: 'shared' | 'personal') => {
@@ -114,6 +120,7 @@ export default function KnowledgeBasePage() {
     setKbList([])
     setSelectedKb(null)
     setDocuments([])
+    setSelectedIds(new Set())
   }
 
   const handleCreate = async () => {
@@ -129,32 +136,75 @@ export default function KnowledgeBasePage() {
   }
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !selectedKb) return
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0 || !selectedKb) return
     setError('')
-    setUploadProgress(0)
-    try {
-      await knowledgeApi.uploadDocument(selectedKb.id, file, (pct) => setUploadProgress(pct))
-      setUploadProgress(null)
-      await loadDocuments(selectedKb.id)
-      await loadKbList(tab) // 同步知识库文档数
-    } catch (err: unknown) {
-      setUploadProgress(null)
-      setError(err instanceof Error ? err.message : '上传失败')
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = ''
+    const total = files.length
+    const failedNames: string[] = []
+    // 逐个上传：单个失败不阻断其余文件，最后统一提示与刷新
+    for (let i = 0; i < total; i++) {
+      setUploadBatch({ current: i + 1, total })
+      setUploadProgress(0)
+      try {
+        await knowledgeApi.uploadDocument(selectedKb.id, files[i], (pct) => setUploadProgress(pct))
+      } catch (err: unknown) {
+        failedNames.push(files[i].name)
+        // 记录但继续；错误详情见汇总提示
+        void err
+      }
     }
+    setUploadProgress(null)
+    setUploadBatch(null)
+    if (failedNames.length > 0) {
+      setError(`${failedNames.length} 个文件上传失败：${failedNames.join('、')}`)
+    }
+    await loadDocuments(selectedKb.id)
+    await loadKbList(tab) // 同步知识库文档数
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleDelete = async (docId: string) => {
     if (!confirm('确认删除该文档？')) return
     try {
       await knowledgeApi.deleteDocument(docId)
+      setSelectedIds((prev) => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
       if (selectedKb) await loadDocuments(selectedKb.id)
       await loadKbList(tab) // 同步知识库文档数
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '删除失败')
     }
+  }
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return
+    if (!confirm(`确认删除选中的 ${selectedIds.size} 个文档？`)) return
+    try {
+      await knowledgeApi.batchDeleteDocuments(Array.from(selectedIds))
+      setSelectedIds(new Set())
+      if (selectedKb) await loadDocuments(selectedKb.id)
+      await loadKbList(tab) // 同步知识库文档数
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '批量删除失败')
+    }
+  }
+
+  const toggleSelect = (docId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(docId)) next.delete(docId)
+      else next.add(docId)
+      return next
+    })
+  }
+
+  const allSelected = documents.length > 0 && documents.every((d) => selectedIds.has(d.id))
+
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(documents.map((d) => d.id)))
   }
 
   const handleCancel = async (docId: string) => {
@@ -226,7 +276,7 @@ export default function KnowledgeBasePage() {
             </button>
           </div>
         )}
-        <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} accept=".pdf,.docx,.md,.txt" />
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} accept=".pdf,.docx,.md,.txt" />
       </div>
 
       <div className="flex-1 overflow-auto p-6">
@@ -319,7 +369,9 @@ export default function KnowledgeBasePage() {
             {uploadProgress !== null && (
               <div className="mb-6 rounded-xl border border-brand-200 bg-brand-50/40 px-4 py-3">
                 <div className="flex items-center justify-between text-sm mb-2">
-                  <span className="text-brand-700 font-medium">正在上传文档…</span>
+                  <span className="text-brand-700 font-medium">
+                    正在上传文档…{uploadBatch && uploadBatch.total > 1 ? `（${uploadBatch.current}/${uploadBatch.total}）` : ''}
+                  </span>
                   <span className="text-brand-600 font-semibold">{uploadProgress}%</span>
                 </div>
                 <div className="h-2 w-full rounded-full bg-brand-100 overflow-hidden">
@@ -331,11 +383,44 @@ export default function KnowledgeBasePage() {
               </div>
             )}
 
+            {/* 批量操作工具条（仅可写角色、有选中时显示） */}
+            {canWrite && selectedIds.size > 0 && (
+              <div className="mb-3 flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50/40 px-4 py-2.5">
+                <span className="text-sm text-brand-700 font-medium">已选中 {selectedIds.size} 个文档</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedIds(new Set())}
+                    className="px-3 py-1.5 rounded-lg text-slate-500 text-xs font-semibold hover:bg-slate-100 transition"
+                  >
+                    取消选择
+                  </button>
+                  <button
+                    onClick={handleBatchDelete}
+                    className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-semibold hover:bg-red-600 transition"
+                  >
+                    批量删除
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* 文档表格 */}
             <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden">
               <table className="w-full">
                 <thead className="bg-emerald-50/50 border-b border-emerald-100">
                   <tr>
+                    {canWrite && (
+                      <th className="px-4 py-3 w-10">
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={toggleSelectAll}
+                          disabled={documents.length === 0}
+                          className="w-4 h-4 rounded border-emerald-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                          aria-label="全选"
+                        />
+                      </th>
+                    )}
                     {['文件名', '类型', '大小', '分块', '状态', '上传时间', '操作'].map((h) => (
                       <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
                     ))}
@@ -344,7 +429,7 @@ export default function KnowledgeBasePage() {
                 <tbody className="divide-y divide-emerald-50">
                   {documents.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-4 py-12">
+                      <td colSpan={canWrite ? 8 : 7} className="px-4 py-12">
                         <div className="flex flex-col items-center justify-center text-center">
                           <div className="w-14 h-14 rounded-2xl bg-emerald-50 flex items-center justify-center mb-3">
                             <svg className="w-7 h-7 text-brand-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -362,6 +447,17 @@ export default function KnowledgeBasePage() {
                     const iconCls = FILE_ICONS[doc.fileType] || 'text-slate-500'
                     return (
                       <tr key={doc.id} className="hover:bg-emerald-50/40 transition">
+                        {canWrite && (
+                          <td className="px-4 py-3.5">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(doc.id)}
+                              onChange={() => toggleSelect(doc.id)}
+                              className="w-4 h-4 rounded border-emerald-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+                              aria-label={`选择 ${doc.filename}`}
+                            />
+                          </td>
+                        )}
                         <td className="px-4 py-3.5 text-sm text-slate-800">
                           <div className="flex items-center gap-2">
                             <svg className={`w-4 h-4 ${iconCls}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">

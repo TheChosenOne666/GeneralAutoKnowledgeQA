@@ -246,6 +246,79 @@ class DocumentServiceImplTest {
         assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
     }
 
+    // ==================== 批量删除文档 ====================
+
+    @Test
+    void deleteDocuments_allSuccess_onceCacheInvalidate() {
+        Document d1 = buildDoc(1L, "a.pdf", "pdf", "ready");
+        Document d2 = buildDoc(2L, "b.pdf", "pdf", "ready");
+        when(documentMapper.selectById(1L)).thenReturn(d1);
+        when(documentMapper.selectById(2L)).thenReturn(d2);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+        when(documentMapper.deleteById(1L)).thenReturn(1);
+        when(documentMapper.deleteById(2L)).thenReturn(1);
+
+        int deleted = documentService.deleteDocuments(List.of(1L, 2L), 10L,
+                user(100L, UserConstant.DEFAULT_ROLE));
+        assertEquals(2, deleted);
+        verify(aiServiceClient).deleteDocument(1L);
+        verify(aiServiceClient).deleteDocument(2L);
+        // 批量删除只清一次 L1 缓存
+        verify(aiServiceClient, org.mockito.Mockito.times(1)).invalidateCache(10L);
+    }
+
+    @Test
+    void deleteDocuments_dedup() {
+        Document d1 = buildDoc(1L, "a.pdf", "pdf", "ready");
+        when(documentMapper.selectById(1L)).thenReturn(d1);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+        when(documentMapper.deleteById(1L)).thenReturn(1);
+
+        int deleted = documentService.deleteDocuments(List.of(1L, 1L), 10L,
+                user(100L, UserConstant.DEFAULT_ROLE));
+        assertEquals(1, deleted);
+        verify(documentMapper, org.mockito.Mockito.times(1)).deleteById(1L);
+    }
+
+    @Test
+    void deleteDocuments_failFast_notFound_deletesNothing() {
+        Document d1 = buildDoc(1L, "a.pdf", "pdf", "ready");
+        when(documentMapper.selectById(1L)).thenReturn(d1);
+        when(documentMapper.selectById(2L)).thenReturn(null);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.deleteDocuments(List.of(1L, 2L), 10L,
+                        user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.NOT_FOUND_ERROR.getCode(), ex.getCode());
+        // fail-fast：校验阶段抛异常，不删除任何文档、不清缓存
+        verify(documentMapper, never()).deleteById(any());
+        verify(aiServiceClient, never()).invalidateCache(any());
+    }
+
+    @Test
+    void deleteDocuments_failFast_noAuth_deletesNothing() {
+        Document d1 = buildDoc(1L, "a.pdf", "pdf", "ready");
+        // 第一个文档即无写权限（kb owner=999 ≠ 当前用户 100），fail-fast 立即抛异常，
+        // 后续文档不会进入校验，因此无需 stub selectById(2L)。
+        when(documentMapper.selectById(1L)).thenReturn(d1);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 999L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.deleteDocuments(List.of(1L, 2L), 10L,
+                        user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
+        verify(documentMapper, never()).deleteById(any());
+    }
+
+    @Test
+    void deleteDocuments_emptyList() {
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.deleteDocuments(List.of(), 10L,
+                        user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.PARAMS_ERROR.getCode(), ex.getCode());
+    }
+
     // ==================== VO 转换 ====================
 
     @Test

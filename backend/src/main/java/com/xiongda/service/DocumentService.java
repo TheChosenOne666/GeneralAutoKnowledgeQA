@@ -32,6 +32,20 @@ public interface DocumentService extends IService<Document> {
     boolean deleteDocument(Long docId, Long tenantId, User user);
 
     /**
+     * 批量删除文档（按知识库 scope + owner 鉴权，同单删逻辑）。
+     *
+     * <p>fail-fast：先校验全部文档（存在 / 租户隔离 / 写权限），任一不通过即抛异常、不删除任何文档，
+     * 避免部分删除的中间态。全部校验通过后逐个删向量 + 逻辑删除，最后只清一次该租户 L1 检索缓存、
+     * 同步涉及知识库的文档数（较单删循环 N 次清缓存更高效）。</p>
+     *
+     * @param docIds   要删除的文档 ID 列表（去重、非空）
+     * @param tenantId 租户 ID（用于隔离校验）
+     * @param user     当前登录用户（用于知识库写权限校验）
+     * @return 实际删除成功的文档数量
+     */
+    int deleteDocuments(List<Long> docIds, Long tenantId, User user);
+
+    /**
      * 取消文档处理（软取消，保留文档记录）。
      *
      * <p>仅非终态（processing/parsing/retrieving/optimizing）可取消；取消后将文档标记为

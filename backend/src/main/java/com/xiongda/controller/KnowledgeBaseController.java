@@ -6,6 +6,7 @@ import com.xiongda.common.ErrorCode;
 import com.xiongda.common.ResultUtils;
 import com.xiongda.exception.BusinessException;
 import com.xiongda.exception.ThrowUtils;
+import com.xiongda.model.dto.knowledge.DocumentBatchDeleteRequest;
 import com.xiongda.model.dto.knowledge.KnowledgeBaseAddRequest;
 import com.xiongda.model.entity.Document;
 import com.xiongda.model.entity.User;
@@ -130,6 +131,18 @@ public class KnowledgeBaseController {
         User loginUser = userService.getLoginUser(request);
         boolean result = documentService.deleteDocument(deleteRequest.getId(), loginUser.getTenantId(), loginUser);
         return ResultUtils.success(result);
+    }
+
+    /**
+     * 批量删除文档。
+     */
+    @PostMapping("/document/batch-delete")
+    public BaseResponse<Integer> batchDeleteDocuments(
+            @RequestBody DocumentBatchDeleteRequest batchDeleteRequest, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        int deleted = documentService.deleteDocuments(
+                batchDeleteRequest.getIds(), loginUser.getTenantId(), loginUser);
+        return ResultUtils.success(deleted);
     }
 
     /**

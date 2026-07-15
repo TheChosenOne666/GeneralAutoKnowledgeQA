@@ -24,8 +24,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -111,6 +113,48 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         boolean removed = this.removeById(docId);
         // 知识库文档数同步
         syncKbDocCount(doc.getKbId(), tenantId);
+        return removed;
+    }
+
+    @Override
+    @AuditLog(action = "doc_batch_delete", resourceType = "document")
+    public int deleteDocuments(List<Long> docIds, Long tenantId, User user) {
+        ThrowUtils.throwIf(docIds == null || docIds.isEmpty(), ErrorCode.PARAMS_ERROR, "文档 ID 列表为空");
+        // 去重，保持稳定顺序
+        List<Long> ids = docIds.stream().distinct().toList();
+
+        // 第一遍：全部校验（存在 / 租户隔离 / 写权限），任一失败即抛异常、不删除任何文档
+        List<Document> docs = new ArrayList<>(ids.size());
+        for (Long docId : ids) {
+            Document doc = this.getById(docId);
+            ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在: " + docId);
+            ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR);
+            KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
+            KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
+            docs.add(doc);
+        }
+
+        // 第二遍：逐个清理 Python 侧向量并逻辑删除；收集涉及的知识库以便统一同步文档数
+        Set<Long> affectedKbIds = new HashSet<>();
+        int removed = 0;
+        for (Document doc : docs) {
+            try {
+                aiServiceClient.deleteDocument(doc.getId());
+            } catch (Exception e) {
+                log.warn("清理文档向量/增强任务失败 docId={} : {}", doc.getId(), e.getMessage());
+            }
+            if (this.removeById(doc.getId())) {
+                removed++;
+                affectedKbIds.add(doc.getKbId());
+            }
+        }
+
+        // 文档删除改变检索结果，批量删除只需清一次该租户 L1 检索缓存
+        aiServiceClient.invalidateCache(tenantId);
+        // 同步涉及知识库的文档数
+        for (Long kbId : affectedKbIds) {
+            syncKbDocCount(kbId, tenantId);
+        }
         return removed;
     }
 
