@@ -301,7 +301,7 @@ LLM 生成回答（SSE 流式输出）
 > - 开关：`core/config.py` 的 `enable_query_rewrite` / `enable_query_expansion`（默认开），可独立关闭。`retrieve` 的 L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）；rewrite / expansion 失败均不阻断主流程（配置错误除外）。
 > - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
 
-> **LLM 重排（2026-07-16，对齐 WeKnora Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。WeKnora 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 0.30）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
+> **LLM 重排（2026-07-16，对齐 WeKnora Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。WeKnora 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 **0.40**，2026-07-16 由 0.30 上调，更激进剔除跨主题噪音，保留跨库召回）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
 
 > **重排候选池（2026-07-16 方案A）**：开启重排时，向量/BM25 融合不再直接取 `top_n`（默认 5）送重排，而是先取更大融合池 `retrieval_rerank_top_k`（默认 10），由 LLM 在整个池内精排后取 `top_n`。解决「模糊问句真正相关块未进前 `top_n`、LLM 只在这 `top_n` 内打分致全 0 漏召回」的回归；相关块落在第 6~10 位时能被救回，且不带回跨领域噪声（最终仍按阈值过滤取 `top_n`）。关闭重排（`method=none`）时该池不起作用，直接截断 `top_n`。L1 缓存 key 已纳入 `rerank_top_k` 与 `top_n`，切换后旧缓存自动失效。
 
@@ -380,6 +380,9 @@ Content-Type: application/json
 > 返回 `Flux<String>` 流，Java **解析 Python 每个 SSE 事件并重新包装为标准 SSE 帧**（`event: token` / `data: {json}`）回传前端，保留 `thinking`/`sources`/`token`/`done` 事件类型，前端按事件名分发。
 >
 > **注意（已踩坑）**：`produces` 必须为 `MediaType.TEXT_PLAIN_VALUE`。若误用 `TEXT_EVENT_STREAM_VALUE`，Spring MVC 会对 `Flux<String>` 的每个元素自动加 `data: ` 前缀二次包装，破坏手写 `event:` 行（实测出现 `data:event: thinking` / `data:data: {...}` 双包格式，前端无法解析）。前端用 `fetch` + `reader` 手动按行解析，Content-Type 不影响解析。
+>
+> **修复（2026-07-16，根治）：AI 回复中文乱码 `�`**。初判为 httpx 未设 `response.encoding` 猜测编码，但加 `response.encoding="utf-8"` 重启后仍复现（日志确认乱码问答恰在已含该修复的重启之后）。真正根因：`aiter_lines` 在 LLM 流分块边界把多字节中文字符截断，半截字节被 UTF-8 解码成 U+FFFD。故改用 `aiter_bytes()` 累积原始字节、按 `\n` 切行后整行 `decode("utf-8")`（字符不跨行截断，彻底避免 U+FFFD）；`_iter_tokens` / `_iter_tokens_with_tools` 均改写。文档入库（`_clean_text` 删 U+FFFD）、Java（`ChatController.decode` 用 `StandardCharsets.UTF_8`，WebFlux `StringEncoder` 默认 UTF-8）、前端（`TextDecoder({stream:true})`）均经核查正确。
+> **同类修复（2026-07-16）：引用来源中文乱码**。用户复测发现引用来源片段仍有 `�`，但回复正文正确、且 `embeddings` 表全表无 U+FFFD，说明源在 Java 消费 SSE 流这一环：`ChatController.chatStream` 原本对每个 `DataBuffer` 单独 `StandardCharsets.UTF_8.decode(bb)`，HTTP chunk 边界切在多字节中文（如「第」U+7B2C）中间时把半截字节替换成 U+FFFD；token 事件小（单 buffer 完整）故正文无碍，source 大 JSON 跨多 buffer 故偶发。修复：改用流式 `CharsetDecoder` 三参数 `decode(bb, out, false)`（endOfInput=false，跨 buffer 不完整字符缓存待补齐），流末 `decode(empty)`（endOfInput=true）flush；单参数 `decode(ByteBuffer)` 内部 endOfInput=true 会直接 REPLACE 成 U+FFFD，绝不可用。回归测试见 `ChatControllerTest.chatStream_multibyteCharSplitAcrossBuffers_preserved`。
 
 ### 6.2 SSE 响应格式
 
@@ -543,8 +546,9 @@ multi-rag-employee/
         │
 ② 知识库与文档
    创建知识库 POST /api/knowledge/add（scope: shared / personal）
-   上传文档  POST /api/knowledge/document/upload（MultipartFile）
+   上传文档  POST /api/knowledge/document/upload（MultipartFile；批量上传由前端 <input multiple> 循环调用此接口）
         → Document 状态机：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（对齐 WeKnora finalizing，前端轮询列表状态）
+   批量删除 POST /api/knowledge/document/batch-delete（body: { ids: [] }；fail-fast 全量鉴权后逐个删向量+逻辑删除，只清一次 L1 缓存，返回实际删除数量）
         │
 ③ 问答
    进入对话页 → 输入问题 → POST /api/chat/message/stream（SSE 流式）
@@ -606,6 +610,8 @@ Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCou
 ```
 
 > 文档删除（POST /api/knowledge/document/delete，逻辑删除）同样触发 `invalidateCache`，保证下次提问回源重新检索。
+
+> **文档批量删除（2026-07-16）**：`POST /api/knowledge/document/batch-delete`（body `{ ids: [] }`）→ `DocumentService.deleteDocuments` 先对全部文档 fail-fast 校验（存在 / 租户隔离 / 知识库写权限），任一不通过即抛异常、不删除任何文档；全部通过后逐个调 Python 清向量 + 逻辑删除，最后**只清一次**该租户 `retrieval:{tenant}:*` L1 缓存并统一同步涉及知识库的文档数（较单删循环 N 次清缓存更高效），返回实际删除数量。批量上传复用单文件上传接口，由前端循环调用，后端零改动。详见 `docs/task-breakdown.md` 对应小节。
 
 > **文档取消（软取消，2026-07-15）**：用户可在处理中任意阶段（processing/parsing/retrieving/optimizing）点「取消」停止。`POST /api/knowledge/document/cancel` → Java 标 `cancelled`（终态，终态守卫阻止中间态回退）→ `POST /ai/document/{doc_id}/cancel` 清向量 + `mark_cancelled`；Python `process()` 在嵌入前 / 入库后两处检查 `is_cancelled`，命中即清向量 + 回调 `cancelled`。竞态：若取消发生在 Python 跑完返回 ready/optimizing 之后，因 DB 已 cancelled，触发分支主动清向量，避免残留可检索但已取消的文档。详见 `docs/task-breakdown.md` 对应小节。
 
@@ -706,6 +712,13 @@ data: {"conversation_id": "1234567890", "sources": [...]}
    ├─ activeId 初始化读 localStorage['xiongda_active_conversation'] → 刷新后恢复上次会话并加载历史
    ├─ setActiveId 同步写入/清除该 key
    └─ refresh() 列表加载后清理已被删除的 activeId
+
+消息状态提升（跨路由切换保留，2026-07-16 修复「切走对话页消息丢失」）
+   ├─ messages 不再存于 ChatPage 本地 useState，改为 ChatContext 按会话缓存 messagesByConv[convId]
+   ├─ 新会话流式 done 注册前用占位键 PENDING_KEY='__pending__' 暂存进行中消息，done 后迁移到真实 convId 并标记已加载
+   ├─ loadedConvIds 记录已从后端加载过历史的会话；路由重挂时若已加载则跳过后端重载，避免覆盖进行中的流式回复
+   ├─ streaming 提升为 ChatContext.isStreaming（全局单一），由 sendMessage 的 finally 在流真正结束/中止时统一置否；切走后流在后台继续写入缓存、切回仍可见且输入框保持禁用（2026-07-16 修复：曾因重挂 effect 误置 false 导致切回瞬间空白，已移除该误置并对 PENDING/已加载分支置 followRef+atBottomRef 跳到底部跟随 token）
+   └─ 新建对话 setActiveId(null) 仅清空 PENDING 进行中消息，区别于路由切走（后者不触发、保留消息）
 
 历史加载（L3）
    listMessages(conversationId)

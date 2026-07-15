@@ -909,6 +909,7 @@ Python（AI 服务）
 - ~~工具栏（智能推理下拉、模型选择、附件按钮）~~ ✅
 - ~~输入框自动增高~~ ✅
 - ~~对话气泡（用户右对齐 / AI 左对齐卡片）~~ ✅
+- **AI 思考动画（2026-07-16 补充）**：流式等待首字期间，AI 气泡显示「思考中．」→「思考中．．」→「思考中．．．」三点循环（400ms 切换，省略号容器 `w-[1.2em] inline-block` 固定宽度防气泡跳动）；替代原静态「思考中...」。实现：`frontend/src/pages/ChatPage.tsx` 新增 `ThinkingDots` 组件（`setInterval` 循环 1→2→3 点），在 `assistant` 末条消息且无 `agentSteps` 时渲染。
 - **依赖**: M2-6
 - **产出**: 问答页与 UI 设计稿一致
 
@@ -1002,6 +1003,61 @@ Python（AI 服务）
 - **依赖**：M4-8.1（队列 + cancelled set + 终态守卫基础）。
 - **产出**：用户可在处理中任意阶段点「取消」停止；文档变「已取消」并清理向量；提前落地 M5-3 的取消守卫（M5-3 余下「完整 4 处检查点 + 适配主流程队列化」仍按计划实现）。
 - **关联**：M5-3（多检查点取消守卫）已先行部分实现，剩余工作见 M5 阶段。
+
+---
+
+### 文档批量上传与批量删除 [全栈] P1 · 0.5d ✅ 完成（2026-07-16）
+
+- **背景**：知识库文档管理原仅支持单文件上传、单文档删除，批量维护效率低。本次新增批量上传与批量删除。
+- **需求**：
+  - 批量上传：一次选择多个文件依次上传，逐个显示进度（第 N/共 M 个），单个失败不阻断其余、最后汇总失败文件名。
+  - 批量删除：文档列表加复选框（表头全选 + 每行勾选），选中后弹出工具条一键删除多个文档。
+- **方案（简洁优先）**：
+  - **批量上传**：复用现有单文件上传接口，前端 `<input multiple>` + 循环调用（后端零改动，天然复用配额校验与异步处理；multipart 批量反而更复杂）。
+  - **批量删除**：后端新增批量端点 `POST /api/knowledge/document/batch-delete`，一次请求处理 N 个 id。**fail-fast**：先全量校验（存在 / 租户隔离 / 知识库写权限），任一不通过即抛异常、不删除任何文档（避免部分删除中间态）；全部通过后逐个删向量 + 逻辑删除，最后**只清一次**该租户 L1 检索缓存、统一同步涉及知识库的文档数（较单删循环 N 次清缓存更高效）。
+- **改造**：
+  - **后端**：`DocumentService.deleteDocuments(List<Long> docIds, tenantId, user)` 接口 + `DocumentServiceImpl` 实现（`@AuditLog(action="doc_batch_delete")`，去重、fail-fast 两遍校验）；新增 `DocumentBatchDeleteRequest` DTO；`KnowledgeBaseController` 新增 `POST /document/batch-delete` 端点返回实际删除数量。
+  - **前端**：`knowledgeApi.batchDeleteDocuments(ids)`；`KnowledgeBasePage` 新增 `selectedIds` 选择集合 + `uploadBatch` 批次进度；`handleUpload` 改多文件循环上传；新增 `handleBatchDelete` / `toggleSelect` / `toggleSelectAll`；`<input multiple>`；表格加复选框列（表头全选 + 行勾选）与批量删除工具条；切换知识库 / Tab 自动清空选择。
+- **改动文件**：`DocumentService.java`(接口)、`DocumentServiceImpl.java`、`DocumentBatchDeleteRequest.java`(新增)、`KnowledgeBaseController.java`、`api/knowledge.ts`、`KnowledgeBasePage.tsx`；单测 `DocumentServiceImplTest.java`。
+- **单测**：Java `DocumentServiceImplTest` 新增 5 例（全部成功只清一次缓存 / 去重 / fail-fast 文档不存在不删除 / fail-fast 无权限不删除 / 空列表参数校验），共 29 例全过。
+- **依赖**：M4-2（知识库权限 `KbPermission`）、M2-7（L1 缓存失效）。
+
+---
+
+### 修复：对话页路由切换后消息丢失（含进行中流式回复） [前端] P1 · 0.5d ✅ 完成（2026-07-16）
+
+- **现象**：在对话页发送一条消息后（AI 正在流式回复），切到知识库等其他页面再切回，消息与记录全部消失，需刷新浏览器才出现，且刷新后 AI 回复不会补回、只剩用户发的一条消息。
+- **根因**：`messages`、`streaming`、`conversationId` 均为 `ChatPage` 本地 `useState`。React Router 切换路由会卸载 `ChatPage` 组件，本地状态全部丢失；切回时 `useEffect[activeId]` 从后端 `listMessages` 重载，但新会话的 `activeId` 要等流式 `done` 事件才注册（重载时 `activeId` 仍为空 → 直接 `setMessages([])` 清空），且后端流式回复尚未落库，重载竞态导致空白；`conversationId` 本地丢失还会使再次发送误开新会话。
+- **方案（简洁优先·状态提升）**：把会话消息与流式状态提升到 `ChatContext`，**按会话 id 缓存**（跨路由卸载保留于内存），切走切回直接复用缓存而非后端重载：
+  - 新增 `messagesByConv: Record<convId, ChatMessage[]>` 与 `PENDING_KEY='__pending__'` 占位（新会话流式 `done` 注册前，进行中消息暂存 PENDING，注册后迁移到真实 id 并标记已加载）。
+  - 引入 `loadedConvIds` 集合：会话首次从后端成功加载历史后标记；后续路由重挂时若该会话已加载则**跳过重新加载**，避免覆盖进行中的流式回复（取代原 `skipReloadRef` 竞态处理）。
+  - `streaming` 提升为 `ChatContext.isStreaming`（全局单一），切走后流在后台继续写入缓存，切回仍能看到回复且输入框保持禁用。
+  - `activeId` 初始化时从 `localStorage` 恢复（刷新浏览器后自动回到上次对话窗口），会话列表 `refresh` 时若会话已删则清除。
+- **改造**：`context/ChatContext.tsx`（状态提升 + PENDING 迁移 + loaded 标记 + localStorage 恢复；`ChatMessage`/`AgentStep` 类型移至 `types/index.ts` 共享）；`pages/ChatPage.tsx`（去掉本地 `messages`/`streaming`/`conversationId`，改用 `useChat()` 的 `messages`/`setMessages`/`isStreaming`/`setStreaming`/`markLoaded`/`isLoaded`，发送时捕获 `convAtSend` 取代本地 `conversationId`）；`types/index.ts` 新增 `ChatMessage`/`AgentStep`。
+- **验证**：`npx tsc --noEmit` 通过、无 lint 错误；前端 dev server 热更新后手动验证——发送消息（AI 回复中）立即点知识库再点回对话，消息与流式回复保留；刷新浏览器从 localStorage 恢复当前会话并加载历史。
+- **边界说明**：浏览器「刷新」会中断进行中的流式请求，若 AI 回复尚未完成则后端未落库、刷新后该条助手回复不补回（属刷新中断的本质行为，非本次 bug）；切换页面（不刷新）已彻底修复。
+- **二次优化（2026-07-16，同 issue）**：状态提升后「消息不丢」已修复，但切回时助手气泡仍会短暂空白、需等一会才出字。根因：`ChatPage` 路由切走再切回会重挂，重挂瞬间 `useEffect[activeId]` 执行 `setStreaming(false)` 把全局流式标记强行置否（丢失"思考中"指示与输入框禁用态），且重挂使 `followRef`/`atBottomRef` 重置为 `false`，后续流式 token 不自动滚动。而 `abortRef` 是组件本地 `useRef`，重挂后为 `null`，`abort()` 实际为 no-op（后台流仍在写缓存）。修复：移除 effect 里的 `setStreaming(false)`（全局 `isStreaming` 仍由 `sendMessage` 的 `finally` 在流真正结束/中止时统一置否），并在 `activeId` 为空（PENDING 新会话）与已加载分支里把 `followRef`/`atBottomRef` 置真并 `scrollToBottom('auto')`，使切回即跳到底部、跟随后续 token；`abort()` 仅对已挂载时的 activeId 变化（点侧栏切会话）生效，避免跨会话串流。`npx tsc --noEmit` 通过、无 lint 错误。
+
+### 修复：AI 回复中文乱码（U+FFFD 替换符） [后端·AI服务] P1 · 0.3d ✅ 完成（2026-07-16）
+- **现象**：问答回复中出现 `�` 乱码（如「抓包��具」「（自动化必备） ���完成」），且并非来自已入库文档。
+- **排查**：直接查向量库 `embeddings.content`，测试文档块为干净中文、无 `�`，说明乱码不在文档解析/存储环节（`document_processor._clean_text` 本就会删除 U+FFFD 占位符）。回复正文里的「抓包工具」「（自动化必备）…完成」本就是 LLM 自行生成、未出现在检索上下文中，故乱码只能在「LLM 流式响应 → Python 解码」这一环引入。
+- **根因（修订，2026-07-16 二次定位）**：初判为「httpx 猜测编码」（`aiter_lines` 未设 `response.encoding`），但加上 `response.encoding = "utf-8"` 重启后（日志确认 01:35 那次带乱码问答恰发生在已含该修复的重启之后）乱码仍在，说明猜测编码不是主因。真正根因是 **`aiter_lines` 在 LLM 流的分块（TCP/HTTP chunk）边界把多字节中文字符截成两半**，半截字节被 UTF-8 解码器当成非法序列替换成 U+FFFD；字符跨 chunk 截断后即便设了 encoding 也会产生乱码。前端（`TextDecoder({stream:true})` 已按多字节增量缓存）、Java（`ChatController.decode` 用 `StandardCharsets.UTF_8`、WebFlux `StringEncoder` 默认 UTF-8）均经核查正确，故乱码仅源自 Python 这层。
+- **修复（根治）**：放弃 `aiter_lines` 自动解码，改为 `response.aiter_bytes()` **累积原始字节**到 `buf`，按 `\n` 切行后**整行 `decode("utf-8")`**（行以 `\n` 分隔，字符不会跨行截断，故整行解码永远不会遇到半截字节 → 不再产生 U+FFFD）。`_iter_tokens` 与 `_iter_tokens_with_tools` 两处均改写；`[DONE]` 在 function-calling 路径用 `done` 标志跳出以保持流末工具调用汇总语义。另加一条**仅在复现 U+FFFD 时**的 `logger.warning("[乱码诊断] ...")` 便于复测确认（确认稳定后可删）。`py_compile` 通过；`pytest tests/test_llm.py` 3/3 通过（aiter_bytes 改写未被破坏）；全量 117 通过（3 个 `Event loop is closed` 环境失败与改动无关）。已重启 AI 服务（8001）使修复生效，`/health` 返回 200。
+- **边界说明**：Java 侧 `ChatController.decode` 用 `StandardCharsets.UTF_8`、Python→Java SSE 由 FastAPI `StreamingResponse` 默认 UTF-8、前端 `TextDecoder({stream:true})` 均正确，故本次仅修 Python LLM 流解码这一环即可根治。若复测后 `ai_8001_err.log` 仍出现「[乱码诊断]」告警，则乱码源在更下游（Java/前端），需另查。
+
+### 修复：引用来源中文乱码（Java SSE 消费分块截断） [后端] P1 · 0.3d ✅ 完成（2026-07-16）
+- **现象**：AI 回复正文正确（如「第一时间修改」），但**引用来源**卡片的文档原文片段出现 `�`/`���`（如「新人需`�`一时间修改」）。正文由 LLM 理解生成、能纠错；source 是直接从库读出的原始 chunk 文本，损坏即原样展示。
+- **排查**：直接查 `embeddings` 表 `SELECT ... WHERE content LIKE '%'||chr(65533)||'%'`，**全表 440 行无任何 U+FFFD**；Python `routers/chat.py` 的 `_sse` 用 `json.dumps(ensure_ascii=False)` 由 Starlette 以 UTF-8 发出，出口字节正确。故乱码既不在文档入库，也不在 Python 出口，而发生在 **Java 消费 AI 的 SSE 流** 这一环。
+- **根因**：`ChatController.chatStream` 此前对每个 `DataBuffer` 单独 `StandardCharsets.UTF_8.decode(bb)`（`decode` 静态方法），当 HTTP chunk 边界恰好切在多字节中文字符（如「第」U+7B2C 的三字节）中间时，逐 buffer 解码把半截字节替换成 U+FFFD。token 事件都很小、通常单 buffer 完整故正文无碍；source 这个大 JSON 常跨多个 buffer，故引用来源偶发乱码。与之前 Python LLM 流乱码是同一类「分块边界截断多字节字符」问题，只是作用在 source 字段而非 token 流。
+- **修复（根治）**：改为**流式 `CharsetDecoder`**——每条问答流创建 `StandardCharsets.UTF_8.newDecoder().onMalformedInput(REPLACE).onUnmappableCharacter(REPLACE)`，在 `map` 中用三参数 `decode(bb, out, false)`（endOfInput=false）解码：跨 `DataBuffer` 边界的不完整多字节字符被缓存在解码器内，待后续字节补齐后再输出，从根上消除边界截断。流结束（`doOnTerminate`）用 `decode(ByteBuffer.allocate(0))`（endOfInput=true）flush 残留尾部。注意**单参数 `decode(ByteBuffer)` 内部是 endOfInput=true，会把边界处不完整字节直接 REPLACE 成 U+FFFD，绝不能用**——必须用三参数流式重载。删除了被取代的 `decode(DataBuffer)` 静态方法。
+- **测试**：`ChatControllerTest` 新增回归用例 `chatStream_multibyteCharSplitAcrossBuffers_preserved`——把含「第一时间」的 SSE 字节在「第」首字节之后切分喂入两个 `DataBuffer`，断言聚合后的回答/来源不含 U+FFFD。后端全量单测 `mvn clean test` 通过（无回归）；已重启后端（8080，`/health` 监听）使修复生效。
+- **边界说明**：前端 `TextDecoder({stream:true})`、Python→Java SSE（FastAPI UTF-8）均正确，本次仅修 Java SSE 消费这一环即根治引用来源乱码。若复测仍有，则需查前端渲染层。
+
+### 说明：问答召回「别的文档」（RAG 固有行为，非 bug） [后端·检索] 2026-07-16
+- **现象**：问「测试入职准备」时，除「自动化测试新员工入职指南」外，还引用了「前端开发新员工入职指南（第2页）」。
+- **原因**：RAG 取 top-N 相关块跨知识库文档。两份文档都列了「接口测试工具 Postman/Apifox/JMeter、UI测试工具 Selenium/Playwright/Appium、抓包工具」等**相同测试工具词汇**，向量与 BM25 均会召回前端文档那一段；rerank（llm，阈值 `retrieval_rerank_min_relevance`）判定该段与「测试入职准备」相关性 ≥ 阈值则保留。该段本就讲测试工具，属 borderline 相关，非错误文档。
+- **方案决策（2026-07-16，与用户确认）**：用户选择**保持现状（问答仍检索全租户所有库，不按主题拆库）** + **上调 rerank 相关性门槛到 0.40**（方案 B 落地，非拆库方案 A）。理由：存在「前端如何对接测试」这类跨主题问题，拆库会人为割裂交叉答案，故不采用 A；B 在压掉跨主题噪音的同时保留跨库召回能力。已修改 `ai-service/core/config.py:68` 默认值 `0.30 → 0.40`，重启 AI 服务（8001，`/health` 200）生效；测试无硬编码依赖该值，全量 117 通过（3 个 `Event loop is closed` 环境失败与改动无关）。注意：`retrieval_relative_ratio`（0.80）未动，仅调绝对门槛。
+- **边界说明**：阈值上调可能误删真正 borderline 相关块。若后续发现合理跨主题引用被过度剔除，可回调 0.35~0.40 区间。
 
 ---
 
