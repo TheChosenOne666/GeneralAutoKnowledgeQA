@@ -133,4 +133,48 @@ class ChatControllerTest {
         verify(chatService, org.mockito.Mockito.never()).saveAssistantMessage(any(), any(), any(), any());
         DataBufferUtils.release(db);
     }
+
+    /**
+     * 回归测试（2026-07-16）：AI 流在中文多字节字符（如「第」U+7B2C，UTF-8 三字节）中间被分块时，
+     * Java 侧不应产生 U+FFFD 替换符或字符损坏。模拟 HTTP chunk 边界恰好切在多字节字符中间的场景，
+     * 验证流式 CharsetDecoder 能缓存不完整尾部、待后续字节补齐后正确解码。
+     */
+    @Test
+    void chatStream_multibyteCharSplitAcrossBuffers_preserved() {
+        User user = new User();
+        user.setId(7L);
+        user.setTenantId(3L);
+        when(userService.getLoginUser(any())).thenReturn(user);
+        when(chatService.createConversation(3L, 7L, "测试")).thenReturn(9L);
+
+        // token 内容含「第一时间」（其中「第」为三字节 UTF-8），done 事件收尾
+        String raw = "event: token\ndata: {\"content\": \"第一时间修改初始密码\"}\n\n"
+                + "event: done\ndata: {\"conversation_id\": \"9\", \"sources\": []}\n\n";
+        byte[] bytes = raw.getBytes(StandardCharsets.UTF_8);
+        // 精确定位「第」(UTF-8: E7 AC 8C) 首字节，在其后 1 字节处切分，
+        // 使该 3 字节字符被拆到两个 DataBuffer（模拟 HTTP chunk 边界截断多字节字符）。
+        int split = -1;
+        for (int i = 0; i + 2 < bytes.length; i++) {
+            if ((bytes[i] & 0xFF) == 0xE7 && (bytes[i + 1] & 0xFF) == 0xAC && (bytes[i + 2] & 0xFF) == 0x8C) {
+                split = i;
+                break;
+            }
+        }
+        int byteSplit = split + 1;
+        DataBuffer db1 = new DefaultDataBufferFactory().wrap(java.util.Arrays.copyOfRange(bytes, 0, byteSplit));
+        DataBuffer db2 = new DefaultDataBufferFactory().wrap(java.util.Arrays.copyOfRange(bytes, byteSplit, bytes.length));
+
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Flux.just(db1, db2));
+
+        ChatRequest req = new ChatRequest();
+        req.setContent("测试");
+        req.setModel("doubao");
+
+        controller.chatStream(req, null).collectList().block();
+
+        // 修复后「第」应完整保留，answer 不含 U+FFFD；旧逻辑会因边界截断产生乱码或丢字
+        verify(chatService, timeout(3000)).saveAssistantMessage(
+                eq(9L), eq("第一时间修改初始密码"), eq("doubao"), any());
+    }
 }

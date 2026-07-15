@@ -23,6 +23,10 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -154,22 +158,46 @@ public class ChatController {
         StringBuilder answerBuilder = new StringBuilder();
         AtomicReference<String> sourcesRef = new AtomicReference<>("");
         StringBuilder frameBuf = new StringBuilder();
+        // 流式 UTF-8 解码器：跨 DataBuffer 边界的不完整多字节字符会被缓存，
+        // 待后续字节补齐后再正确解码，避免分块边界截断中文产生 U+FFFD 替换符。
+        // onMalformedInput/onUnmappableCharacter 设为 REPLACE 仅作兜底（真正非法字节才替换），
+        // 正常跨 buffer 的不完整序列在 endOfInput=false 下会被缓存而非判为非法。
+        CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
 
         return upstream
-                .doOnNext(db -> rawBuf.append(decode(db)))
                 .map(db -> {
-                    String s = decode(db);
+                    ByteBuffer bb = db.toByteBuffer();
+                    // 三参数 decode(endOfInput=false) 才是流式：跨 DataBuffer 边界的
+                    // 不完整多字节字符被缓存在解码器内，待后续字节补齐后再输出，
+                    // 避免分块边界截断中文产生 U+FFFD 替换符。
+                    // （单参数 decode(ByteBuffer) 内部 endOfInput=true，会把边界处
+                    //  不完整字节直接 REPLACE 成 U+FFFD，因此此处必须用三参数。）
+                    CharBuffer out = CharBuffer.allocate(bb.remaining());
+                    utf8Decoder.decode(bb, out, false);
+                    out.flip();
                     DataBufferUtils.release(db);
-                    return s;
+                    return out.toString();
                 })
                 .concatMap(chunk -> {
                     // 将 Python 原始 SSE 按事件帧（\n\n 分隔）切分，逐帧转译为标准 SSE 推给前端，
                     // 保留 event 类型（thinking/token/sources/done），未成帧的尾部留在 frameBuf 等下一片。
+                    rawBuf.append(chunk);
                     frameBuf.append(chunk);
                     List<String> frames = drainCompleteFrames(frameBuf);
                     return frames.isEmpty() ? Flux.empty() : Flux.fromIterable(frames);
                 })
                 .doOnTerminate(() -> {
+                    // flush 流式解码器尾部：流结束时若有未补全的多字节字符一并解出
+                    try {
+                        CharBuffer tail = utf8Decoder.decode(ByteBuffer.allocate(0));
+                        if (tail.length() > 0) {
+                            rawBuf.append(tail.toString());
+                        }
+                    } catch (Exception e) {
+                        log.warn("flush 解码尾部失败: {}", e.getMessage());
+                    }
                     parseSseRaw(rawBuf.toString(), answerBuilder, sourcesRef);
                     String answer = answerBuilder.toString();
                     if (answer.isEmpty()) {
@@ -186,13 +214,6 @@ public class ChatController {
                         }
                     });
                 });
-    }
-
-    /**
-     * 将 DataBuffer 的可读字节解码为字符串（不消费读指针，供透传与聚合共用）。
-     */
-    private static String decode(DataBuffer db) {
-        return StandardCharsets.UTF_8.decode(db.toByteBuffer()).toString();
     }
 
     /**
