@@ -125,6 +125,17 @@ public class KnowledgeBaseController {
     }
 
     /**
+     * 取消文档处理（软取消，保留文档记录）。
+     * 仅非终态（处理中/解析中/检索中/优化中）可取消；取消后文档置为「已取消」。
+     */
+    @PostMapping("/document/cancel")
+    public BaseResponse<Boolean> cancelDocument(@RequestBody DeleteRequest cancelRequest, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        boolean result = documentService.cancelDocument(cancelRequest.getId(), loginUser.getTenantId(), loginUser);
+        return ResultUtils.success(result);
+    }
+
+    /**
      * 获取文档提取全文（供前端「查看内容」弹窗展示）。
      */
     @GetMapping("/document/content")

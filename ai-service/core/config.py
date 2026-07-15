@@ -12,6 +12,20 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8001
 
+    # 后端 Java 服务地址（Python 在处理阶段回调更新文档状态用）
+    backend_base_url: str = "http://localhost:8080"
+
+    # 检索优化（retrieval augmentation）：基于分块生成问答对并入库增强检索
+    enable_qa_augment: bool = True
+    # 单文档最多生成的问答对数量（限制 LLM 调用成本）
+    qa_max_pairs: int = 20
+    # 问答增强并发度（对齐 WeKnora：分批并发生成而非单线程串行，降低「优化中」耗时）
+    qa_concurrency: int = 5
+    # 单个问答对的 LLM 生成超时（秒），超时则该块跳过，不阻塞整篇增强
+    qa_per_qa_timeout: float = 120.0
+    # 问答增强后台任务总超时（秒）：超时放弃剩余问答对，文档仍维持可检索并推进 ready
+    qa_background_timeout: float = 600.0
+
     # LLM
     llm_provider: str = "volcengine"
     llm_model: str = "doubao-pro"

@@ -7,6 +7,7 @@
 - MilvusVectorStore：可选集成（pymilvus）。
 """
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -163,6 +164,20 @@ class InMemoryVectorStore:
         """删除文档的所有向量。"""
         self._records = [r for r in self._records if r.metadata.get("doc_id") != doc_id]
 
+    async def get_original_chunks(self, doc_id: str) -> list[dict]:
+        """读回文档的原始块（排除 qa 增强块），供增强 worker 重建。"""
+        return [
+            {
+                "content": r.content,
+                "chunk_index": r.metadata.get("chunk_index", 0),
+                "page": r.metadata.get("page", 0),
+                "source": r.metadata.get("source", ""),
+            }
+            for r in self._records
+            if r.metadata.get("doc_id") == doc_id
+            and r.metadata.get("chunk_type") != "qa"
+        ]
+
     @staticmethod
     def _cosine(a: list[float], b: list[float]) -> float:
         if len(a) != len(b):
@@ -210,6 +225,7 @@ class PgVectorStore:
                     c["content"],
                     dim,
                     _to_halfvec(emb),
+                    json.dumps(meta, ensure_ascii=False),
                 )
             )
             new_records.append(_ChunkRecord(c["content"], emb, meta))
@@ -220,8 +236,8 @@ class PgVectorStore:
             await conn.execute("DELETE FROM embeddings WHERE doc_id = $1", doc_id)
             await conn.executemany(
                 """INSERT INTO embeddings
-                       (tenant_id, kb_id, doc_id, chunk_index, source, page, content, dimension, embedding)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::halfvec)""",
+                       (tenant_id, kb_id, doc_id, chunk_index, source, page, content, dimension, embedding, metadata)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::halfvec, $10::jsonb)""",
                 rows,
             )
 
@@ -307,6 +323,32 @@ class PgVectorStore:
             r for r in self._bm25_records if r.metadata.get("doc_id") != doc_id
         ]
         logger.info(f"[PgVectorStore] 删除向量 doc_id={doc_id}")
+
+    async def get_original_chunks(self, doc_id: str) -> list[dict]:
+        """读回文档的原始块（排除 qa 增强块），供增强 worker 重建（不依赖上传文件是否仍在）。
+
+        Returns:
+            [{"content", "chunk_index", "page", "source"}]；文档已删则返回空列表。
+        """
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT content, chunk_index, page, source
+                   FROM embeddings
+                   WHERE doc_id = $1
+                     AND (metadata IS NULL OR metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                   ORDER BY chunk_index""",
+                doc_id,
+            )
+        return [
+            {
+                "content": r["content"],
+                "chunk_index": r["chunk_index"] or 0,
+                "page": r["page"] or 0,
+                "source": r["source"] or "",
+            }
+            for r in rows
+        ]
 
     async def warmup_bm25(self) -> None:
         """从 PG 全量加载分块到内存 BM25 索引（应用启动时调用，重启不丢兜底检索）。"""
@@ -476,6 +518,10 @@ class MilvusVectorStore:
             if name.startswith("xiongda_"):
                 Collection(name).delete(f'doc_id == "{doc_id}"')
 
+    async def get_original_chunks(self, doc_id: str) -> list[dict]:
+        # Milvus 当前未启用，且元数据未落库，无法区分 qa 块；返回空（不影响 pgvector 主路径）
+        return []
+
 
 def _to_halfvec(vec: list[float] | None):
     """将 float 列表转为 halfvec 文本字面量（None 返回 None，落库为 NULL）。
@@ -514,6 +560,10 @@ async def ensure_embeddings_table(pool) -> None:
         )
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_embeddings_doc ON embeddings(doc_id)"
+        )
+        # 扩展列：存储完整 metadata（含 chunk_type），供增强 worker 区分原始块 / qa 增强块
+        await conn.execute(
+            "ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS metadata JSONB"
         )
 
 

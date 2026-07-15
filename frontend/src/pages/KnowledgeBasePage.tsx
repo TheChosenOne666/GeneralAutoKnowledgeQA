@@ -8,10 +8,12 @@ import type { Document, KnowledgeBase } from '@/types'
 
 const STATUS_CONFIG: Record<string, { text: string; cls: string; icon: string }> = {
   ready: { text: '已就绪', cls: 'bg-emerald-50 text-emerald-700', icon: 'M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z' },
-  pending: { text: '待处理', cls: 'bg-slate-100 text-slate-500', icon: '' },
+  processing: { text: '处理中', cls: 'bg-slate-100 text-slate-500', icon: 'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99' },
   parsing: { text: '解析中', cls: 'bg-amber-50 text-amber-700', icon: 'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99' },
-  embedding: { text: '向量化中', cls: 'bg-amber-50 text-amber-700', icon: 'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99' },
-  failed: { text: '解析失败', cls: 'bg-red-50 text-red-700', icon: 'M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z' },
+  retrieving: { text: '检索中', cls: 'bg-amber-50 text-amber-700', icon: 'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99' },
+  optimizing: { text: '优化中', cls: 'bg-violet-50 text-violet-700', icon: 'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99' },
+  failed: { text: '处理失败', cls: 'bg-red-50 text-red-700', icon: 'M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z' },
+  cancelled: { text: '已取消', cls: 'bg-slate-100 text-slate-400', icon: 'M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z' },
 }
 
 const FILE_ICONS: Record<string, string> = {
@@ -92,7 +94,7 @@ export default function KnowledgeBasePage() {
   useEffect(() => {
     if (!selectedKb) return
     const processing = documents.some(
-      (d) => d.status === 'pending' || d.status === 'parsing' || d.status === 'embedding'
+      (d) => d.status === 'processing' || d.status === 'parsing' || d.status === 'retrieving' || d.status === 'optimizing'
     )
     if (!processing) return
     const timer = setInterval(() => loadDocuments(selectedKb.id), 3000)
@@ -153,9 +155,18 @@ export default function KnowledgeBasePage() {
     }
   }
 
-  // 查看已就绪文档的全文内容
+  const handleCancel = async (docId: string) => {
+    try {
+      await knowledgeApi.cancelDocument(docId)
+      if (selectedKb) await loadDocuments(selectedKb.id)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '取消失败')
+    }
+  }
+
+  // 查看已就绪/优化中文档的全文内容（优化中向量已入库，已可检索）
   const handleView = async (doc: Document) => {
-    if (doc.status !== 'ready') return
+    if (doc.status !== 'ready' && doc.status !== 'optimizing') return
     setViewingDoc(doc)
     setViewContent('')
     setViewError('')
@@ -354,7 +365,7 @@ export default function KnowledgeBasePage() {
                             <svg className={`w-4 h-4 ${iconCls}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                             </svg>
-                            {doc.status === 'ready' ? (
+                            {doc.status === 'ready' || doc.status === 'optimizing' ? (
                               <button
                                 onClick={() => handleView(doc)}
                                 className="text-left text-slate-800 hover:text-brand-600 hover:underline transition"
@@ -373,17 +384,35 @@ export default function KnowledgeBasePage() {
                         <td className="px-4 py-3.5">
                           <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${st.cls}`}>
                             {st.icon && (
-                              <svg className={`w-3 h-3 ${doc.status === 'parsing' || doc.status === 'embedding' ? 'animate-spin' : ''}`} fill={doc.status === 'ready' || doc.status === 'failed' ? 'currentColor' : 'none'} stroke={doc.status === 'ready' || doc.status === 'failed' ? 'none' : 'currentColor'} strokeWidth="2" viewBox="0 0 24 24">
+                              <svg className={`w-3 h-3 ${doc.status === 'parsing' || doc.status === 'retrieving' || doc.status === 'optimizing' ? 'animate-spin' : ''}`} fill={doc.status === 'ready' || doc.status === 'failed' ? 'currentColor' : 'none'} stroke={doc.status === 'ready' || doc.status === 'failed' ? 'none' : 'currentColor'} strokeWidth="2" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" d={st.icon} />
                               </svg>
                             )}
                             {st.text}
                           </span>
+                          {doc.status === 'optimizing' && (
+                            <div className="mt-0.5 text-[10px] text-violet-400">已可检索</div>
+                          )}
                         </td>
                         <td className="px-4 py-3.5 text-sm text-slate-500">{formatTime(doc.createTime)}</td>
                         <td className="px-4 py-3.5">
                           {canWrite && (
-                            <button onClick={() => handleDelete(doc.id)} className="px-2.5 py-1 rounded-md bg-red-50 text-red-600 text-xs font-semibold hover:bg-red-100 transition">删除</button>
+                            <div className="flex items-center gap-2">
+                              {doc.status !== 'ready' && doc.status !== 'failed' && doc.status !== 'cancelled' && (
+                                <button
+                                  onClick={() => handleCancel(doc.id)}
+                                  className="px-2.5 py-1 rounded-md bg-amber-50 text-amber-600 text-xs font-semibold hover:bg-amber-100 transition"
+                                >
+                                  取消
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleDelete(doc.id)}
+                                className="px-2.5 py-1 rounded-md bg-red-50 text-red-600 text-xs font-semibold hover:bg-red-100 transition"
+                              >
+                                删除
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>

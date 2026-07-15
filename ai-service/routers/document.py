@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
+from services.augment_queue import mark_cancelled
 from services.document_processor import document_processor
 from services.model_config import ModelConfig, ModelConfigError
 from services.vector_store import vector_store_service
@@ -59,10 +60,12 @@ async def process_document(body: ProcessRequest):
             doc_id=body.doc_id,
             tenant_id=body.tenant_id,
             cfg=cfg,
+            ai_config_dict=body.ai_config,
         )
+        # process() 返回 optimizing（向量已入库可检索，增强后台进行中）；Java 据此立即可检索
         return {
             "doc_id": body.doc_id,
-            "status": "ready",
+            "status": result.get("status", "optimizing"),
             "chunk_count": result.get("chunk_count", 0),
             "content": result.get("content", ""),
         }
@@ -106,10 +109,29 @@ async def extract_pages(body: ExtractPagesRequest):
 
 @router.delete("/document/{doc_id}")
 async def delete_document(doc_id: str):
-    """删除文档时同步清理其向量（避免 PG 中残留孤立向量）。"""
+    """删除文档时同步清理其向量（避免 PG 中残留孤立向量），并取消其排队中的增强任务。"""
     try:
         await vector_store_service.delete_by_doc(doc_id)
+        # 标记增强任务取消（队列中待增强任务将被 worker 跳过，对齐 WeKnora 任务取消）
+        await mark_cancelled(doc_id)
         return {"doc_id": doc_id, "status": "deleted"}
     except Exception as e:
         logger.warning(f"删除文档向量失败 doc_id={doc_id}: {e}")
+        return {"doc_id": doc_id, "status": "failed", "error": str(e)}
+
+
+@router.post("/document/{doc_id}/cancel")
+async def cancel_document(doc_id: str):
+    """取消文档处理（软取消，保留 DB 记录）：清已写向量 + 标记增强任务取消。
+
+    与 ``DELETE /document/{doc_id}`` 区别：本接口不删除文档，仅清理向量并取消排队增强，
+    配合 Java 侧将状态置为 cancelled（对齐 WeKnora 任务取消）。主流程若在跑，会在
+    ``process()`` 的取消检查点读到 cancelled 标记后停止并清理。
+    """
+    try:
+        await vector_store_service.delete_by_doc(doc_id)
+        await mark_cancelled(doc_id)
+        return {"doc_id": doc_id, "status": "cancelled"}
+    except Exception as e:
+        logger.warning(f"取消文档处理失败 doc_id={doc_id}: {e}")
         return {"doc_id": doc_id, "status": "failed", "error": str(e)}

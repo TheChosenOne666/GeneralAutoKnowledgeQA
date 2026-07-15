@@ -6,6 +6,7 @@
 - /health: 健康检查
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,6 +16,8 @@ from loguru import logger
 from core.config import settings
 from core.pg_client import close_pg_pool, get_pg_pool
 from routers import chat, document, cache
+from services.augment_queue import sweep_stale
+from services.document_processor import document_processor
 from services.vector_store import PgVectorStore, ensure_embeddings_table, vector_store_service
 
 
@@ -30,7 +33,22 @@ async def lifespan(app: FastAPI):
         logger.info("✅ 向量持久化（pgvector）初始化完成")
     except Exception as e:
         logger.error(f"❌ 向量持久化初始化失败（检索将不可用）: {e}")
+    # 问答增强队列：恢复上次崩溃残留的 processing 任务，并启动常驻 worker
+    # （对齐 WeKnora finalizing 任务队列：持久化、重启可恢复、不丢任务）
+    try:
+        moved = await sweep_stale()
+        if moved:
+            logger.info(f"♻️ 增强队列恢复：{moved} 个卡死任务重新入队")
+    except Exception as e:
+        logger.warning(f"⚠️ 增强队列 sweep 失败（不影响启动）: {e}")
+    augment_worker_task = asyncio.create_task(document_processor.run_augment_worker())
+    logger.info("🚀 问答增强队列 worker 已启动")
     yield
+    augment_worker_task.cancel()
+    try:
+        await augment_worker_task
+    except asyncio.CancelledError:
+        pass
     await close_pg_pool()
     logger.info("👋 熊答 AI 服务已关闭")
 

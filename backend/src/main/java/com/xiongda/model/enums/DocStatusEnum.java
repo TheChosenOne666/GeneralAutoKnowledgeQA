@@ -10,11 +10,13 @@ import lombok.Getter;
 @Getter
 public enum DocStatusEnum {
 
-    PENDING("pending", "等待处理"),
-    PARSING("parsing", "正在解析"),
-    EMBEDDING("embedding", "正在向量化"),
-    READY("ready", "就绪可用"),
-    FAILED("failed", "处理失败");
+    PROCESSING("processing", "处理中"),
+    PARSING("parsing", "解析中"),
+    RETRIEVING("retrieving", "检索中"),
+    OPTIMIZING("optimizing", "优化中"),
+    READY("ready", "已就绪"),
+    FAILED("failed", "处理失败"),
+    CANCELLED("cancelled", "已取消");
 
     private final String value;
 

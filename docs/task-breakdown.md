@@ -917,7 +917,71 @@ Python（AI 服务）
 
 ---
 
-### M4-8 部署与 DevOps [运维] P2 · 1.5d
+### M4-8 文档状态四阶段与检索优化增强（retrieval augmentation）[全栈] P1 · 1d ✅ 完成
+
+- **需求**：文档列表状态栏需呈现完整处理流（对齐腾讯 WeKnora 文档上传→完成流程）：`处理中 → 解析 → 检索 → 优化 → 就绪/失败`。其中「优化」为真正增强——基于分块生成问答对并入库（retrieval augmentation），直接提升检索召回率。
+- **状态机重构**（`DocStatusEnum`）：`processing`(处理中) / `parsing`(解析中) / `retrieving`(检索中) / `optimizing`(优化中) / `ready`(已就绪) / `failed`(处理失败)，移除原 `pending`/`embedding`。
+- **阶段状态实时回调**：Python 在各阶段边界 `POST /api/internal/document/status` 回调 Java 内部接口推进状态（best-effort）；最终 ready/failed 仍由 Java 依据 Python 同步返回落库。上传初始置 `processing`，`triggerDocumentProcessing` 置 `parsing`。
+- **检索优化（retrieval augmentation）**：`DocumentProcessor.process` 在向量化入库后进入优化阶段，用 LLM 基于每个分块生成「问题-答案」对，将问题向量化后以 `chunk_type=qa` 与原分块一次性入库；相似度检索自动覆盖增强块，提升召回。LLM 配置错误（无 Key/模型名错）best-effort 跳过增强、文档仍就绪（不阻塞主流程）。
+- **前端**：`types/index.ts` 状态联合类型新增四阶段值；`KnowledgeBasePage.tsx` 状态徽章新增「处理中/检索中/优化中」（优化用紫色区分），轮询条件与旋转图标纳入新中间态。
+- **改动文件**：
+  - 后端：`DocStatusEnum.java`、`DocumentServiceImpl.java`（upload 置 processing）、新增 `InternalDocumentController.java` + `InternalDocStatusRequest.java`（内部回调接口，状态合法性校验）。
+  - Python：`core/config.py`（backend_base_url / enable_qa_augment / qa_max_pairs）、新增 `services/status_callback.py`、`services/document_processor.py`（retrieving/optimizing 回调 + 问答增强入库 + `_parse_qa_json` 容错解析）。
+  - 前端：`types/index.ts`、`pages/KnowledgeBasePage.tsx`。
+- **单测**：后端 `DocumentServiceImplTest` 新增初始状态 processing、状态推进验证（17 例全过）；Python `tests/test_document_augment.py` 覆盖问答增强入库 + 状态回调 + LLM 配置错误 best-effort 跳过 + JSON 容错解析（3 例全过）。
+- **依赖**：M2-3 文档处理全链路、M3-3 模型配置错误体系。
+- **产出**：文档列表状态真实反映 处理中→解析→检索→优化→就绪 全链路，且检索因问答增强块而更准。
+
+**集成验证（2026-07-15 运行时联调）**：
+- 三服务均用新代码重启存活：Java `:8080/health`=200、Python `:8001/health`=200、前端 `:5173`=200。
+- **Java 内部回调接口（HTTP 层）**：对真实文档 `docId=2077093729271078913` 依次 `POST /api/internal/document/status` 传 `retrieving`/`optimizing`/`ready`，均返回 `{"code":0,"data":true}` → 新增四阶段状态值被 Java 正确接受并落库（测后已恢复 `ready`）。
+- **Python→Java 回调链路（运行时）**：用真实 `services/status_callback.py::notify_document_status` 向运行中 Java 发起 `retrieving`/`optimizing` 回调，Java 实测返回 `{"code":0,"data":true}`；且其 `client=None` 真实路径（走 `settings.backend_base_url`）也能成功把文档回调并恢复 `ready`，无异常 → Python 回调模块与运行中 Java 端到端连通。
+- 结论：新增的「阶段状态实时回调」机制（Python 在 retrieving/optimizing 边界回推 Java）在运行时端到端验证通过；四阶段状态流的逻辑正确性由 Python 单测 `test_document_augment.py`（process 顺序 emit retrieving→optimizing 并入库 qa 块，3 例全过）+ Java 单测 `DocumentServiceImplTest`（17 例全过）覆盖。完整「上传→processing→parsing→retrieving→optimizing→ready」的金链路演示需登录有效账号且 AI 配置含可用 Embedding/LLM 密钥（DB 中 tenant 2075873177644326913 用户已配置火山方舟 Embedding 密钥），本无头环境未走完整浏览器上传，但回调与状态机已逐项验证。
+
+---
+
+### M4-8.1 文档优化阶段异步化 + 持久化增强队列（对齐 WeKnora finalizing，2026-07-15）[全栈] P1 · 1d ✅ 完成
+
+- **背景**：M4-8 的「优化」阶段在 `DocumentProcessor.process()` 同步主链路里**串行**跑（20 块 × (LLM ~30s + 多模态单条 Embedding ~30s) ≈ 20min），大文档长时间卡在「优化中」、且未就绪前不可检索。对标腾讯 WeKnora：其 `finalizing` 状态**文档已可向量检索**，增强任务异步扇出、不阻塞；且任务持久化、服务重启可由 sweep 恢复、文档删除可取消。
+- **需求**：向量化完成即让文档可检索；问答增强改为持久化后台队列（跨重启不丢、可取消），优化中不再阻塞检索与界面。
+- **改造（核心）**：
+  - **新增 `ai-service/services/augment_queue.py`**：基于 Redis 的持久化可靠队列。键：`xiongda:augment:queue`（待处理）/ `xiongda:augment:processing`（已取未完，带 `started_at`）/ `xiongda:augment:cancelled`（set，已删文档 doc_id）。方法：`enqueue` / `dequeue`（RPOPLPUSH queue→processing）/ `ack` / `mark_cancelled` / `is_cancelled` / `sweep_stale`（把 processing 中超时任务移回 queue）。
+  - **Python `services/document_processor.py`**：`process()` 向量化后**先 `store_chunks` 原始块（立即可检索）** → 回调 `optimizing` → 把增强任务**入持久化队列**（`enqueue`，含 `ai_config` 以便 worker 跨进程重建 cfg）→ **立即返回 `{status: optimizing, chunk_count, content}`**（HTTP 不阻塞）。后台逻辑由 `_run_augment_task(task)` 承担：从向量库读回原始块重建（不依赖上传文件是否仍在）并 reuse embedding（L2 缓存）→ 并发生成问答增强块全量 `store_chunks` → 回调 `ready`；含看门狗（总超时 `qa_background_timeout` + 异常兜底）；任务被取消 / 原始块已不存在则跳过（不回调 ready）。新增 `run_augment_worker()` 常驻消费队列（FastAPI lifespan 启动）。`_generate_qa_augment` 维持**限并发**（`Semaphore(qa_concurrency)` + `gather`）+ **批量 Embedding** + **单块超时跳过**。
+  - **Python `main.py` lifespan**：启动时先 `sweep_stale()` 恢复上次崩溃残留的 processing 任务，再 `asyncio.create_task(run_augment_worker())` 启动常驻 worker（对齐 WeKnora finalizing sweep）。
+  - **Python `core/config.py`**：`qa_concurrency=5` / `qa_per_qa_timeout=120.0` / `qa_background_timeout=600.0`。
+  - **Python `routers/document.py`**：`process` 透传 `ai_config_dict` 入队；`DELETE /ai/document/{doc_id}` 删向量时 `mark_cancelled(doc_id)`（取消排队中的增强任务）。
+  - **Python `services/vector_store.py`**：`embeddings` 表新增 `metadata JSONB` 列（ALTER IF NOT EXISTS，向后兼容旧数据）；`store_chunks` 写入完整 metadata；三实现均新增 `get_original_chunks(doc_id)`（**排除 `chunk_type=qa` 块**，供 worker 重建原始块，避免重复增强）。
+  - **Java `AiServiceClient`**：新增 `deleteDocument(docId)` → `DELETE /ai/document/{docId}`（清向量 + 取消增强任务）。
+  - **Java `DocumentServiceImpl`**：`deleteDocument` 调 `aiServiceClient.deleteDocument(docId)`（修复此前 `TODO` 未清向量/未取消任务的缺口）；`triggerDocumentProcessing` 将 `optimizing` 与 `ready` 一并视为成功；`updateDocumentStatus` 带**终态守卫**。
+  - **前端 `KnowledgeBasePage.tsx`**：`optimizing` 状态文件名可点击查看原文 + 状态列追加「已可检索」提示。
+- **存储策略（关键约束）**：`PgVectorStore.store_chunks` 按 `doc_id` **全删重写**（非 upsert）。worker 从向量库**读回原始块**（`get_original_chunks`，已排除 qa 块）重建后连同新生成的增强块**全量 `store_chunks`**，运行期间原始块始终在库可检索，且不依赖上传文件是否仍在（文件可能被删）。
+- **改动文件**：`ai-service/services/augment_queue.py`(新)、`ai-service/services/document_processor.py`、`ai-service/services/vector_store.py`、`ai-service/core/config.py`、`ai-service/routers/document.py`、`ai-service/main.py`、`backend/.../AiServiceClient.java`、`backend/.../DocumentServiceImpl.java`、`frontend/src/pages/KnowledgeBasePage.tsx`。
+- **单测**：Python `tests/test_document_augment.py`（5 例：process 入库原始块+入队 / worker 增强入库 qa 并回调 ready / 取消跳过 / 文档已删跳过 / JSON 容错）+ 新增 `tests/test_augment_queue.py`（4 例：enqueue/dequeue / cancelled set / sweep 移回超时任务 / sweep 保留近期，用内存异步 fake Redis 规避 fakeredis 传输兼容问题），共 9 例全过；Java `DocumentServiceImplTest` 新增 3 例（optimizing 视为成功 + 终态守卫 + optimizing→ready 允许）+ 删除文档 verify 调 `deleteDocument`，总计 20 例全过。
+- **依赖**：M4-8 阶段状态回调 + retrieval augmentation 体系。
+- **产出**：文档进入「优化中」即已可检索与查看原文；问答增强跑持久化队列（限并发 + 批量 embed，分钟级），**服务重启可由 sweep 恢复、文档删除可取消**，彻底对齐 WeKnora finalizing 语义；前端明确提示「已可检索」。
+
+---
+
+### 文档处理取消按钮（软取消 + 可中断，M5-3 前置，2026-07-15）[全栈] P1 · 1d ✅ 完成
+
+- **背景**：用户希望在文档「上传 → 就绪」过程中可主动停止处理。当前架构主流程（解析+向量化）在 Python 同步 handler 执行、无中途取消点；仅增强阶段（optimizing）有 `is_cancelled` 守卫。本次实现「软取消」：保留文档记录、标 `cancelled` 终态、清理已写向量、停止增强，并在主流程加最小取消检查点使其真正可中断（即提前落地 M5-3 的多检查点取消守卫核心）。
+- **需求**：前端在非终态（processing/parsing/retrieving/optimizing）显示「取消」按钮，点击后文档停止处理并变为「已取消」。
+- **改造**：
+  - **枚举/状态**：`DocStatusEnum` 新增 `CANCELLED("cancelled","已取消")`；`updateDocumentStatus` 终态守卫把 `cancelled` 纳入终态（终态不可被中间态回退覆盖）。
+  - **后端接口**：`KnowledgeBaseController` 新增 `POST /api/knowledge/document/cancel`；`DocumentService.cancelDocument` 校验权限（租户隔离 + 知识库写权限）→ 标 `cancelled` → 调 `AiServiceClient.cancelDocument`（POST `/ai/document/{docId}/cancel`）。
+  - **Python 取消接口**：`routers/document.py` 新增 `POST /ai/document/{doc_id}/cancel`：`delete_by_doc` 清向量 + `mark_cancelled`（复用 `xiongda:augment:cancelled` set，与删除共用）。
+  - **Python 主流程检查点**：`document_processor.process()` 在**嵌入前**与**入库后（notify optimizing 之前）**两处检查 `is_cancelled`，命中则清理已写向量 + 回调 `cancelled` + 返回 `cancelled`（不返回 optimizing）。
+  - **竞态处理**：`triggerDocumentProcessing` 收到 Python 返回 `cancelled` 即落库 `cancelled`；若用户中途取消但 Python 仍跑完返回 `ready/optimizing`，因 DB 已 `cancelled`（终态守卫拒绝回退），触发分支主动 `deleteDocument` 清向量，避免残留「已取消却可检索」的文档。
+  - **前端**：`types` 的 `Document.status` 增加 `cancelled`；`knowledgeApi.cancelDocument`；`STATUS_CONFIG` 增加已取消样式；非终态文档操作列显示「取消」按钮（`handleCancel` 二次确认）。
+- **改动文件**：`DocStatusEnum.java`、`DocumentService.java`(接口)、`DocumentServiceImpl.java`、`AiServiceClient.java`、`KnowledgeBaseController.java`、`routers/document.py`、`document_processor.py`、`types/index.ts`、`api/knowledge.ts`、`KnowledgeBasePage.tsx`。
+- **单测**：Java `DocumentServiceImplTest` 新增 4 例（非终态取消成功 / 终态幂等 / cancelled 终态守卫 / 竞态清向量），共 24 例全过；Python `test_document_augment.py` 新增 2 例（嵌入前取消 / 入库后取消清向量），共 7 例全过。
+- **依赖**：M4-8.1（队列 + cancelled set + 终态守卫基础）。
+- **产出**：用户可在处理中任意阶段点「取消」停止；文档变「已取消」并清理向量；提前落地 M5-3 的取消守卫（M5-3 余下「完整 4 处检查点 + 适配主流程队列化」仍按计划实现）。
+- **关联**：M5-3（多检查点取消守卫）已先行部分实现，剩余工作见 M5 阶段。
+
+---
+
+### M4-9 部署与 DevOps [运维] P2 · 1.5d
 
 - Docker Compose（PostgreSQL + Redis + Milvus + Java + Python + Nginx）
 - Java Dockerfile（多阶段构建）
@@ -929,7 +993,109 @@ Python（AI 服务）
 
 ---
 
-**M4 合计: ~10.5 天**
+**M4 合计: ~11.5 天**
+
+---
+
+## M5 — 文档处理深度对齐 WeKnora（主流程健壮性 + 功能广度）
+
+> **背景**：M4-8.1 已完成「优化阶段异步化 + 持久化增强队列」，对齐了 WeKnora `finalizing=queryable` 与增强队列的崩溃恢复/取消语义。但经源码逐点比对，熊答在以下 8 处仍未对齐 WeKnora（详见对话核对）：
+> 1. 解析+向量化阶段不在持久化队列 worker 内（崩溃不可自动恢复，会卡 `parsing/retrieving`）
+> 2. 缺重试机制（WeKnora Asynq `MaxRetry(3)` + 退避）
+> 3. 缺多检查点取消守卫（WeKnora 4 处 `isKnowledgeAborted`）
+> 4. 缺阶段化 span 时间线追踪（WeKnora `beginStage/endStage/failStage`）
+> 5. 单层 chunk，无父子分块（WeKnora 父块入库供上下文、子块进向量索引）
+> 6. 无多模态 OCR/VLM caption 增强（WeKnora `enable_multimodel → image:multimodal`）
+> 7. 增强仅问答对，无 GraphRAG/Auto-Wiki/摘要/问题（WeKnora postprocess 多种形态）
+> 8. 单 pgvector，无复合检索引擎（WeKnora `composite` = pgvector + ES/Qdrant）
+>
+> M5 逐一对齐这 8 点，**按「先主流程健壮性、后可观测性与功能广度」的顺序一个一个实现**。
+
+### M5-1 文档处理主流程持久化队列化（解析+向量化入队）[全栈] P0 · 2d ⬜ 待开始
+
+- **需求**：把「提取→分块→向量化→入库」整段主流程从 Python 同步 HTTP handler 搬进持久化任务队列 worker，对齐 WeKnora 把 `ProcessDocument` 整体跑在 Asynq 持久化任务里。HTTP 上传仅 `enqueue` 即返回，主流程异步执行、崩溃可恢复。
+- **改造**：
+  - 新增主流程队列（复用 `augment_queue.py` 的可靠性模式，或新增 `process_queue.py`）：`xiongda:doc:queue` / `xiongda:doc:processing`（带 `started_at`）/ `xiongda:doc:cancelled`。
+  - `POST /ai/document/process` 改为**仅 enqueue 即返回 `{status: processing}`**，不再同步跑解析；新增 worker `run_process_worker` 在 FastAPI lifespan 启动，消费队列执行 `process()`（解析+向量化+入库+入增强队）。
+  - Java `triggerDocumentProcessing` 去掉对 Python 同步返回的依赖：发请求后立即置 `parsing`，状态全靠 Python 阶段回调（retrieving/optimizing/ready）推进。
+  - 启动时 `sweep_stale` 同时恢复主流程队列（与增强队列共用/分别 sweep）。
+- **依赖**：M4-8.1（队列基础设施）
+- **产出**：主流程可崩溃恢复、不阻塞上传 HTTP；为 M5-2 / M5-3 打底。
+
+### M5-2 主流程重试机制（MaxRetry + 退避）[全栈] P1 · 0.5d ⬜ 待开始
+
+- **需求**：对齐 WeKnora Asynq `MaxRetry(3)` + 自定义退避，主流程（解析/向量化）失败自动重试；非临时错误（模型配置错误）直接 fail 不重试。
+- **改造**：
+  - 队列消费侧增加失败重试计数（task 带 `retry` 字段）；达上限回写 `failed` + 错误码。
+  - `ModelConfigError` 视为不可重试，直接 fail（与 M3-3 语义一致）。
+  - 退避策略（`asynqRetryDelayFunc` 风格）：固定/指数间隔。
+- **依赖**：M5-1
+- **产出**：主流程失败可自愈，减少人工干预。
+
+### M5-3 多检查点取消守卫 [全栈] P1 · 0.5d ⬜ 待开始
+
+> 注：取消守卫核心已通过「文档处理取消按钮」功能先行实现——`document_processor.process()` 已在嵌入前 / 入库后两处检查 `is_cancelled` 并清理向量，`DocStatusEnum` 已加 `cancelled` 终态，`triggerDocumentProcessing` 已处理竞态清理。本任务剩余工作：补全 WeKnora 完整 4 处检查点（翻 processing 前 / 写 chunk 前 / 索引前 / 标 completed 前）并适配 M5-1 主流程队列化。详见上方「文档处理取消按钮」小节。
+
+- **需求**：对齐 WeKnora 4 处 `isKnowledgeAborted` 检查（翻 processing 前 / 写 chunk 前 / 索引前 / 标 completed 前），防取消竞态。
+- **改造**：
+  - 主流程 worker 在关键阶段边界调用 `is_cancelled(doc_id)`（复用 `xiongda:doc:cancelled` set，删文档时 Java 调 Python 标记）。
+  - 命中则中止并清理（不回写 failed，视为已取消）；增强阶段已有 1 处检查，补齐其余检查点。
+- **依赖**：M5-1
+- **产出**：删除文档时主流程不残留孤儿任务/孤立向量。
+
+### M5-4 阶段化 span 时间线追踪 [全栈] P1 · 1d ⬜ 待开始
+
+- **需求**：对齐 WeKnora `beginStage/endStage/failStage`，把 chunking/embedding/multimodal 拆成带时间线的阶段，前端展示细粒度进度与错误码，而非单一状态字符串。
+- **改造**：
+  - Python 新增阶段回调 `notify_stage(doc_id, stage, status, metrics)`（metrics 含 `vectors_written` / `storage_bytes` / `chunk_count` / `elapsed_ms`）。
+  - 新增 Java 内部接口 `POST /api/internal/document/stage` 落库阶段记录（或扩展 DocStatus 表）。
+  - 前端 `KnowledgeBasePage.tsx` 进度条按阶段展示（解析中 → 分块中 → 向量化中 → 优化中 → 就绪）。
+- **依赖**：M4-8.1 状态回调体系
+- **产出**：用户可见细粒度处理进度与失败定位。
+
+### M5-5 父子分块（parent/child chunk）[Python] P1 · 1d ⬜ 待开始
+
+- **需求**：对齐 WeKnora 父子分块——父块入库供上下文召回、子块进向量索引，提升检索精度。
+- **改造**：
+  - `chunk_text` 产出 parent/child 两层；metadata 加 `parent_id` / `is_parent`。
+  - `store_chunks` 父块入 PG 但不写向量索引（或写占位）；检索时子块命中回溯父块拼上下文。
+  - `vector_store.search` 返回时携带父块内容。
+- **依赖**：M5-1（或现有 store_chunks）
+- **产出**：检索召回更完整、上下文更连贯。
+
+### M5-6 多模态增强（图片 OCR + VLM caption）[Python] P2 · 2d ⬜ 待开始
+
+- **需求**：对齐 WeKnora `enable_multimodel → image:multimodal`，对文档内图片做 OCR + VLM caption，每图拆 OCR 块 + Caption 块入向量库。
+- **改造**：
+  - 解析阶段抽取图片（PDF 图片提取 / DOCX 内嵌图）；图片块每图拆 OCR 块 + Caption 块。
+  - OCR 用 OCR 服务/库；Caption 用 VLM（复用 M3-3 配置的多模态端点）。
+  - 增强队列增加 `image:multimodal` 子任务类型（复用 M5-1 队列）。
+- **依赖**：M5-1、M3-3 模型配置（多模态端点）
+- **产出**：图片内容可被检索问答。
+
+### M5-7 GraphRAG + Auto-Wiki + 摘要/问题（增强内容丰富度扩展）[Python] P2 · 2d ⬜ 待开始
+
+- **需求**：对齐 WeKnora postprocess 含摘要 + 问题 + 实体关系(GraphRAG) + Auto-Wiki，扩展现有仅问答对增强。
+- **改造**：
+  - 在 `_generate_qa_augment` 基础上增加：文档级摘要块、推测用户问题块、实体关系抽取（存入图/JSONB）。
+  - 可选 Auto-Wiki：从多文档抽取知识条目。
+  - 各类增强块带 `chunk_type` 区分（summary / question / entity / wiki）。
+- **依赖**：M4-8.1 增强队列、M5-1
+- **产出**：检索增强从「问答对」扩展到多形态知识块。
+
+### M5-8 复合检索引擎（pgvector + ES/Qdrant）[Python] P2 · 2d ⬜ 待开始
+
+- **需求**：对齐 WeKnora `composite`（pgvector + Elasticsearch/Qdrant），双层检索提升召回与规模。
+- **改造**：
+  - `vector_store` 抽象出 `composite` 引擎：向量走 pgvector，关键词/全文走 ES；或双向量库。
+  - 检索 `search` 改为 hybrid 合并（向量 + 关键词）再 Rerank。
+  - 配置化选择引擎（默认 pgvector 单库，可切 composite）。
+- **依赖**：M5-1、现有 Rerank
+- **产出**：大规模语料下检索质量与吞吐提升。
+
+**M5 合计: ~11.5 天**
+
+**实现顺序**：M5-1 → M5-2 → M5-3 → M5-4 → M5-5 → M5-6 → M5-7 → M5-8（先主流程健壮性，后可观测性与功能广度，**逐个实现**）。
 
 ---
 
@@ -1045,7 +1211,7 @@ M1-2 ──→ M3-1 RBAC ──┬─→ M3-2 成员管理
                      ├─→ M3-5 平台超管
                      └─→ M4-2 共享/个人库
 
-M3 全部 ──→ M4-8 部署
+M3 全部 ──→ M4-9 部署
 ```
 
 ---

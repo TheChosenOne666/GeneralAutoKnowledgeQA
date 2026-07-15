@@ -12,21 +12,28 @@ import com.xiongda.model.entity.Tenant;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
+import com.xiongda.service.AiConfigService;
 import com.xiongda.service.impl.DocumentServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 /**
@@ -49,6 +56,9 @@ class DocumentServiceImplTest {
     @Mock
     private TenantMapper tenantMapper;
 
+    @Mock
+    private AiConfigService aiConfigService;
+
     private DocumentServiceImpl documentService;
 
     @BeforeEach
@@ -58,6 +68,7 @@ class DocumentServiceImplTest {
         ReflectionTestUtils.setField(documentService, "knowledgeBaseService", knowledgeBaseService);
         ReflectionTestUtils.setField(documentService, "aiServiceClient", aiServiceClient);
         ReflectionTestUtils.setField(documentService, "tenantMapper", tenantMapper);
+        ReflectionTestUtils.setField(documentService, "aiConfigService", aiConfigService);
     }
 
     private User user(Long id, String role) {
@@ -117,6 +128,21 @@ class DocumentServiceImplTest {
     }
 
     @Test
+    void uploadDocument_initialStatus_processing() {
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+        Document[] captured = new Document[1];
+        doAnswer(inv -> {
+            captured[0] = inv.getArgument(0, Document.class);
+            captured[0].setId(202L);
+            return 1;
+        }).when(documentMapper).insert(any(Document.class));
+
+        documentService.uploadDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE),
+                "test.pdf", "pdf", 1024L, "/uploads/test.pdf");
+        assertEquals("processing", captured[0].getStatus());
+    }
+
+    @Test
     void uploadDocument_sharedAsMember_denied() {
         when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 10L));
 
@@ -142,7 +168,7 @@ class DocumentServiceImplTest {
     @Test
     void listDocuments_success() {
         Document doc1 = buildDoc(1L, "doc1.pdf", "pdf", "ready");
-        Document doc2 = buildDoc(2L, "doc2.txt", "txt", "pending");
+        Document doc2 = buildDoc(2L, "doc2.txt", "txt", "processing");
         when(documentMapper.selectList(any(QueryWrapper.class))).thenReturn(List.of(doc1, doc2));
 
         List<DocumentVO> result = documentService.listDocuments(1L, 10L);
@@ -171,6 +197,8 @@ class DocumentServiceImplTest {
         boolean result = documentService.deleteDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
         assertTrue(result);
         verify(documentMapper).deleteById(1L);
+        // 删除文档时同步清理 Python 侧向量并取消增强任务（对齐 WeKnora 任务取消）
+        verify(aiServiceClient).deleteDocument(1L);
     }
 
     @Test
@@ -183,6 +211,7 @@ class DocumentServiceImplTest {
 
         boolean result = documentService.deleteDocument(1L, 10L, user(100L, UserConstant.TENANT_ADMIN_ROLE));
         assertTrue(result);
+        verify(aiServiceClient).deleteDocument(1L);
     }
 
     @Test
@@ -236,6 +265,130 @@ class DocumentServiceImplTest {
         assertEquals("pdf", vo.getFileType());
         assertEquals("ready", vo.getStatus());
         assertEquals(10, vo.getChunkCount());
+    }
+
+    @Test
+    void updateDocumentStatus_transitionsStage() {
+        Document doc = buildDoc(1L, "test.pdf", "pdf", "parsing");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        boolean ok = documentService.updateDocumentStatus(1L, "retrieving", 5, null, null);
+        assertTrue(ok);
+        assertEquals("retrieving", doc.getStatus());
+        assertEquals(5, doc.getChunkCount());
+    }
+
+    // ==================== 异步增强（对齐 WeKnora finalizing=queryable） ====================
+
+    @Test
+    void triggerDocumentProcessing_optimizingTreatedAsSuccess() {
+        // 模拟 Python 返回 optimizing（向量已入库、可检索，增强后台进行中）
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "processing");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+        when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
+        when(aiServiceClient.processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any()))
+                .thenReturn(Map.of("status", "optimizing", "chunk_count", 7, "content", "全文内容"));
+
+        documentService.triggerDocumentProcessing(1L, "/p", "txt", 1L, 10L, 100L);
+
+        // 异步 lambda：等待至少两次状态更新（parsing → optimizing），取最后一次校验
+        ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper, timeout(3000).atLeast(2)).updateById(cap.capture());
+        List<Document> all = cap.getAllValues();
+        assertEquals("optimizing", all.get(all.size() - 1).getStatus());
+        assertEquals(7, all.get(all.size() - 1).getChunkCount());
+        // 成功分支才清 L1 缓存（failed 分支不会调用）
+        verify(aiServiceClient, timeout(3000)).invalidateCache(10L);
+    }
+
+    @Test
+    void updateDocumentStatus_terminalGuard_ignoresStaleStage() {
+        // 终态 ready 已落定，迟到的最终之前阶段回调（optimizing）应被忽略
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "ready");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+
+        boolean ok = documentService.updateDocumentStatus(1L, "optimizing", null, null, null);
+        assertFalse(ok);
+        assertEquals("ready", doc.getStatus());
+    }
+
+    @Test
+    void updateDocumentStatus_optimizingToReady_allowed() {
+        // 中间态 optimizing → 终态 ready 应允许（后台增强完成后推进）
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "optimizing");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        boolean ok = documentService.updateDocumentStatus(1L, "ready", 5, null, null);
+        assertTrue(ok);
+        assertEquals("ready", doc.getStatus());
+    }
+
+    // ==================== 取消文档处理（M5 软取消） ====================
+
+    @Test
+    void cancelDocument_nonTerminal_success() {
+        // 非终态（processing）→ 标 cancelled + 通知 Python 清向量 + 取消增强 + 清 L1 缓存
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "processing");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        boolean result = documentService.cancelDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
+        assertTrue(result);
+
+        ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper).updateById(cap.capture());
+        assertEquals("cancelled", cap.getValue().getStatus());
+        // 通知 Python 清理向量 + 取消增强
+        verify(aiServiceClient).cancelDocument(1L);
+        verify(aiServiceClient).invalidateCache(10L);
+    }
+
+    @Test
+    void cancelDocument_terminalIdempotent() {
+        // 终态（ready）幂等返回，不重复通知 Python
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "ready");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+
+        boolean result = documentService.cancelDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
+        assertTrue(result);
+        verify(aiServiceClient, never()).cancelDocument(1L);
+    }
+
+    @Test
+    void updateDocumentStatus_cancelledTerminalGuard_ignoresStaleStage() {
+        // 终态 cancelled 已落定，迟到的最终之前阶段回调（optimizing）应被忽略
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "cancelled");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+
+        boolean ok = documentService.updateDocumentStatus(1L, "optimizing", null, null, null);
+        assertFalse(ok);
+        assertEquals("cancelled", doc.getStatus());
+    }
+
+    @Test
+    void triggerDocumentProcessing_raceCancelledCleanupVectors() {
+        // 竞态：用户中途取消（DB 已 cancelled），Python 仍跑完返回 optimizing
+        // 应在落库前清理已入库向量，保持 cancelled（不残留可检索但已取消的文档）
+        when(documentMapper.selectById(1L))
+                .thenReturn(buildDoc(1L, "t.pdf", "pdf", "processing"))
+                .thenReturn(buildDoc(1L, "t.pdf", "pdf", "cancelled"));
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+        when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
+        when(aiServiceClient.processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any()))
+                .thenReturn(Map.of("status", "optimizing", "chunk_count", 7, "content", "全文内容"));
+
+        documentService.triggerDocumentProcessing(1L, "/p", "txt", 1L, 10L, 100L);
+
+        // 竞态分支：清理已入库向量 + 清 L1 缓存（不把状态回退为 optimizing）
+        verify(aiServiceClient, timeout(3000)).deleteDocument(1L);
+        verify(aiServiceClient, timeout(3000)).invalidateCache(10L);
     }
 
     // ==================== 辅助方法 ====================

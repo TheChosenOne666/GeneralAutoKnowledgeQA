@@ -64,7 +64,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         doc.setFileType(fileType);
         doc.setFileSize(fileSize);
         doc.setFilePath(filePath);
-        doc.setStatus("pending");
+        doc.setStatus("processing");
         doc.setChunkCount(0);
         doc.setUploadedBy(user.getId());
 
@@ -100,13 +100,51 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
         KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
         KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
-        // TODO: 删除向量数据库中的数据
+        // 同步清理 Python 侧向量并取消可能正在排队的问答增强任务（对齐 WeKnora 任务取消）
+        try {
+            aiServiceClient.deleteDocument(docId);
+        } catch (Exception e) {
+            log.warn("清理文档向量/增强任务失败 docId={} : {}", docId, e.getMessage());
+        }
         // 文档删除同样改变检索结果，清该租户 L1 检索缓存
         aiServiceClient.invalidateCache(tenantId);
         boolean removed = this.removeById(docId);
         // 知识库文档数同步
         syncKbDocCount(doc.getKbId(), tenantId);
         return removed;
+    }
+
+    @Override
+    public boolean cancelDocument(Long docId, Long tenantId, User user) {
+        Document doc = this.getById(docId);
+        ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
+        ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限取消该文档");
+        // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
+        KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
+        KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
+
+        // 仅非终态可取消（processing/parsing/retrieving/optimizing）；终态幂等返回
+        String status = doc.getStatus();
+        if ("ready".equals(status) || "failed".equals(status) || "cancelled".equals(status)) {
+            return true;
+        }
+
+        // 标 cancelled（终态）—— 终态守卫保证后续 Python 中间态回调不再覆盖本状态
+        this.updateDocumentStatus(docId, "cancelled", null, null);
+
+        // 通知 Python：清理已写入向量 + 取消排队的问答增强任务（对齐 WeKnora 任务取消）
+        try {
+            aiServiceClient.cancelDocument(docId);
+        } catch (Exception e) {
+            log.warn("通知 Python 取消文档处理失败 docId={} : {}", docId, e.getMessage());
+        }
+        // 文档状态变更同样影响检索结果，清该租户 L1 检索缓存
+        try {
+            aiServiceClient.invalidateCache(tenantId);
+        } catch (Exception e) {
+            log.warn("清检索缓存失败（取消文档）tenantId={} : {}", tenantId, e.getMessage());
+        }
+        return true;
     }
 
     @Override
@@ -138,6 +176,15 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             Boolean modelConfigError) {
         Document doc = this.getById(docId);
         if (doc == null) {
+            return false;
+        }
+        // 终态守卫（对齐 WeKnora 终态不可变）：ready/failed 落定后，忽略迟到的最终之前阶段
+        // 回调（如 retrieving/optimizing），防止异步增强阶段竞态把已就绪文档回退到中间态。
+        String current = doc.getStatus();
+        boolean currentTerminal = "ready".equals(current) || "failed".equals(current) || "cancelled".equals(current);
+        boolean nextTerminal = "ready".equals(status) || "failed".equals(status) || "cancelled".equals(status);
+        if (currentTerminal && !nextTerminal) {
+            log.warn("忽略非终态回调（当前已是终态）docId={}, current={}, next={}", docId, current, status);
             return false;
         }
         doc.setStatus(status);
@@ -255,18 +302,37 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
 
                 // 3. 根据结果更新状态
                 String status = result.get("status") != null ? result.get("status").toString() : "failed";
-                if ("ready".equals(status)) {
+                // M5 取消：Python 主流程内检测到取消（已清向量），Java 侧保持一致为 cancelled（终态）
+                if ("cancelled".equals(status)) {
+                    this.updateDocumentStatus(docId, "cancelled", null, null);
+                    aiServiceClient.invalidateCache(tenantId);
+                    log.info("文档处理被取消(主流程内): docId={}", docId);
+                    return;
+                }
+                // 对齐 WeKnora finalizing=queryable：optimizing 表示向量已入库、文档已可检索，
+                // 仅问答增强在后台进行中，同样视为成功落库（不阻塞用户检索）。
+                if ("ready".equals(status) || "optimizing".equals(status)) {
+                    // 竞态守卫：用户中途取消，Python 仍跑完返回 ready/optimizing
+                    // （cancelDocument 已将状态置 cancelled 终态，终态守卫会拒绝本次回退），
+                    // 此处主动清理已入库向量，避免残留可检索但已「取消」的文档。
+                    Document cur = this.getById(docId);
+                    if (cur != null && "cancelled".equals(cur.getStatus())) {
+                        log.info("文档已被取消，清理已入库向量 docId={}", docId);
+                        aiServiceClient.deleteDocument(docId);
+                        aiServiceClient.invalidateCache(tenantId);
+                        return;
+                    }
                     Object chunkCountObj = result.get("chunk_count");
                     Integer chunkCount = chunkCountObj instanceof Number ? ((Number) chunkCountObj).intValue() : 0;
-                    this.updateDocumentStatus(docId, "ready", chunkCount, null);
-                    // 保存提取全文，供前端「查看内容」弹窗展示
+                    this.updateDocumentStatus(docId, status, chunkCount, null);
+                    // 保存提取全文，供前端「查看内容」弹窗展示（optimizing 阶段亦可查看）
                     Object contentObj = result.get("content");
                     if (contentObj != null) {
                         this.saveDocumentContent(docId, contentObj.toString());
                     }
                     // 文档内容已变更，清该租户 L1 检索缓存，下次提问回源重新检索
                     aiServiceClient.invalidateCache(tenantId);
-                    log.info("文档处理完成: docId={}, chunks={}", docId, chunkCount);
+                    log.info("文档处理完成(可检索): docId={}, status={}, chunks={}", docId, status, chunkCount);
                 } else {
                     String errorType = result.get("error_type") != null ? result.get("error_type").toString() : null;
                     String error = result.get("error") != null ? result.get("error").toString() : "未知错误";

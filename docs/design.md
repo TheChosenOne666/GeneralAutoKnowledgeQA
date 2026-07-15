@@ -222,8 +222,9 @@ CREATE TABLE document (
     filename    VARCHAR(500) NOT NULL,
     file_type   VARCHAR(20),     -- pdf / docx / md / txt
     file_size   BIGINT,
-    status      VARCHAR(20) DEFAULT 'pending',
-    -- pending → parsing → embedding → ready / failed
+    status      VARCHAR(20) DEFAULT 'processing',
+    -- processing → parsing → retrieving → optimizing(已可检索) → ready / failed
+    -- （对齐 WeKnora finalizing=queryable：向量化完成即可检索，optimizing 仅问答增强后台进行中）
     chunk_count INTEGER DEFAULT 0,
     error_msg   TEXT,
     uploaded_by BIGINT NOT NULL,
@@ -334,6 +335,22 @@ Final Answer: 年假...病假...区别...
 ```
 
 ---
+
+### 5.4 文档处理深度对齐 WeKnora（M5 规划）
+
+> 目标：把 M4-8.1 的「finalizing 队列」思想扩展到整条主流程，并补齐 WeKnora 的健壮性（重试 / 多检查点守卫 / 阶段 span）与功能广度（父子分块 / 多模态 / GraphRAG / 复合检索）。逐项落地前本节仅记录规划，各子任务完成后再补充对应详细设计。
+>
+> 与 WeKnora 的 8 点差异及实现顺序（详见 `docs/task-breakdown.md` M5）：
+> 1. M5-1 主流程持久化队列化（解析+向量化入队，对齐 Asynq 整流程异步）
+> 2. M5-2 主流程重试机制（MaxRetry + 退避）
+> 3. M5-3 多检查点取消守卫（对齐 4 处 isKnowledgeAborted）
+> 4. M5-4 阶段化 span 时间线追踪（对齐 beginStage/endStage/failStage）
+> 5. M5-5 父子分块（parent/child chunk）
+> 6. M5-6 多模态增强（图片 OCR + VLM caption）
+> 7. M5-7 GraphRAG + Auto-Wiki + 摘要/问题
+> 8. M5-8 复合检索引擎（pgvector + ES/Qdrant）
+>
+> 实现顺序：M5-1 → M5-2 → M5-3 → M5-4 → M5-5 → M5-6 → M5-7 → M5-8（先主流程健壮性，后可观测性与功能广度，逐个实现）。
 
 ## 6. SSE 流式输出设计
 
@@ -520,7 +537,7 @@ multi-rag-employee/
 ② 知识库与文档
    创建知识库 POST /api/knowledge/add（scope: shared / personal）
    上传文档  POST /api/knowledge/document/upload（MultipartFile）
-        → Document 状态机：pending → parsing → embedding → ready / failed（前端轮询列表状态）
+        → Document 状态机：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（对齐 WeKnora finalizing，前端轮询列表状态）
         │
 ③ 问答
    进入对话页 → 输入问题 → POST /api/chat/message/stream（SSE 流式）
@@ -537,7 +554,7 @@ multi-rag-employee/
    │
    ▼
 Java KnowledgeBaseController.uploadDocument
-   → DocumentServiceImpl：保存文件（绝对路径）+ 创建 Document(status=pending)
+   → DocumentServiceImpl：保存文件（绝对路径）+ 创建 Document(status=processing)
    │
    ▼  CompletableFuture.runAsync（异步，不阻塞上传响应）
 Java DocumentServiceImpl.triggerDocumentProcessing
@@ -548,18 +565,44 @@ Java DocumentServiceImpl.triggerDocumentProcessing
 Python POST /ai/document/process → DocumentProcessor.process()
    1) extract_text：PDF(PyMuPDF) / DOCX(python-docx) / MD·TXT(直读)
    2) chunk_text：RecursiveCharacterTextSplitter(512 / 50)
-   3) embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
-   4) store_chunks：写入向量库（元数据 doc_id/kb_id/tenant_id/source/page）
-   → 返回 chunk_count
+   3) 检索阶段：回调 status=retrieving → embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
+   4) 原始块立即 store_chunks 入库（PG 按 doc_id 幂等覆盖）→ 文档【立即可被检索】
+   5) 优化阶段：回调 status=optimizing（已可检索）→ 将增强任务**入持久化队列**（Redis）
+      **立即返回** {status: optimizing, chunk_count, content}（HTTP 不阻塞）
+   │
+   └─ 常驻 worker（FastAPI lifespan 启动）消费队列：从向量库读回原始块重建 → 并发生成问答对
+      （retrieval augmentation：限并发 qa_concurrency + 批量 Embedding + 单块超时跳过），
+      增强块连同原始块全量 store，完成后回调 Java status=ready（看门狗：总超时/异常兜底，
+      确保最终推进 ready，不永远卡 optimizing；LLM 配置错误则跳过增强，文档仍 ready；
+      任务被取消/文档已删则跳过，不回调 ready）
    │
    ▼
-Java 更新 status=ready + chunkCount
+Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCount + 保存 content
    → 调 AiServiceClient.invalidateCache(tenant) 清 L1 检索缓存（见 §9.5）
+   → 后台回调 ready 到达时（optimizing→ready）仅推进状态，不覆盖已回填的 content
         │
    └─ 失败分支：更新 status=failed + errorMsg（default 异常兜底）
+
+> **对齐 WeKnora finalizing=queryable + 任务队列**：向量化完成即可检索，optimizing 仅表示问答增强
+> 后台进行中，不再阻塞用户检索（旧版串行等待增强，大文档会卡在「优化中」约 20 分钟）。增强任务改为
+> **持久化队列**（`services/augment_queue.py`，Redis list `xiongda:augment:queue`，进程内 asyncio 任务
+> 改为跨重启不丢）：`process()` 向量化后仅 store 原始块 + 回调 optimizing + 入队即返回；常驻 worker
+> （`document_processor.run_augment_worker`，FastAPI lifespan 启动）消费队列，从向量库读回原始块重建
+> 并生成问答增强块全量 store，完成后回调 ready。阶段状态经 POST /api/internal/document/status 实时回调
+> （retrieving / optimizing / ready），best-effort 失败仅告警不阻塞。
+>
+> **崩溃恢复（sweep）**：队列采用 queue → processing 两段式（RPOPLPUSH，processing 记录带 started_at），
+> 启动时 `sweep_stale` 把卡死（处理中超时）的任务移回 queue，服务重启不丢增强任务。
+> **任务取消**：Java 删除文档时调 Python `DELETE /ai/document/{doc_id}`，清向量库并 `mark_cancelled(doc_id)`，
+> worker 取任务前检查 cancelled 集 / 原始块是否已不存在，命中则跳过（不回调 ready），对齐 WeKnora 任务取消。
+> Java `updateDocumentStatus` 带「终态守卫」：ready/failed 落定后忽略迟到的最终之前阶段回调，防止竞态回退。
 ```
 
 > 文档删除（POST /api/knowledge/document/delete，逻辑删除）同样触发 `invalidateCache`，保证下次提问回源重新检索。
+
+> **文档取消（软取消，2026-07-15）**：用户可在处理中任意阶段（processing/parsing/retrieving/optimizing）点「取消」停止。`POST /api/knowledge/document/cancel` → Java 标 `cancelled`（终态，终态守卫阻止中间态回退）→ `POST /ai/document/{doc_id}/cancel` 清向量 + `mark_cancelled`；Python `process()` 在嵌入前 / 入库后两处检查 `is_cancelled`，命中即清向量 + 回调 `cancelled`。竞态：若取消发生在 Python 跑完返回 ready/optimizing 之后，因 DB 已 cancelled，触发分支主动清向量，避免残留可检索但已取消的文档。详见 `docs/task-breakdown.md` 对应小节。
+
+> **M5 规划**：上述主流程（解析+向量化）当前仍跑在 Python 同步 handler 内，且缺重试 / 多检查点守卫 / 阶段 span / 父子分块 / 多模态 / GraphRAG / 复合检索。这 8 点将在 M5 阶段逐一对齐 WeKnora（见 `docs/task-breakdown.md` M5）。
 
 ### 9.3 RAG 问答全链路（含三层缓存）
 

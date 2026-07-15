@@ -56,6 +56,10 @@ export const knowledgeApi = {
   deleteDocument: (id: string) =>
     api.post<BaseResponse<boolean>>('/knowledge/document/delete', { id }).then((r) => r.data.data),
 
+  /** 取消文档处理（软取消，保留文档记录，清理已写向量并停止增强）。*/
+  cancelDocument: (id: string) =>
+    api.post<BaseResponse<boolean>>('/knowledge/document/cancel', { id }).then((r) => r.data.data),
+
   /** 获取文档提取全文（供「查看内容」弹窗）。*/
   getDocumentContent: (docId: string) =>
     api.get<BaseResponse<string>>('/knowledge/document/content', { params: { docId } }).then((r) => r.data.data),

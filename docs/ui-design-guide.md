@@ -173,7 +173,7 @@ box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 - **Tab 切换**：共享知识库 / 我的知识库（带数量角标）
 - **上传区**：拖拽上传，支持 PDF/Word/MD/TXT
 - **文档列表**：表格（文件名、类型、大小、状态、上传时间、操作）
-- **状态追踪**：pending → parsing → embedding → ready / failed
+- **状态追踪**：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（四阶段实时状态；优化中即已可用于问答，对齐 WeKnora finalizing）
 - **筛选**：按类型、状态
 
 #### 页面 4：AI 模型配置（`04-ai-config.html`）

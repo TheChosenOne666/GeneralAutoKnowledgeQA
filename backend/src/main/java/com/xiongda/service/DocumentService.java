@@ -32,6 +32,19 @@ public interface DocumentService extends IService<Document> {
     boolean deleteDocument(Long docId, Long tenantId, User user);
 
     /**
+     * 取消文档处理（软取消，保留文档记录）。
+     *
+     * <p>仅非终态（processing/parsing/retrieving/optimizing）可取消；取消后将文档标记为
+     * {@code cancelled}（终态），并通知 Python 清理已写入的向量、取消排队的问答增强任务。
+     * ready/failed/cancelled 已是终态，调用幂等返回 true（无需重复取消）。</p>
+     *
+     * @param docId    文档 ID
+     * @param tenantId 租户 ID（用于隔离校验）
+     * @param user     当前登录用户（用于知识库写权限校验）
+     */
+    boolean cancelDocument(Long docId, Long tenantId, User user);
+
+    /**
      * 获取文档 VO。
      */
     DocumentVO getDocumentVO(Document doc);

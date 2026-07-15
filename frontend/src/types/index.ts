@@ -48,7 +48,7 @@ export interface Document {
   filename: string
   fileType: string
   fileSize: number
-  status: 'pending' | 'parsing' | 'embedding' | 'ready' | 'failed'
+  status: 'processing' | 'parsing' | 'retrieving' | 'optimizing' | 'ready' | 'failed' | 'cancelled'
   chunkCount: number
   errorMsg: string | null
   /** 是否因 AI 模型配置错误导致处理失败（用于前端提示重配）。*/

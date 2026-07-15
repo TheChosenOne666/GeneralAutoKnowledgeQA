@@ -184,6 +184,40 @@ public class AiServiceClient {
     }
 
     /**
+     * 删除文档 — 调用 Python AI 服务清理该文档在向量库中的数据，并取消其可能正在排队
+     * 的问答增强任务（对齐 WeKnora 任务取消）。Python 服务不可用时忽略，不阻塞删除主流程。
+     */
+    public void deleteDocument(Long docId) {
+        try {
+            webClient.delete()
+                    .uri("/ai/document/{docId}", String.valueOf(docId))
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+        } catch (Exception e) {
+            log.warn("调 Python 删除文档向量失败 docId={} : {}", docId, e.getMessage());
+        }
+    }
+
+    /**
+     * 取消文档处理 — 调用 Python AI 服务清理该文档在向量库中的数据（若已写入），
+     * 并标记其问答增强任务取消（对齐 WeKnora 任务取消）。与 {@link #deleteDocument} 区别：
+     * 本方法不删除文档 DB 记录，仅清理向量与取消排队增强，配合 Java 侧将状态置为 cancelled。
+     * Python 服务不可用时忽略，不阻塞取消主流程。
+     */
+    public void cancelDocument(Long docId) {
+        try {
+            webClient.post()
+                    .uri("/ai/document/{docId}/cancel", String.valueOf(docId))
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+        } catch (Exception e) {
+            log.warn("调 Python 取消文档处理失败 docId={} : {}", docId, e.getMessage());
+        }
+    }
+
+    /**
      * 清检索结果缓存（L1）— 文档变更后调用，清该租户下 retrieval:{tenant}:*。
      * Python 服务不可用时忽略，不阻塞文档处理主流程。
      */
