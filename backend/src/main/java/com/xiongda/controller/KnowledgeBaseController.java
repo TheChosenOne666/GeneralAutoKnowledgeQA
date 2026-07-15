@@ -28,6 +28,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -99,6 +100,13 @@ public class KnowledgeBaseController {
         Path uploadDir = Path.of("uploads", String.valueOf(loginUser.getTenantId())).toAbsolutePath();
         Files.createDirectories(uploadDir);
         String originalFilename = file.getOriginalFilename();
+        // 修复 Spring/Tomcat 对 multipart 文件名的 ISO-8859-1 解码导致的中文乱码：
+        // 仅当文件名全部由 Latin-1 字符组成（疑似被误解码）时才还原，正确中文原样保留。
+        if (originalFilename != null
+                && StandardCharsets.ISO_8859_1.newEncoder().canEncode(originalFilename)) {
+            originalFilename = new String(
+                    originalFilename.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
+        }
         Path filePath = uploadDir.resolve(UUID.randomUUID() + "_" + originalFilename);
         file.transferTo(filePath.toFile());
 
