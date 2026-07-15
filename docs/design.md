@@ -280,7 +280,10 @@ Query 向量化（Embedding）
   └── 关键词检索（BM25，Top-K=20）
   │
   ▼
-Rerank 精排（Rerank API，Top-N=5）
+向量主导融合（语义优先，BM25 仅补充不足）
+  │
+  ▼
+LLM 重排（用已配置 LLM 对候选块打 0~1 相关性分并重排，抑制跨领域串味；见下）
   │
   ▼
 构建 Prompt（检索结果 + 系统提示 + 对话历史）
@@ -297,6 +300,10 @@ LLM 生成回答（SSE 流式输出）
 > - **query expansion**：主检索结果数 `< retrieval_expansion_min`（默认 3）时，`expand_query` 生成 1~2 个语义不同角度的扩展 query，分别检索后 RRF 合并兜底；任何异常降级不扩展。
 > - 开关：`core/config.py` 的 `enable_query_rewrite` / `enable_query_expansion`（默认开），可独立关闭。`retrieve` 的 L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）；rewrite / expansion 失败均不阻断主流程（配置错误除外）。
 > - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
+
+> **LLM 重排（2026-07-16，对齐 WeKnora Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。WeKnora 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 0.30）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
+
+> **重排候选池（2026-07-16 方案A）**：开启重排时，向量/BM25 融合不再直接取 `top_n`（默认 5）送重排，而是先取更大融合池 `retrieval_rerank_top_k`（默认 10），由 LLM 在整个池内精排后取 `top_n`。解决「模糊问句真正相关块未进前 `top_n`、LLM 只在这 `top_n` 内打分致全 0 漏召回」的回归；相关块落在第 6~10 位时能被救回，且不带回跨领域噪声（最终仍按阈值过滤取 `top_n`）。关闭重排（`method=none`）时该池不起作用，直接截断 `top_n`。L1 缓存 key 已纳入 `rerank_top_k` 与 `top_n`，切换后旧缓存自动失效。
 
 ### 5.3 Agent 多步推理（M4-1 + M4-B function calling 升级）
 
@@ -629,9 +636,9 @@ Python event_generator（routers/chat.py）
    │     └─ 未命中：
    │           ├─【L2 嵌入缓存】embedding:{text}:{model} 命中 → 复用 query 向量，跳过 Embedding API
    │           ├─ 向量检索 Top-K=20 + BM25 关键词检索 Top-K=20
-   │           ├─ RRF 融合去重（k=60）
-   │           ├─ Rerank 精排 Top-N=5（仅当配置 rerank_api_key；否则取前 5）
-   │           └─ 写 L1 缓存（TTL 3600s）
+   │           ├─ 向量主导融合（语义优先，BM25 仅补充不足）
+   │           ├─ LLM 重排 Top-N（用已配置 LLM 打 0~1 相关性分并重排，按阈值过滤跨主题块）
+   │           └─ 写 L1 缓存（TTL 3600s，key 含 rerank 方法，切换算法自动失效）
    │     检索失败 → 降级无上下文问答
    ├─ 有 sources → 发 event: sources（引用来源：文件名 / 页码 / 内容片段）
    ├─ 检索无结果兜底（见下「检索无结果兜底策略」）

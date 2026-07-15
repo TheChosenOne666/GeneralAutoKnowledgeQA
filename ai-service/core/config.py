@@ -65,7 +65,31 @@ class Settings(BaseSettings):
     retrieval_relevance_gate: bool = True       # 总开关
     retrieval_vector_min_relevance: float = 0.30  # 向量余弦相似度门槛（无 rerank 时使用）
     retrieval_bm25_min_relevance: float = 1.0     # BM25 分数门槛（关键词强相关时放宽向量门槛）
-    retrieval_rerank_min_relevance: float = 0.10  # Rerank 相关性分数门槛（配置 rerank 时使用）
+    retrieval_rerank_min_relevance: float = 0.30  # Rerank/LLM 重排相关性分数门槛（0~1，低于此的跨主题块剔除）
+    retrieval_vector_dominant: bool = True        # 向量可用时以语义检索为主，BM25 仅补充（抑制关键词噪声）
+    retrieval_relative_ratio: float = 0.80        # 相对相关性阈值：剔除与最优分差距超过此比例的跨主题噪声
+    retrieval_max_chunks_per_doc: int = 5         # 单文档最多进入 top-N 的块数（避免单文档刷屏；设为 top_n 即不限制）
+    retrieval_exclude_qa_blocks: bool = True      # 排除 QA 增强块（source 通常为空，不作为引用来源，与 get_original_chunks 一致）
+    # 语义平手时由词法重合度决胜：向量分与最优分差距 <= retrieval_bm25_tie_epsilon 视为平手，
+    # 若块内容与查询的 bigram 重合度 >= retrieval_bm25_tie_overlap_min，则按重合度 * boost 加权
+    # 抬升，让「后端规范」类关键词相关块优先于向量模型略偏的前端/JavaWeb 块。差距明显
+    # （如 0.565 vs 0.493）时不触发，保证向量主导对「后端刚入职」类问题的收敛效果不被噪声破坏。
+    # 注：用块内容与查询的词法重合度而非 BM25 物理块匹配，因 BM25 命中的常是 QA 增强块，
+    # 与原文块 key 不同，直接词法比对才能正确识别含查询关键词的原文块。
+    retrieval_bm25_tie_epsilon: float = 0.02      # 语义平手阈值（向量分差）
+    retrieval_bm25_tie_boost: float = 0.10        # 平手且词法命中时，重合度乘此权重作为抬升量
+    retrieval_bm25_tie_overlap_min: float = 0.25  # 触发平手决胜的最小词法重合度
+    retrieval_bm25_tie_top_n: int = 10            # 预留：参与平手决胜的 BM25 候选条数（当前未使用）
+
+    # 重排方式（对齐 WeKnora Rerank 跨领域判别意图，但用已配置的 LLM 代替写死的领域词 / OpenAI rerank endpoint）：
+    # - llm（默认）：用已配置的 LLM 对候选块逐块打 0~1 相关性分并重排，跨领域判别最稳、不写死领域，
+    #   且不新增服务 / 密钥（复用 AI 配置页已填的 LLM）。
+    # - api：调用 OpenAI 兼容 /rerank 接口（需配置 rerank_api_key；火山原生 rerank 非此格式，不可用）。
+    # - none：不做重排，直接截断 top_n。
+    retrieval_rerank_method: str = "llm"
+    retrieval_rerank_top_k: int = 10  # LLM/API 重排前的融合候选池大小：融合时先取更大池（>top_n），
+                                     # 重排再精排取 top_n，提升模糊问句召回（真正相关块未必进前 top_n），
+                                     # 又不带回跨领域噪声。关闭重排（method=none）时不起作用。
 
     # 普通问答增强（对齐 WeKnora KnowledgeQA 的 query rewrite + query expansion）：
     # 仅作用于 rag 模式（retrieve(enhance=True) 时触发），Agent 模式不开启（Agent 内部

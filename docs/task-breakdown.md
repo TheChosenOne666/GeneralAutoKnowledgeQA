@@ -400,6 +400,25 @@
 - ✅ 中文降级检索优化：向量 / BM25 均改用字符级 bigram，提升无 API Key 时演示命中率
 - ✅ 集成单测覆盖 process → retrieve 全链路
 
+#### 检索精度修复（2026-07-15 ~ 07-16）— 跨领域串味抑制 [Python] 🐞
+
+- **背景**：用户反馈「问后端却返回前端文档来源」（如「后端规范是什么」返回 3 前端 + 2 后端；「后端的任务是做什么需求」返回前端 + JavaWeb + 后端）。排查确非缓存问题（已清 L1 缓存 + 用真实配置复现）：短 query 经 query rewrite 后（如「后端规范」），弱向量模型把**前端块余弦分（0.636）评得比后端块（0.568）高**，向量主导融合 + 平手决胜阈值救不了；relative-ratio 过滤只能裁长尾、无法纠正错误排序。
+- **参照 WeKnora**：其跨领域判别**完全依赖 Rerank 精排**（cross-encoder 对 query+passage 联合打分，且按 `RerankThreshold` 阈值过滤跨主题块，见 `rerank.go:403-432`）。但本项目的 volcengine rerank 接口（`/api/knowledge/service/rerank`）是 VikingDB 专用、需 HMAC-SHA256 签名，**不兼容** OpenAI `/rerank` 格式，无法即插即用默认开启。
+- **方案演进**：
+  1. **07-15 初版（已废弃）**：用写死的 `DOMAIN_GROUPS` 文件名领域聚焦作兜底——用户指出这是写死领域词（如「后端」→ backend、「前端」→ frontend），仅覆盖白名单、对文件名无领域标签的文档（如《自动化测试新员工入职指南》）漏判，且新增领域需改代码。故废弃。
+  2. **07-16 终版（LLM 重排）**：改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）。融合后把 query + 候选块发给 LLM，要求逐块给 0~1 相关性分数，按分数重排并按阈值过滤跨主题块。**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），对任意新增领域自动生效；调用失败 / 分数不可解析时安全回退向量融合顺序（不静默吞错）。阈值过滤对齐 WeKnora（最优分仍 ≥ 0.15 保留 top1 兜底）。
+- **改动**：
+  - `services/rag.py`：删除 `DOMAIN_GROUPS` / `_domain_focus`；新增 `_rerank_with_llm`（调 `llm_service.complete` 打分）+ `_parse_rerank_scores`（稳健解析 JSON 分数数组）。`retrieve` 按 `retrieval_rerank_method`（`llm`/`api`/`none`，默认 `llm`）选择重排方式；原 OpenAI `/rerank` 路径保留为 `api`。
+  - `core/config.py`：`retrieval_domain_focus` → `retrieval_rerank_method`（默认 `llm`）；`retrieval_rerank_min_relevance` 由 0.10 提到 0.30（适配 LLM 0~1 分）；新增 `retrieval_rerank_top_k`（默认 10，重排候选池）。
+  - L1 缓存 key 纳入 `retrieval_rerank_method` + `retrieval_rerank_top_k` + `top_n`，切换算法/范围后旧缓存自动失效。
+
+#### 检索精度修复（2026-07-16 续）— 方案A 重排候选池扩大 [Python]
+- **背景**：方案A（用户采纳）针对「模糊问句真正相关块未进前 `top_n`，LLM 只在这 `top_n` 内打分致全 0 漏召回」的回归。实测「后端的任务是做什么需求」在 `top_n=5` 融合下相关后端块排不进前 5，LLM 重排后全 0 返回「无相关文档」。
+- **改动**：`rag.py` 的 `retrieve` 在开启重排时，融合候选池由 `top_n` 改为 `max(top_n, retrieval_rerank_top_k)`（默认 10），LLM 在整个池内精排后按阈值过滤取 `top_n`；未开启重排时仍直接截断 `top_n`。缓存 key 同步纳入 `rerank_top_k` 与 `top_n`。
+- **验证**：`tests/test_retrieval_merge.py` 新增 `test_rerank_pool_enlarged_before_rerank`（断言送重排候选数 `>= rerank_top_k`、最终截断到 `top_n`），全 10 例通过。真实 E2E（glm-5-2 + doubao-embedding-vision）：Q1「后端规范是什么」重排后只留 `JavaWeb笔记.docx`、不含前端；但 Q2「后端的任务是做什么需求」即便扩池到 10（且 `enhance=True` 含 query rewrite/expansion）仍返回「无相关文档」——根因为弱 embedding 对模糊问句连前 10 都召回不到真正相关块（召回天花板，非重排 bug）。已重启 8001（新 PID 12372，health 200）。
+- **待定（需用户定）**：Q2 类模糊问句若要进一步召回，可选 ① 把 `retrieval_rerank_top_k` 提到 20（向量/BM25 各 top20，融合池可到 20，glm 一次看 20 块更慢成本更高）；② 换更强 embedding 模型（bge-m3 等，根因修复但需重向量化全库）；③ 承认该模糊问句当前知识库覆盖不足，保持「无相关内容」的干净行为。
+- **验证**：`tests/test_retrieval_merge.py` 替换 2 例领域聚焦测试为 LLM 重排测试（模拟弱向量把前端评到后端之上 → LLM 重排剔除前端、保留后端/JavaWeb；LLM 返回非 JSON 时安全回退），全 9 例通过。
+
 ---
 
 ### M2-5 RAG 流式问答 [全栈] P0 · 1d ✅ 已完成
@@ -863,6 +882,11 @@ Python（AI 服务）
   - 新增 `GET /api/knowledge/document/file/status/{docId}` 前置校验接口：检测文件是否被删（`Files.exists` / `isRegularFile`）与被改（当前大小与上传记录的 `fileSize` 不一致），返回 `{ exists, changed, message, filename, fileType }`，供前端预览前判读，避免直接加载文件流。
   - 前端 `DocumentPreviewModal` 加载 iframe **前**先调 `knowledgeApi.checkDocumentFileStatus`：`exists=false`（被删/读取失败）→ 居中展示友好提示「原文件已被清理或删除，无法预览，请重新上传该文档」且不再加载 iframe；`changed=true`（被改）→ 顶部黄色警示条「检测发现原文件已被修改，预览内容可能与知识库索引不一致，建议重新上传该文档」并仍加载 iframe；校验中显示「正在校验原文件…」。任何分支均不再出现 Whitelabel 错误页。
   - 测试：新增 `KnowledgeBaseControllerTest`（7 例，覆盖文件存在 / 被删 / 被改 / 文档不存在 / 无权限 / 读取失败 / 正常返回 PDF 流）全过。
+- ✅ **Bug 修复（2026-07-15）— 文档原文/引用来源 Markdown 符号裸露（`**`、`#` 等未渲染）**：文档预览与引用来源片段此前用纯文本 `<pre>` / `whitespace-pre-wrap` 渲染，解析内容中的 markdown 标记会原样显示。修复：
+  - 前端 `KnowledgeBasePage.tsx` 文档全文预览（`viewContent`）由 `<pre>` 改为 `ReactMarkdown` + `remark-gfm` 渲染。
+  - 前端 `ChatPage.tsx` 两处：① 引用来源卡片片段（`source.content`）由 `whitespace-pre-wrap` 改为 `ReactMarkdown` + `remark-gfm`；② 原文件预览面板（`currentText`）由 `<pre>` 改为 `ReactMarkdown` + `remark-gfm`（保留缩放）。AI 回答主体此前已用 `ReactMarkdown` + `rehype-highlight` 渲染，不受影响。
+  - 依赖已具备（react-markdown ^10.1.0 / remark-gfm ^4.0.1 / rehype-highlight ^7.0.2）。lint 0 错误。
+- ✅ **Bug 修复（2026-07-15）— 上传中文文件名乱码加固**：Spring/Tomcat 对 multipart 文件名的 ISO-8859-1 解码会导致中文文件名乱码（如 `»°Ó­`），显示在文档列表与引用来源。修复 `KnowledgeBaseController.uploadDocument`：仅当文件名全部可由 ISO-8859-1 编码时还原为 UTF-8（正确中文原样保留），从源头防止新上传乱码。经全链路验证（Postgres→JDBC→Java HTTP 输出 / Python 提取 / 磁盘文件）均为标准 UTF-8、数据库内容/文件名/来源均无乱码，本次属上传环节潜在风险加固，不影响历史数据。
 
 ---
 
@@ -1394,5 +1418,30 @@ M3 全部 ──→ M4-9 部署
 - `mvn -Dtest=KnowledgeBaseControllerTest test` 编译通过（exit 0），`ArrayList cannot be resolved` 报错消除。
 - Java 后端干净重启（PID 13568，`Started MainApplication`，日志无任何 `Unresolved compilation` / `ArrayList cannot`），新类已加载。
 - 由用户侧手动验证：点「查看原文件」应能看到真实分页内容。如仍为空，需排查该文档 `content` 为空且原文件已不在磁盘两种兜底失效情形（已核查 `ready` 文档原文件均在，预期直接生效）。
+
+### 21. Bug 修复：检索召回发散（后端类问题混入前端/HR 来源 + QA 块冒充引用来源）（2026-07-15）
+**问题**：用户问「后端刚入职要干嘛」时，引用来源竟含 HR×2 + 前端×2 + 后端×1 多种文档；问「后端规范是什么」时引用来源全是前端文档。根因：旧 `retrieve` 用 **RRF 平等融合**——BM25 凭「入职 / 后端」等关键词把前端、HR、JavaWeb 块拉进 top-5，且问答增强生成的 QA 块（语义与原文高度重合、source 为空）被当作引用来源返回，导致来源发散、答非所问。
+
+**修复（检索融合策略重构，根因在检索层）**：
+- `ai-service/services/rag.py`：
+  - `_search_core` 改为返回**原始两路结果**（向量 + BM25 + 各自最高分），融合决策收归 `retrieve` 统一处理。
+  - **向量主导融合**（`_merge_vector_dominant`）：向量可用（余弦 ≥ `retrieval_vector_min_relevance`）时以语义排序为主、BM25 仅补充，抑制关键词噪声（修复「后端刚入职」类问题发散）。
+  - **语义平手 BM25 决胜**：向量分与最优分差距 ≤ `retrieval_bm25_tie_epsilon`（0.02，近乎平手）且块内容与查询的 bigram 词法重合度 ≥ `retrieval_bm25_tie_overlap_min`（0.25）时，按重合度 × `retrieval_bm25_tie_boost`（0.10）加权抬升，让「后端规范」类关键词相关块优先于向量模型略偏的前端/JavaWeb 块；差距明显（如 0.565 vs 0.493）时不触发，保证向量主导收敛效果不被破坏。用词法重合度而非 BM25 物理块匹配——因 BM25 命中的常是 QA 增强块（与原文块 key 不同），直接词法比对才能正确识别含查询关键词的原文块。
+  - **相对相关性过滤**：融合后按最终 top-N 最优分 × `retrieval_relative_ratio`（0.80）设下限，剔除跨主题噪声（平手决胜分仅用于排序，不改真实 score，门槛判定仍用真实余弦分）。
+  - **排除 QA 增强块**：`chunk_type == "qa"` 的块语义与原文重合却 source 为空、不应作引用来源；排除后若仍有原始块才替换，避免「候选全是 QA 块」误判为无相关文档。
+  - `_is_relevant` 修复 BM25 兜底误清空（生产 bug）：向量不可用走 BM25 兜底时，只要有 BM25 召回即视为相关（不再要求 `retrieval_bm25_min_relevance`）。
+- `ai-service/core/config.py`：新增 `retrieval_vector_dominant` / `retrieval_relative_ratio` / `retrieval_max_chunks_per_doc` / `retrieval_exclude_qa_blocks` / `retrieval_bm25_tie_epsilon` / `retrieval_bm25_tie_boost` / `retrieval_bm25_tie_overlap_min`（含 `retrieval_bm25_tie_top_n` 预留）等开关，默认即生效。
+- `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `chunk_type` 字段；`_bm25_search` / `InMemoryVectorStore.search` / `PgVectorStore.search`（`metadata->>'chunk_type'`）均填充——使 QA 块排除在真实 PG 数据上生效（`get_original_chunks` 早已排除 qa 块，本次检索侧与之对齐）。
+- `ai-service/tests/test_retrieval_merge.py`（新增，7 例）：向量主导抑制 BM25 噪声 / 单文档去重上限 / 零向量 BM25 兜底 / 空 source 回退 / 相对阈值剔除跨主题 / 语义平手抬升后端 / 排除 QA 块；隔离 L1 缓存（get_redis 抛异常）。
+
+**验证（真实租户 2075873177644326913 联调，420 块含 69 个 QA 块）**：
+- 直接查库确认 QA 块均带 `chunk_type='qa'`，排除在真实数据上可生效。
+- 「后端刚入职要干嘛」→ top3 全为后端文档（QA 块数=0）。
+- 「后端规范是什么」→ top5 为 JavaWeb + 3×后端 + 自动化测试（**前端文档已全部移出 top-5**，QA 块数=0）。
+- 修复前后语义平手决胜的关键差异：BM25 命中常是 QA 块（key 与原文不同），故改用块内容与查询的词法重合度，正确识别含「后端」的原文块。
+- 全量 ai-service 单测：本次检索相关 7 例全过；已知 3 例失败均为 `document_processor` 测试跨 `asyncio` 事件循环污染（预存、与本次无关）。
+
+**关联**：M2-4 RAG 检索服务（原 RRF 平等融合已升级为向量主导 + 平手决胜）；M4-8.1（chunk_type=qa 标记体系）；第 9 项（相关性门槛）。
+
 
 

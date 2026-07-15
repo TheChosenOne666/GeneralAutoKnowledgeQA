@@ -1,15 +1,17 @@
-"""RAG 检索服务 — 混合检索（向量 + BM25）+ RRF 融合 + 可选 Rerank 精排。
+"""RAG 检索服务 — 混合检索（向量 + BM25）+ 向量主导融合 + LLM 重排精排。
 
 使用全局 vector_store_service（与文档处理为同一实例，内存数据一致）：
 1. Query 向量化（Embedding）
 2. 向量检索（Top-K=20）
 3. BM25 关键词检索（Top-K=20）
-4. RRF 融合去重
-5. Rerank 精排（Top-N=5，未配置 rerank_api_key 则跳过）
+4. 向量主导融合（语义优先，BM25 仅补充不足）
+5. LLM 重排（用已配置 LLM 对候选块打 0~1 相关性分并重排，抑制弱向量跨领域串味；
+   对齐 WeKnora Rerank 意图但复用已有 LLM，不写死领域词、不新增服务）
 """
 
 import hashlib
 import json
+import re
 from dataclasses import asdict
 
 import httpx
@@ -19,19 +21,25 @@ from core.config import settings
 from core.redis_client import get_redis
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
+from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.query_rewrite import expand_query, rewrite_query
-from services.vector_store import RetrievalResult
+from services.vector_store import RetrievalResult, _bigrams
 
 
 class RagService:
     """RAG 检索服务。"""
 
-    @staticmethod
-    def _cache_key(query: str, kb_ids: list[str], tenant_id: str) -> str:
-        """L1 缓存 key：retrieval:{tenant_id}:{q_hash}（跨会话 tenant 级）。"""
+    def _cache_key(self, query: str, kb_ids: list[str], tenant_id: str, top_n: int) -> str:
+        """L1 缓存 key：retrieval:{tenant_id}:{q_hash}（跨会话 tenant 级）。
+
+        纳入 rerank 方式与候选池大小 + top_n，确保算法 / 范围变更后旧缓存自动失效。
+        """
         kb_part = ",".join(sorted(kb_ids)) if kb_ids else ""
-        q_hash = hashlib.md5(f"{query}|{kb_part}".encode("utf-8")).hexdigest()
+        q_hash = hashlib.md5(
+            f"{query}|{kb_part}|{settings.retrieval_rerank_method}|"
+            f"{settings.retrieval_rerank_top_k}|{top_n}".encode("utf-8")
+        ).hexdigest()
         return f"retrieval:{tenant_id}:{q_hash}"
 
     async def retrieve(
@@ -61,7 +69,7 @@ class RagService:
         Returns:
             精排后的检索结果列表
         """
-        cache_key = self._cache_key(query, kb_ids, tenant_id)
+        cache_key = self._cache_key(query, kb_ids, tenant_id, top_n)
         try:
             r = await get_redis()
             cached = await r.get(cache_key)
@@ -85,37 +93,72 @@ class RagService:
                 logger.info(f"[检索诊断] query 改写: {query!r} -> {rewritten!r}")
                 search_query = rewritten
 
-        merged, best_vec, best_bm25 = await self._search_core(
+        vec_results, bm25_results, best_vec, best_bm25 = await self._search_core(
             search_query, kb_ids, tenant_id, cfg
         )
 
-        # A2 query expansion：主检索召回不足时，生成扩展 query 再检索并 RRF 合并兜底
-        if enhance and settings.enable_query_expansion and len(merged) < settings.retrieval_expansion_min:
+        # A2 query expansion：主检索召回不足时，生成扩展 query 再检索并合并兜底
+        if enhance and settings.enable_query_expansion and len(vec_results) < settings.retrieval_expansion_min:
             try:
                 expansions = await expand_query(query, cfg=cfg)
             except Exception as e:
                 logger.warning(f"query expansion 失败，跳过: {e}")
                 expansions = []
             for eq in expansions:
-                m2, bv2, bb2 = await self._search_core(eq, kb_ids, tenant_id, cfg)
-                if m2:
-                    merged = self._rrf([merged, m2])
+                v2, b2, bv2, bb2 = await self._search_core(eq, kb_ids, tenant_id, cfg)
+                if v2:
+                    vec_results = vec_results + v2
+                    bm25_results = bm25_results + b2
                     best_vec = max(best_vec, bv2)
                     best_bm25 = max(best_bm25, bb2)
-                    logger.info(f"[检索诊断] expansion query={eq!r} 命中={len(m2)}")
+                    logger.info(f"[检索诊断] expansion query={eq!r} 命中={len(v2)}")
 
-        # 5. Rerank 精排（未配置 rerank_api_key 则跳过）
+        # 5. 融合策略：向量（语义）可用时主导，BM25 仅补充不足，抑制关键词噪声
+        # 重排候选池：开启重排时融合先用更大池（rerank_top_k），重排再精排取 top_n，
+        # 解决「模糊问句真正相关块未进前 top_n，LLM 只在这 top_n 内打分致全 0」的召回回归。
+        rerank_method = settings.retrieval_rerank_method
         rerank_key = (cfg.rerank_api_key if cfg and cfg.rerank_api_key else None) or settings.rerank_api_key
+        will_rerank = rerank_method in ("llm", "api") and (
+            (rerank_method == "llm" and cfg and cfg.has_llm())
+            or (rerank_method == "api" and rerank_key)
+        )
+        rerank_pool = max(top_n, settings.retrieval_rerank_top_k) if will_rerank else top_n
+        if settings.retrieval_vector_dominant and vec_results and best_vec >= settings.retrieval_vector_min_relevance:
+            merged = self._merge_vector_dominant(vec_results, bm25_results, rerank_pool, search_query)
+        else:
+            merged = bm25_results[:rerank_pool]
+
+        # 5.5 排除 QA 增强块：chunk_type == "qa" 的块由问答对生成、source 通常为空，
+        # 语义与原文高度重合却不应作为引用来源；排除后再做领域聚焦 / rerank / 阈值判定。
+        # 仅当排除后仍非空才替换，避免「候选全是 QA 块」时误判为无相关文档。
+        if settings.retrieval_exclude_qa_blocks:
+            non_qa = [r for r in merged if r.chunk_type != "qa"]
+            if non_qa:
+                merged = non_qa
+
+        # 5.6 LLM 重排精排（领域无关：用已配置 LLM 对候选块按相关性打分排序，
+        # 抑制弱向量模型对短 query 的跨领域串味，如问「后端」却返回「前端」块）。
         rerank_applied = False
-        if rerank_key:
-            merged, rerank_applied = await self._rerank(
-                search_query,
-                merged,
-                top_n,
-                rerank_key,
-                (cfg.rerank_base_url if cfg else None) or settings.rerank_base_url,
-                (cfg.rerank_model if cfg else None) or settings.rerank_model,
-            )
+        if will_rerank:
+            if rerank_method == "llm":
+                merged, rerank_applied = await self._rerank_with_llm(search_query, merged, top_n, cfg)
+            else:  # api
+                merged, rerank_applied = await self._rerank(
+                    search_query,
+                    merged,
+                    top_n,
+                    rerank_key,
+                    (cfg.rerank_base_url if cfg else None) or settings.rerank_base_url,
+                    (cfg.rerank_model if cfg else None) or settings.rerank_model,
+                )
+        # 重排阈值过滤（对齐 WeKnora rerank.go：低于阈值的跨主题块直接剔除，
+        # 仅当最优分仍 >= 0.15 时保留 top1 兜底，避免全部误删）。未重排时直接截断 top_n。
+        if rerank_applied:
+            th = settings.retrieval_rerank_min_relevance
+            kept = [r for r in merged if r.score >= th]
+            if not kept and merged and merged[0].score >= 0.15:
+                kept = merged[:1]
+            merged = kept[:top_n] if kept else merged[:top_n]
         else:
             merged = merged[:top_n]
 
@@ -123,11 +166,18 @@ class RagService:
         logger.info(
             f"[检索诊断] query={query!r} search_query={search_query!r} kb_ids={kb_ids} tenant={tenant_id} "
             f"vec_top={best_vec:.3f} bm25_top={best_bm25:.3f} "
-            f"merged={len(merged)} rerank={'on' if rerank_key else 'off'}"
+            f"merged={len(merged)} rerank={'on(' + rerank_method + ')' if rerank_applied else 'off'}"
         )
 
-        # 6. 相关性门槛：检索结果全部不相关时视为「无相关文档」，返回空，
-        #    避免下游（chat 路由）把不相关的错误引用来源展示给用户
+        # 7. 相对相关性过滤：剔除与最优分差距过大的跨主题噪声（基于最终 top-N）
+        if settings.retrieval_relevance_gate and merged:
+            best = merged[0].score
+            floor = max(best * settings.retrieval_relative_ratio, settings.retrieval_vector_min_relevance)
+            filtered = [r for r in merged if r.score >= floor]
+            if filtered:
+                merged = filtered
+
+        # 8. 相关性门槛（全局信号兜底）：全部不相关时视为「无相关文档」
         if settings.retrieval_relevance_gate and merged and not self._is_relevant(
             merged, rerank_applied, best_vec, best_bm25
         ):
@@ -154,11 +204,12 @@ class RagService:
         kb_ids: list[str],
         tenant_id: str,
         cfg: ModelConfig | None,
-    ) -> tuple[list[RetrievalResult], float, float]:
-        """单次混合检索：Query 向量化 + 向量检索 + BM25 + RRF 融合。
+    ) -> tuple[list[RetrievalResult], list[RetrievalResult], float, float]:
+        """单次混合检索：Query 向量化 + 向量检索 + BM25。
 
-        返回 ``(融合结果, 向量最高分, BM25 最高分)``。向量 / BM25 最高分用于
-        相关性门槛判定（RRF 分数会覆盖原始分数，故先在此取原始最高信号）。
+        返回 ``(向量结果, BM25结果, 向量最高分, BM25最高分)``。融合策略交由
+        :meth:`retrieve` 统一决策（向量可用时主导，BM25 仅补充）。向量不可用
+        （Key 失效）时 ``embed_text`` 抛 ``ModelConfigError`` 向上传播，由 chat 路由提示用户重配。
         """
         # 1. Query 向量化
         query_vec = await embedding_service.embed_text(query, cfg)
@@ -176,9 +227,7 @@ class RagService:
         best_vec = vec_results[0].score if vec_results else 0.0
         best_bm25 = bm25_results[0].score if bm25_results else 0.0
 
-        # 4. RRF 融合去重
-        merged = self._rrf([vec_results, bm25_results])
-        return merged, best_vec, best_bm25
+        return vec_results, bm25_results, best_vec, best_bm25
 
     async def _rerank(
         self,
@@ -229,6 +278,94 @@ class RagService:
             return results[:top_n], False
         return ordered, True
 
+    def _merge_vector_dominant(
+        self,
+        vec_results: list[RetrievalResult],
+        bm25_results: list[RetrievalResult],
+        top_n: int,
+        search_query: str = "",
+    ) -> list[RetrievalResult]:
+        """向量主导融合：以向量检索结果为主排序，BM25 仅补充向量不足部分。
+
+        - 向量结果按余弦相似度排序优先入选；
+        - 语义平手（向量分与最优分差距 <= ``retrieval_bm25_tie_epsilon``）且词法重合度
+          （块内容与查询的 bigram 重合比例）>= ``retrieval_bm25_tie_overlap_min`` 时，按重合度
+          加权抬升，让「后端规范」类关键词相关块优先于向量模型略偏的前端/JavaWeb 块
+          （差距明显时不触发，保证「后端刚入职」类问题的收敛）；
+        - 向量不足 top_n 时，从 BM25 补充强相关（``score >= retrieval_bm25_min_relevance``）且未被向量覆盖的块；
+        - 单文档最多 ``retrieval_max_chunks_per_doc`` 个块，避免单文档刷屏；
+        - 空 source 块回退到同文档任一非空 source，保证引用来源可读。
+        """
+        seen: set[tuple] = set()
+        per_doc: dict[str, int] = {}
+        max_per_doc = settings.retrieval_max_chunks_per_doc
+
+        # 语义平手决胜：用块内容与查询的词法重合度（而非 BM25 物理块匹配，因 BM25 命中的
+        # 常是 QA 增强块，与原文块 key 不同），更稳健地识别「含查询关键词」的原文块。
+        q_bigrams = set(_bigrams(search_query)) if search_query else set()
+        best_vec = vec_results[0].score if vec_results else 0.0
+        eps = settings.retrieval_bm25_tie_epsilon
+        boost = settings.retrieval_bm25_tie_boost
+        overlap_min = settings.retrieval_bm25_tie_overlap_min
+
+        def _lex_overlap(r: RetrievalResult) -> float:
+            if not q_bigrams:
+                return 0.0
+            inter = q_bigrams & set(_bigrams(r.content))
+            return len(inter) / len(q_bigrams)
+
+        def _tie_adj(r: RetrievalResult) -> float:
+            """平手决胜分数：向量分，平手且词法命中时按重合度加权抬升（仅用于排序，不改真实 score）。"""
+            if q_bigrams and best_vec - r.score <= eps:
+                ov = _lex_overlap(r)
+                if ov >= overlap_min:
+                    return r.score + ov * boost
+            return r.score
+
+        # 按平手决胜分降序确定入选顺序
+        ordered = sorted(vec_results, key=_tie_adj, reverse=True)
+
+        def _accept(r: RetrievalResult) -> bool:
+            key = (r.doc_id, r.kb_id, r.chunk_index)
+            if key in seen:
+                return False
+            if per_doc.get(r.doc_id, 0) >= max_per_doc:
+                return False
+            return True
+
+        def _add(r: RetrievalResult) -> None:
+            key = (r.doc_id, r.kb_id, r.chunk_index)
+            seen.add(key)
+            per_doc[r.doc_id] = per_doc.get(r.doc_id, 0) + 1
+
+        merged: list[RetrievalResult] = []
+        for r in ordered:
+            if _accept(r):
+                _add(r)
+                merged.append(r)
+            if len(merged) >= top_n:
+                break
+
+        if len(merged) < top_n:
+            for r in bm25_results:
+                if r.score < settings.retrieval_bm25_min_relevance:
+                    continue
+                if _accept(r):
+                    _add(r)
+                    merged.append(r)
+                if len(merged) >= top_n:
+                    break
+
+        # 回填空 source：同 doc_id 用其任一非空 source
+        doc_source: dict[str, str] = {}
+        for r in merged:
+            if r.source and r.doc_id not in doc_source:
+                doc_source[r.doc_id] = r.source
+        for r in merged:
+            if not r.source and r.doc_id in doc_source:
+                r.source = doc_source[r.doc_id]
+        return merged
+
     @staticmethod
     def _is_relevant(
         merged: list[RetrievalResult],
@@ -243,10 +380,90 @@ class RagService:
         """
         if rerank_applied:
             return merged[0].score >= settings.retrieval_rerank_min_relevance
-        return (
-            best_vec >= settings.retrieval_vector_min_relevance
-            or best_bm25 >= settings.retrieval_bm25_min_relevance
+        if best_vec >= settings.retrieval_vector_min_relevance:
+            return True
+        # 向量不可用（走 BM25 兜底）：只要有 BM25 召回即视为相关，
+        # 不要求 retrieval_bm25_min_relevance（那是向量主导时 BM25 补充的强相关门槛）
+        return best_bm25 > 0.0
+
+    async def _rerank_with_llm(
+        self,
+        query: str,
+        results: list[RetrievalResult],
+        top_n: int = 5,
+        cfg: ModelConfig | None = None,
+    ) -> tuple[list[RetrievalResult], bool]:
+        """用已配置的 LLM 对候选块做语义重排（替代写死的领域聚焦 / OpenAI rerank endpoint）。
+
+        把 query + 候选块发给 LLM，要求其逐块给出 0~1 相关性分数，再按分数重排并按阈值过滤，
+        比弱向量模型更能判别跨领域片段（如「后端规范」应匹配后端而非前端内容），且不写死任何
+        领域词、不新增服务（复用 AI 配置页已填的 LLM）。
+
+        Returns:
+            ``(重排后结果, 是否真正应用 LLM 分数)``。LLM 调用失败 / 分数不可解析时回退原顺序并
+            标记未应用，由上层按截断逻辑兜底，绝不静默吞错。
+        """
+        if not results or not cfg or not cfg.has_llm():
+            return results, False
+        labeled = [f"[{i}] {r.content[:300]}" for i, r in enumerate(results)]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是检索相关性评判器。根据用户问题，对给定的若干文本片段逐一评估与问题的相关程度，"
+                    "给出 0 到 1 之间的相关性分数（1=高度相关，0=完全无关）。只输出一个 JSON 数组，"
+                    "每个元素为对应片段的相关性分数（浮点数），顺序与输入编号一致。不要输出多余解释。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"问题：{query}\n\n片段：\n" + "\n".join(labeled) + "\n\n"
+                    f"请输出长度为 {len(results)} 的 JSON 数组，例如 [0.9, 0.2, 0.7]，只输出该数组。"
+                ),
+            },
+        ]
+        try:
+            raw = await llm_service.complete(messages, cfg=cfg)
+        except ModelConfigError as e:
+            logger.warning(f"[检索诊断][LLM重排] 配置错误，跳过重排: {e}")
+            return results, False
+        except Exception as e:
+            logger.warning(f"[检索诊断][LLM重排] 调用失败，跳过重排: {e}")
+            return results, False
+        scores = self._parse_rerank_scores(raw, len(results))
+        if scores is None:
+            logger.warning(f"[检索诊断][LLM重排] 分数解析失败，跳过重排: {raw[:120]}")
+            return results, False
+        for r, s in zip(results, scores):
+            r.score = float(s)
+        ordered = [r for _, r in sorted(zip(scores, results), key=lambda x: x[0], reverse=True)]
+        logger.info(
+            f"[检索诊断][LLM重排] query={query!r} 分数={[round(s, 2) for s in scores]}"
         )
+        return ordered, True
+
+    @staticmethod
+    def _parse_rerank_scores(raw: str, n: int) -> list[float] | None:
+        """从 LLM 输出中提取长度为 ``n`` 的分数数组；格式不符返回 None。"""
+        if not raw:
+            return None
+        m = re.search(r"\[[\s\S]*?\]", raw)
+        if not m:
+            return None
+        try:
+            arr = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(arr, list) or len(arr) != n:
+            return None
+        out: list[float] = []
+        for v in arr:
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                return None
+        return out
 
     @staticmethod
     def _rrf(results_list: list[list[RetrievalResult]], k: int = 60) -> list[RetrievalResult]:

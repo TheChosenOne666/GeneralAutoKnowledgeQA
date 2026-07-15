@@ -29,6 +29,7 @@ class RetrievalResult:
     doc_id: str = ""
     kb_id: str = ""
     chunk_index: int = 0
+    chunk_type: str = ""
 
 
 class _ChunkRecord:
@@ -87,7 +88,7 @@ def _bm25_search(records: list[_ChunkRecord], query: str, top_k: int = 20) -> li
             scored.append((score, r))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [
-        RetrievalResult(
+            RetrievalResult(
             content=r.content,
             source=r.metadata.get("source", ""),
             page=r.metadata.get("page", 0),
@@ -95,6 +96,7 @@ def _bm25_search(records: list[_ChunkRecord], query: str, top_k: int = 20) -> li
             doc_id=r.metadata.get("doc_id", ""),
             kb_id=r.metadata.get("kb_id", ""),
             chunk_index=r.metadata.get("chunk_index", 0),
+            chunk_type=r.metadata.get("chunk_type", ""),
         )
         for s, r in scored[:top_k]
     ]
@@ -143,6 +145,7 @@ class InMemoryVectorStore:
                     doc_id=r.metadata.get("doc_id", ""),
                     kb_id=r.metadata.get("kb_id", ""),
                     chunk_index=r.metadata.get("chunk_index", 0),
+                    chunk_type=r.metadata.get("chunk_type", ""),
                 )
             )
         results.sort(key=lambda x: x.score, reverse=True)
@@ -265,6 +268,7 @@ class PgVectorStore:
             if kb_ids:
                 rows = await conn.fetch(
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
+                              metadata->>'chunk_type' AS chunk_type,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3 AND kb_id = ANY($4)
@@ -279,6 +283,7 @@ class PgVectorStore:
             else:
                 rows = await conn.fetch(
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
+                              metadata->>'chunk_type' AS chunk_type,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3
@@ -298,6 +303,7 @@ class PgVectorStore:
                 doc_id=r["doc_id"],
                 kb_id=r["kb_id"],
                 chunk_index=r["chunk_index"],
+                chunk_type=r["chunk_type"] or "",
             )
             for r in rows
         ]
