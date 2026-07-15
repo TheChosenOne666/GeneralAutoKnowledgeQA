@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     retrieval_relevance_gate: bool = True       # 总开关
     retrieval_vector_min_relevance: float = 0.30  # 向量余弦相似度门槛（无 rerank 时使用）
     retrieval_bm25_min_relevance: float = 1.0     # BM25 分数门槛（关键词强相关时放宽向量门槛）
-    retrieval_rerank_min_relevance: float = 0.30  # Rerank/LLM 重排相关性分数门槛（0~1，低于此的跨主题块剔除）
+    retrieval_rerank_min_relevance: float = 0.40  # Rerank/LLM 重排相关性分数门槛（0~1，低于此的跨主题块剔除）
     retrieval_vector_dominant: bool = True        # 向量可用时以语义检索为主，BM25 仅补充（抑制关键词噪声）
     retrieval_relative_ratio: float = 0.80        # 相对相关性阈值：剔除与最优分差距超过此比例的跨主题噪声
     retrieval_max_chunks_per_doc: int = 5         # 单文档最多进入 top-N 的块数（避免单文档刷屏；设为 top_n 即不限制）

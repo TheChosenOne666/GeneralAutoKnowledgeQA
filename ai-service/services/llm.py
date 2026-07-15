@@ -171,21 +171,38 @@ class LlmService:
 
     @staticmethod
     async def _iter_tokens(response: httpx.Response) -> AsyncGenerator[str, None]:
-        """解析 SSE 流，逐 token yield 内容。"""
+        """解析 SSE 流，逐 token yield 内容。
+
+        采用 ``aiter_bytes`` 累积原始字节、按行切分后再整行 ``decode("utf-8")``，
+        而非 ``aiter_lines`` 的自动解码。原因：``aiter_lines`` 在 LLM 流的分块边界
+        可能把多字节中文字符截成两半，被 UTF-8 解码器替换成乱码符 U+FFFD；整行解码
+        因行以 ``\\n`` 分隔、字符不会跨行截断，可彻底避免该问题。
+        """
         response.raise_for_status()
-        async for line in response.aiter_lines():
-            if not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-                content = chunk["choices"][0]["delta"].get("content", "")
-                if content:
-                    yield content
-            except (json.JSONDecodeError, KeyError, IndexError):
-                continue
+        buf = b""
+        async for raw in response.aiter_bytes():
+            buf += raw
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                try:
+                    line = line_bytes.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    # 极端情况下字节损坏则跳过该行，避免 U+FFFD 污染
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    return
+                try:
+                    chunk = json.loads(data)
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    if content:
+                        if "\ufffd" in content:
+                            logger.warning("[乱码诊断] _iter_tokens 仍出现 U+FFFD token=%r", content)
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
 
     async def stream_agent_turn(
         self,
@@ -214,23 +231,38 @@ class LlmService:
 
         OpenAI 兼容 API 的 ``delta.tool_calls`` 采用分片增量（``index`` 标识同一调用，
         ``function.arguments`` 逐片拼接），流末一次性产出完整工具调用列表。
+
+        同 ``_iter_tokens``，使用 ``aiter_bytes`` 累积字节整行解码，避免中文字符在流边界
+        被截断成乱码符 U+FFFD。
         """
         response.raise_for_status()
+        buf = b""
+        done = False
         acc: dict = {}
-        async for line in response.aiter_lines():
-            if not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-                delta = chunk["choices"][0]["delta"]
-            except (json.JSONDecodeError, KeyError, IndexError):
-                continue
-            content = delta.get("content")
-            if content:
-                yield {"type": "token", "content": content}
+        async for raw in response.aiter_bytes():
+            buf += raw
+            while b"\n" in buf:
+                line_bytes, buf = buf.split(b"\n", 1)
+                try:
+                    line = line_bytes.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    done = True
+                    break
+                try:
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0]["delta"]
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+                content = delta.get("content")
+                if content:
+                    if "\ufffd" in content:
+                        logger.warning("[乱码诊断] _iter_tokens_with_tools 仍出现 U+FFFD token=%r", content)
+                    yield {"type": "token", "content": content}
             for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index", 0)
                 slot = acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
@@ -239,8 +271,10 @@ class LlmService:
                 fn = tc.get("function") or {}
                 if fn.get("name"):
                     slot["name"] += fn["name"]
-                if fn.get("arguments"):
-                    slot["arguments"] += fn["arguments"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+            if done:
+                break
         calls = [
             {"id": s["id"] or f"call_{i}", "name": s["name"], "arguments": s["arguments"]}
             for i, s in sorted(acc.items())
