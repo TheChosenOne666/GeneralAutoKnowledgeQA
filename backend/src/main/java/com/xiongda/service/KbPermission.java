@@ -43,7 +43,7 @@ public final class KbPermission {
     /**
      * 校验能否写入知识库（上传 / 删除文档）。
      *
-     * <p>判定顺序对齐 WeKnora 的 own-KB 优先模型（kb_access.go 第一步
+     * <p>判定顺序对齐 业界的 own-KB 优先模型（kb_access.go 第一步
      * {@code kb.TenantID == tenantID}）：
      * <ol>
      *   <li>平台超管（super_admin）跨租户完全放行</li>
@@ -53,11 +53,11 @@ public final class KbPermission {
      */
     public static void assertCanWrite(KnowledgeBase kb, Long userId, Long callerTenantId, String role) {
         ThrowUtils.throwIf(kb == null, ErrorCode.NOT_FOUND_ERROR, "知识库不存在");
-        // 平台超管跨租户完全放行（对应 WeKnora 的 SystemAdmin 跨租户超管）
+        // 平台超管跨租户完全放行（对应 业界的 SystemAdmin 跨租户超管）
         if (UserConstant.SUPER_ADMIN_ROLE.equals(role)) {
             return;
         }
-        // 第一维度：租户隔离（对齐 WeKnora own-KB 判定 kb.TenantID == tenantID）
+        // 第一维度：租户隔离（对齐 业界 own-KB（自有 KB）判定 kb.TenantID == tenantID）
         ThrowUtils.throwIf(!callerTenantId.equals(kb.getTenantId()),
                 ErrorCode.NO_AUTH_ERROR, "无权操作其他租户的知识库");
         if (KbScopeEnum.SHARED.getValue().equals(kb.getScope())) {

@@ -154,7 +154,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         ThrowUtils.throwIf(loginUser.getIsActive() == 0, ErrorCode.FORBIDDEN_ERROR, "用户已被停用");
 
         // 平台超管支持通过 X-Tenant-ID 请求头切换到指定租户，从而以该租户身份操作其资源
-        // （对齐 WeKnora 的 TenantSelector：超管切进某租户后当作 admin）。
+        // （对齐 业界的 TenantSelector：超管切进某租户后当作 admin）。
         // 仅 super_admin 采纳该头，普通用户忽略，防止越权切换租户。
         if (UserConstant.SUPER_ADMIN_ROLE.equals(loginUser.getRole())) {
             String targetTenant = request.getHeader(CommonConstant.TENANT_HEADER);
@@ -324,7 +324,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         user.setRole(invitation.getRole());
         user.setIsActive(1);
 
-        // 租户成员数配额校验（对齐 WeKnora：达到上限即拒绝，<=0 视为不限）
+        // 租户成员数配额校验（对标业界成熟方案：达到上限即拒绝，<=0 视为不限）
         Tenant tenant = tenantMapper.selectById(invitation.getTenantId());
         if (tenant != null && tenant.getMaxMembers() != null && tenant.getMaxMembers() > 0) {
             QueryWrapper<User> cntQw = new QueryWrapper<>();

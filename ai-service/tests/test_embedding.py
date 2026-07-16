@@ -16,7 +16,7 @@ import httpx
 import json
 
 from services.embedding import EmbeddingService, get_redis
-from services.model_config import ModelConfig, ModelConfigError
+from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError
 
 
 class EmbeddingServiceTest(unittest.TestCase):
@@ -71,6 +71,27 @@ class EmbeddingServiceTest(unittest.TestCase):
         with self.assertRaises(ModelConfigError):
             asyncio.run(self.svc.embed_text("hello", cfg, client))
 
+    def test_429_raises_quota_error(self):
+        """持续 429（限流 / 额度不足）→ 抛 ModelQuotaError（而非 ModelConfigError）。"""
+        cfg = self._cfg(dim=2)
+
+        def handler(request):
+            return httpx.Response(429, json={"error": "rate limit exceeded"})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ModelQuotaError):
+            asyncio.run(self.svc.embed_text("hello", cfg, client))
+
+    def test_4xx_quota_keyword_raises_quota_error(self):
+        """4xx 但响应体含额度关键词（quota / insufficient balance）→ 抛 ModelQuotaError。"""
+        cfg = self._cfg(dim=2)
+        handler = lambda request: httpx.Response(
+            403, json={"error": "quota exceeded, insufficient balance"}
+        )
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with self.assertRaises(ModelQuotaError):
+            asyncio.run(self.svc.embed_text("hello", cfg, client))
+
     def test_embed_batch_dimension_check(self):
         cfg = self._cfg(dim=8)
         client = self._client([[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]])
@@ -95,6 +116,7 @@ class EmbeddingServiceTest(unittest.TestCase):
     def test_multimodal_embed_text_endpoint_and_format(self):
         cfg = ModelConfig(
             embedding_api_key="k",
+            embedding_provider="火山方舟",
             embedding_model="doubao-embedding-vision-251215",
             embedding_base_url="https://ark.example.com/api/v3",
             embedding_dimension=4,
@@ -112,6 +134,7 @@ class EmbeddingServiceTest(unittest.TestCase):
     def test_multimodal_embed_batch_endpoint_and_format(self):
         cfg = ModelConfig(
             embedding_api_key="k",
+            embedding_provider="火山方舟",
             embedding_model="doubao-embedding-vision-251215",
             embedding_base_url="https://ark.example.com/api/v3",
             embedding_dimension=4,
@@ -130,6 +153,7 @@ class EmbeddingServiceTest(unittest.TestCase):
     def test_standard_embedding_endpoint_and_format(self):
         cfg = ModelConfig(
             embedding_api_key="k",
+            embedding_provider="OpenAI",
             embedding_model="text-embedding-3-small",
             embedding_base_url="https://ark.example.com/api/v3",
             embedding_dimension=4,
@@ -140,6 +164,117 @@ class EmbeddingServiceTest(unittest.TestCase):
         self.assertEqual(len(v), 4)
         self.assertEqual(captured["requests"][0]["path"], "/api/v3/embeddings")
         self.assertEqual(captured["requests"][0]["body"]["input"], ["hello"])
+        self.assertEqual(captured["requests"][0]["body"]["dimensions"], 4)
+
+    def test_standard_embedding_passes_dimensions(self):
+        """标准（非多模态）Embedding 路径也应透传 dimensions。
+
+        修复前标准路径不传 dimensions，导致模型返回默认维度（如阿里云百炼
+        qwen3.7-text-embedding 默认 1024）与配置维度（如 1536）不符而报错。
+        """
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_provider="阿里云百炼",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_base_url="https://dashscope.example.com/compatible-mode/v1",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        v = asyncio.run(self.svc.embed_text("hello", cfg, client))
+        self.assertEqual(len(v), 4)
+        self.assertEqual(captured["requests"][0]["path"], "/compatible-mode/v1/embeddings")
+        self.assertEqual(captured["requests"][0]["body"]["dimensions"], 4)
+
+    def test_embedding_dimension_required(self):
+        """未填写向量维度时，Embedding 调用必须直接报错（绝不回退默认值）。"""
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_base_url="https://dashscope.example.com/compatible-mode/v1",
+            embedding_dimension=None,
+        )
+        client = self._client_with_capture({})
+        with self.assertRaises(ModelConfigError):
+            asyncio.run(self.svc.embed_text("hello", cfg, client))
+
+    def test_multimodal_embedding_always_passes_dimensions(self):
+        """多模态 Embedding 路径透传 dimensions（火山方舟在白名单内）。"""
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_provider="火山方舟",
+            embedding_model="doubao-embedding-vision",
+            embedding_base_url="https://ark.example.com/api/v3",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        v = asyncio.run(self.svc.embed_text("hello", cfg, client))
+        self.assertEqual(len(v), 4)
+        self.assertEqual(captured["requests"][0]["path"], "/api/v3/embeddings/multimodal")
+        self.assertEqual(captured["requests"][0]["body"]["dimensions"], 4)
+
+    def test_bge_embedding_does_not_pass_dimensions(self):
+        """白名单外的提供商（如 BGE）不识别 dimensions 参数，必须不传、使用模型默认维度。"""
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_provider="BGE",
+            embedding_model="bge-m3",
+            embedding_base_url="https://api.siliconflow.cn/v1",
+            embedding_dimension=4,
+        )
+        captured: dict = {}
+        client = self._client_with_capture(captured)
+        v = asyncio.run(self.svc.embed_text("hello", cfg, client))
+        self.assertEqual(len(v), 4)
+        self.assertEqual(captured["requests"][0]["path"], "/v1/embeddings")
+        self.assertNotIn("dimensions", captured["requests"][0]["body"])
+
+
+    def test_standard_embedding_batches_large_input(self):
+        """标准路径对超过单批上限的 input 自动分批（每批 ≤ EMBEDDING_BATCH_SIZE）。
+
+        修复前整批发送会因百炼「batch size is invalid, it should not be larger than 20」
+        而报 HTTP 400。此处用 25 条触发 2 批（20 + 5），校验分批次数、批大小上限与结果数量。
+        """
+        from services.embedding import EMBEDDING_BATCH_SIZE
+
+        cfg = ModelConfig(
+            embedding_api_key="k",
+            embedding_provider="OpenAI",
+            embedding_model="text-embedding-3-small",
+            embedding_base_url="https://ark.example.com/api/v3",
+            embedding_dimension=4,
+        )
+        n = 25
+        captured: dict = {}
+
+        def handler(request):
+            body = json.loads(request.content)
+            batch = body["input"]
+            captured.setdefault("requests", []).append(batch)
+            # 按当前批次 input 数量返回对应条数向量，每条带 index 保序
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": [0.1, 0.2, 0.3, 0.4], "index": i}
+                        for i in range(len(batch))
+                    ]
+                },
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        texts = [f"t{i}" for i in range(n)]
+        vs = asyncio.run(self.svc.embed_batch(texts, cfg, client))
+        self.assertEqual(len(vs), n)
+        # 分批次数 = ceil(n / BATCH_SIZE)
+        self.assertEqual(
+            len(captured["requests"]), (n + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+        )
+        for batch in captured["requests"]:
+            self.assertLessEqual(len(batch), EMBEDDING_BATCH_SIZE)
+        self.assertTrue(all(len(v) == 4 for v in vs))
 
 
 if __name__ == "__main__":

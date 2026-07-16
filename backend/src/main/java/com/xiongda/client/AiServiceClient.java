@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
@@ -32,10 +33,23 @@ import java.util.Map;
 @Component
 public class AiServiceClient {
 
+    /**
+     * 响应体最大缓冲（字节）。默认仅 256KB，超出会抛 DataBufferLimitException。
+     * 文档处理接口会把全文（大 PDF 可达数百 KB~数 MB）随响应返回，故放宽到 20MB，
+     * 避免大文档处理响应被缓冲上限截断（集成联调中 394 页 PDF 即触发该问题）。
+     */
+    private static final int MAX_IN_MEMORY_SIZE = 20 * 1024 * 1024;
+
     private final WebClient webClient;
 
     public AiServiceClient(@Value("${ai-service.base-url}") String baseUrl) {
-        this.webClient = WebClient.builder().baseUrl(baseUrl).build();
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_IN_MEMORY_SIZE))
+                .build();
+        this.webClient = WebClient.builder()
+                .baseUrl(baseUrl)
+                .exchangeStrategies(strategies)
+                .build();
     }
 
     /**
@@ -184,8 +198,49 @@ public class AiServiceClient {
     }
 
     /**
+     * 从向量库已存分块重建文档按页文本（预览兜底，不依赖原文件）。
+     * 文档已向量化即可重建，解决原文件路径中文 / 文件被清理导致预览为空的问题。
+     * 失败返回空列表，由调用方继续降级到已存全文。
+     *
+     * @param docId 文档 ID
+     * @return 每页的 {page_no, text} 列表；失败返回空列表
+     */
+    public List<Map<String, Object>> getPagesFromDb(Long docId) {
+        try {
+            Map<String, Object> resp = webClient.post()
+                    .uri("/ai/document/pages-from-db")
+                    .bodyValue(Map.of("doc_id", String.valueOf(docId)))
+                    .retrieve()
+                    .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(java.time.Duration.ofMinutes(2))
+                    .block();
+            if (resp == null || !"ok".equals(resp.get("status"))) {
+                log.warn("[文档诊断] Python pages-from-db 失败 docId={} reason={}",
+                        docId, resp == null ? "null" : resp.get("error"));
+                return List.of();
+            }
+            Object pagesObj = resp.get("pages");
+            if (pagesObj instanceof List<?> pages) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Object p : pages) {
+                    if (p instanceof Map<?, ?> m) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> pageMap = (Map<String, Object>) m;
+                        result.add(pageMap);
+                    }
+                }
+                return result;
+            }
+            return List.of();
+        } catch (Exception e) {
+            log.warn("[文档诊断] 调 Python pages-from-db 异常 docId={} : {}", docId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
      * 删除文档 — 调用 Python AI 服务清理该文档在向量库中的数据，并取消其可能正在排队
-     * 的问答增强任务（对齐 WeKnora 任务取消）。Python 服务不可用时忽略，不阻塞删除主流程。
+     * 的问答增强任务（对标业界成熟方案 任务取消）。Python 服务不可用时忽略，不阻塞删除主流程。
      */
     public void deleteDocument(Long docId) {
         try {
@@ -201,7 +256,7 @@ public class AiServiceClient {
 
     /**
      * 取消文档处理 — 调用 Python AI 服务清理该文档在向量库中的数据（若已写入），
-     * 并标记其问答增强任务取消（对齐 WeKnora 任务取消）。与 {@link #deleteDocument} 区别：
+     * 并标记其问答增强任务取消（对标业界成熟方案 任务取消）。与 {@link #deleteDocument} 区别：
      * 本方法不删除文档 DB 记录，仅清理向量与取消排队增强，配合 Java 侧将状态置为 cancelled。
      * Python 服务不可用时忽略，不阻塞取消主流程。
      */

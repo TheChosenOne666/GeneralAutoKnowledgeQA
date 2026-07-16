@@ -125,7 +125,7 @@ box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 |---|---|---|---|
 | — | `index.html` | 索引页 | 设计稿导航入口 |
 | 1 | `01-auth.html` | 登录/注册 | 粒子动效 + 毛玻璃 + 密码强度 |
-| 2 | `02-chat.html` | 问答页 | WeKnora 风格，大标题 + 推荐问题 + 底部输入框 |
+| 2 | `02-chat.html` | 问答页 | 现代，大标题 + 推荐问题 + 底部输入框 |
 | 3 | `03-knowledge-base.html` | 知识库管理 | 共享/个人 Tab + 上传 + 文档列表 |
 | 4 | `04-ai-config.html` | AI 模型配置 | LLM/Embedding/Rerank 配置卡 |
 | 5 | `05-members.html` | 成员管理 | 成员表 + 权限矩阵 |
@@ -157,7 +157,7 @@ box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 
 #### 页面 2：问答（`02-chat.html`）
 
-**布局**：WeKnora 风格
+**布局**：现代
 
 - **左侧**：图标菜单 + 历史会话列表（近7天）
 - **中间**：
@@ -173,7 +173,7 @@ box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 - **Tab 切换**：共享知识库 / 我的知识库（带数量角标）
 - **上传区**：拖拽上传，支持 PDF/Word/MD/TXT
 - **文档列表**：表格（文件名、类型、大小、状态、上传时间、操作）
-- **状态追踪**：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（四阶段实时状态；优化中即已可用于问答，对齐 WeKnora finalizing）
+- **状态追踪**：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（四阶段实时状态；优化中即已可用于问答，对齐 业界 finalizing（异步增强））
 - **筛选**：按类型、状态
 
 #### 页面 4：AI 模型配置（`04-ai-config.html`）

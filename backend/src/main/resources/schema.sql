@@ -108,6 +108,7 @@ CREATE TABLE document (
     error_msg TEXT,
     content TEXT,
     model_config_error BOOLEAN DEFAULT FALSE,
+    quota_error BOOLEAN DEFAULT FALSE,
     uploaded_by BIGINT,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

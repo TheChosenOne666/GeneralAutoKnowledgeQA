@@ -7,8 +7,8 @@ import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/components/Toast'
 import type { AIConfig, AIConfigUpdateRequest } from '@/types'
 
-const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek']
-const EMBEDDING_PROVIDERS = ['火山方舟', 'OpenAI', 'BGE']
+const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek', '阿里云百炼']
+const EMBEDDING_PROVIDERS = ['火山方舟', 'OpenAI', 'BGE', '阿里云百炼']
 
 /** 选择厂商后自动填充的默认 endpoint / 温度 / 维度（用户可手动改）。*/
 const PROVIDER_DEFAULTS: Record<
@@ -19,6 +19,7 @@ const PROVIDER_DEFAULTS: Record<
   'OpenAI': { llmBaseUrl: 'https://api.openai.com/v1', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: 'https://api.openai.com/v1', embeddingDimension: '1536' },
   'DeepSeek': { llmBaseUrl: 'https://api.deepseek.com/v1', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: '', embeddingDimension: '' },
   'BGE': { llmBaseUrl: '', llmTemperature: '', llmMaxTokens: '', embeddingBaseUrl: 'https://api.siliconflow.cn/v1', embeddingDimension: '1024' },
+  '阿里云百炼': { llmBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', llmTemperature: '0.7', llmMaxTokens: '4096', embeddingBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', embeddingDimension: '1024' },
 }
 
 /** 表单状态（含 API Key 明文，仅用户主动输入时提交；留空不覆盖已存密钥）。*/
@@ -89,8 +90,6 @@ function toRequest(f: FormState): AIConfigUpdateRequest {
   }
 }
 
-const RERANK_ICON =
-  'M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z'
 const LLM_ICON =
   'M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z'
 const EMBEDDING_ICON =
@@ -187,6 +186,8 @@ export default function AIConfigPage() {
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM })
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  /** 向量维度内联错误：保存时未填写则在维度框下方提示（与普通字段一致的保存校验体验）。*/
+  const [dimensionError, setDimensionError] = useState<string | null>(null)
 
   const load = (s: 'user' | 'platform') => {
     const fetcher = s === 'platform' ? aiConfigApi.getPlatformDefault() : aiConfigApi.getConfig()
@@ -219,13 +220,12 @@ export default function AIConfigPage() {
     })
   }
 
-  /** 切换 Embedding 厂商时自动填充其默认 endpoint / 向量维度（用户可手动改）。*/
+  /** 切换 Embedding 厂商时自动填充其默认 endpoint（用户可手动改；向量维度不自动填，与模型名称一致）。*/
   const applyEmbeddingProviderDefaults = (v: string) => {
     const d = PROVIDER_DEFAULTS[v] ?? {}
     set({
       embeddingProvider: v,
       embeddingBaseUrl: d.embeddingBaseUrl ?? form.embeddingBaseUrl,
-      embeddingDimension: d.embeddingDimension ?? form.embeddingDimension,
     })
   }
 
@@ -246,6 +246,29 @@ export default function AIConfigPage() {
   const handleSave = async () => {
     setSaving(true)
     setFeedback(null)
+    setDimensionError(null)
+    // 向量维度必填校验：配置了 Embedding（provider / model 任一非空）就必须填写正整数维度。
+    // 未填写时在维度框下方内联提示（与模型名称等字段一致的保存校验体验），不依赖红色必填样式。
+    if (
+      (form.embeddingProvider || form.embeddingModel) &&
+      !(Number(form.embeddingDimension) > 0)
+    ) {
+      setSaving(false)
+      setDimensionError('请填写向量维度（正整数）')
+      return
+    }
+    // 模型必填校验：只要配置了某模块（provider 非空），就必须填写模型名称，
+    // 否则提示用户补全并阻止保存（与后端拦截一致，避免「删掉模型名却保存成功」）。
+    if (form.llmProvider && !form.llmModel.trim()) {
+      setSaving(false)
+      setFeedback({ type: 'error', msg: '请填写 LLM 模型名称' })
+      return
+    }
+    if (form.embeddingProvider && !form.embeddingModel.trim()) {
+      setSaving(false)
+      setFeedback({ type: 'error', msg: '请填写 Embedding 模型名称' })
+      return
+    }
     try {
       const updated =
         scope === 'platform'
@@ -253,6 +276,7 @@ export default function AIConfigPage() {
           : await aiConfigApi.updateConfig(toRequest(form))
       setConfig(updated)
       setForm(toForm(updated))
+      setDimensionError(null)
       success(scope === 'platform' ? '平台默认配置已保存' : '配置保存成功')
       // 普通用户保存成功后，顶部绿色提示并自动跳转到对话页
       if (scope !== 'platform') {
@@ -267,7 +291,6 @@ export default function AIConfigPage() {
 
   const llmActive = Boolean(config?.llmProvider && config?.llmModel)
   const embeddingActive = Boolean(config?.embeddingProvider && config?.embeddingModel)
-  const rerankActive = Boolean(config?.hasRerank)
 
   const statusItems = [
     { label: 'LLM', value: llmActive ? `${config?.llmProvider} · ${config?.llmModel}` : '未配置', active: llmActive },
@@ -276,7 +299,6 @@ export default function AIConfigPage() {
       value: embeddingActive ? `${config?.embeddingProvider} · ${config?.embeddingModel}` : '未配置',
       active: embeddingActive,
     },
-    { label: 'Rerank', value: rerankActive ? `${config?.rerankProvider} · ${config?.rerankModel}` : '未配置', active: rerankActive },
   ]
 
   return (
@@ -406,28 +428,10 @@ export default function AIConfigPage() {
               <Field label="模型" value={form.embeddingModel} onChange={(v) => set({ embeddingModel: v })} placeholder="doubao-embedding" />
               <Field label="API Key" type="password" autoComplete="new-password" value={form.embeddingApiKey} onChange={(v) => set({ embeddingApiKey: v })} placeholder={config?.embeddingProvider ? '已配置（留空不修改）' : '请输入 API Key'} />
               <Field label="API Endpoint" value={form.embeddingBaseUrl} onChange={(v) => set({ embeddingBaseUrl: v })} placeholder="https://ark.cn-beijing.volces.com/api/v3" />
-              <Field label="向量维度" type="number" value={form.embeddingDimension} onChange={(v) => set({ embeddingDimension: v })} placeholder="1536" />
-            </div>
-          </div>
-
-          {/* Rerank（预留，暂不支持编辑） */}
-          <div className="bg-white border border-emerald-100 rounded-2xl p-6 opacity-60">
-            <CardHeader icon={RERANK_ICON} title="Rerank 重排序模型" reserved />
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">提供商</label>
-                <select disabled className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-400 bg-white">
-                  <option>请选择</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">模型</label>
-                <input disabled className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-400" placeholder="模型" />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">API Key</label>
-                <input disabled type="password" autoComplete="new-password" className="w-full px-3 py-2 rounded-lg border border-emerald-200 text-sm text-slate-400" placeholder="API Key" />
-              </div>
+              <Field label="向量维度" type="number" value={form.embeddingDimension} onChange={(v) => { set({ embeddingDimension: v }); setDimensionError(null) }} placeholder="1536" />
+              {dimensionError && (
+                <p className="mt-1 text-xs text-red-500">{dimensionError}</p>
+              )}
             </div>
           </div>
         </div>

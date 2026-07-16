@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ 向量持久化初始化失败（检索将不可用）: {e}")
     # 问答增强队列：恢复上次崩溃残留的 processing 任务，并启动常驻 worker
-    # （对齐 WeKnora finalizing 任务队列：持久化、重启可恢复、不丢任务）
+    # （对齐 业界 finalizing（异步增强） 任务队列：持久化、重启可恢复、不丢任务）
     try:
         moved = await sweep_stale()
         if moved:

@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * 知识库权限判定工具单元测试 — 覆盖共享库/个人库的创建与写权限规则。
  *
- * <p>规则对齐 WeKnora 的租户角色 + KB 归属数据级 RBAC：
+ * <p>规则对标业界成熟方案 的租户角色 + KB 归属数据级 RBAC：
  * 共享库仅租户管理员 / 平台超管可写，个人库仅 owner 可写。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
@@ -110,7 +110,7 @@ class KbPermissionTest {
         assertEquals(ErrorCode.NOT_FOUND_ERROR.getCode(), ex.getCode());
     }
 
-    // ==================== 租户隔离（对齐 WeKnora own-KB 判定） ====================
+    // ==================== 租户隔离（对齐 业界 own-KB（自有 KB）判定） ====================
 
     @Test
     void assertCanWrite_tenantAdminCrossTenant_denied() {

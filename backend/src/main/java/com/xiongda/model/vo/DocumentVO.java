@@ -37,5 +37,10 @@ public class DocumentVO implements Serializable {
      */
     private Boolean modelConfigError;
 
+    /**
+     * 是否因模型额度不足 / 被限流导致失败（区别于配置错误，前端提示稍后重试 / 检查额度）。
+     */
+    private Boolean quotaError;
+
     private Date createTime;
 }

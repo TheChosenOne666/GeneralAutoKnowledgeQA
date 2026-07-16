@@ -28,7 +28,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 文档服务实现。
@@ -70,7 +78,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         doc.setChunkCount(0);
         doc.setUploadedBy(user.getId());
 
-        // 租户文档数配额校验（对齐 WeKnora：达到上限即拒绝，<=0 视为不限）
+        // 租户文档数配额校验（对标业界成熟方案：达到上限即拒绝，<=0 视为不限）
         Tenant tenant = tenantMapper.selectById(tenantId);
         if (tenant != null && tenant.getMaxDocuments() != null && tenant.getMaxDocuments() > 0) {
             long docCount = this.count(new QueryWrapper<Document>().eq("tenant_id", tenantId));
@@ -102,7 +110,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
         KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
         KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
-        // 同步清理 Python 侧向量并取消可能正在排队的问答增强任务（对齐 WeKnora 任务取消）
+        // 同步清理 Python 侧向量并取消可能正在排队的问答增强任务（对标业界成熟方案 任务取消）
         try {
             aiServiceClient.deleteDocument(docId);
         } catch (Exception e) {
@@ -176,7 +184,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // 标 cancelled（终态）—— 终态守卫保证后续 Python 中间态回调不再覆盖本状态
         this.updateDocumentStatus(docId, "cancelled", null, null);
 
-        // 通知 Python：清理已写入向量 + 取消排队的问答增强任务（对齐 WeKnora 任务取消）
+        // 通知 Python：清理已写入向量 + 取消排队的问答增强任务（对标业界成熟方案 任务取消）
         try {
             aiServiceClient.cancelDocument(docId);
         } catch (Exception e) {
@@ -188,6 +196,41 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         } catch (Exception e) {
             log.warn("清检索缓存失败（取消文档）tenantId={} : {}", tenantId, e.getMessage());
         }
+        return true;
+    }
+
+    @Override
+    public boolean retryDocument(Long docId, Long tenantId, User user) {
+        Document doc = this.getById(docId);
+        ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
+        ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限重试该文档");
+        // 知识库写权限：租户隔离（第一维度）+ 共享库仅租户管理员 / 个人库仅 owner
+        KnowledgeBase kb = knowledgeBaseService.getById(doc.getKbId());
+        KbPermission.assertCanWrite(kb, user.getId(), tenantId, user.getRole());
+
+        // 仅终态失败 / 已取消可重试；处理中或已就绪无需重试
+        String status = doc.getStatus();
+        if (!"failed".equals(status) && !"cancelled".equals(status)) {
+            ThrowUtils.throwIf(true, ErrorCode.OPERATION_ERROR, "仅处理失败或已取消的文档可重试");
+        }
+
+        // 原文件已不存在则无法重试，引导重新上传（避免重试后再因缺文件失败）
+        Path filePath = Path.of(doc.getFilePath());
+        ThrowUtils.throwIf(!Files.exists(filePath) || !Files.isRegularFile(filePath),
+                ErrorCode.OPERATION_ERROR, "原文件已被清理或删除，无法重试，请重新上传该文档");
+
+        // 重置状态：绕过终态守卫直接置 processing，并清空错误标记 / 分块数
+        doc.setStatus("processing");
+        doc.setErrorMsg(null);
+        doc.setModelConfigError(false);
+        doc.setQuotaError(false);
+        doc.setChunkCount(0);
+        this.updateById(doc);
+
+        // 复用原上传者配置重新触发处理（确保文档与上传者 AI 配置绑定一致）
+        this.triggerDocumentProcessing(docId, doc.getFilePath(), doc.getFileType(),
+                doc.getKbId(), tenantId, doc.getUploadedBy());
+        log.info("文档重试处理已触发: docId={}, oldStatus={}", docId, status);
         return true;
     }
 
@@ -206,6 +249,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         vo.setChunkCount(doc.getChunkCount());
         vo.setErrorMsg(doc.getErrorMsg());
         vo.setModelConfigError(doc.getModelConfigError());
+        vo.setQuotaError(doc.getQuotaError());
         vo.setCreateTime(doc.getCreateTime());
         return vo;
     }
@@ -218,11 +262,18 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     @Override
     public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
             Boolean modelConfigError) {
+        // 兼容旧调用方（如内部状态回调中间态）：额度标记默认 null（不更新）
+        return updateDocumentStatus(docId, status, chunkCount, errorMsg, modelConfigError, null);
+    }
+
+    @Override
+    public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError, Boolean quotaError) {
         Document doc = this.getById(docId);
         if (doc == null) {
             return false;
         }
-        // 终态守卫（对齐 WeKnora 终态不可变）：ready/failed 落定后，忽略迟到的最终之前阶段
+        // 终态守卫（对标业界成熟方案 终态不可变）：ready/failed 落定后，忽略迟到的最终之前阶段
         // 回调（如 retrieving/optimizing），防止异步增强阶段竞态把已就绪文档回退到中间态。
         String current = doc.getStatus();
         boolean currentTerminal = "ready".equals(current) || "failed".equals(current) || "cancelled".equals(current);
@@ -235,11 +286,22 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         if (chunkCount != null) {
             doc.setChunkCount(chunkCount);
         }
-        if (errorMsg != null) {
+        // 成功终态（ready/optimizing）强制清空错误标记，避免旧错误信息残留
+        // （重试 / 取消后重新处理成功时，DB 中的历史 error_msg / model_config_error / quota_error 不应继续展示）。
+        // 这些字段在实体上声明 updateStrategy=ALWAYS，确保此处置 null 能真正写入（绕过默认 NOT_NULL）。
+        boolean success = "ready".equals(status) || "optimizing".equals(status);
+        if (success) {
+            doc.setErrorMsg(null);
+            doc.setModelConfigError(false);
+            doc.setQuotaError(false);
+        } else if (errorMsg != null) {
             doc.setErrorMsg(errorMsg);
         }
         if (modelConfigError != null) {
             doc.setModelConfigError(modelConfigError);
+        }
+        if (quotaError != null) {
+            doc.setQuotaError(quotaError);
         }
         return this.updateById(doc);
     }
@@ -266,29 +328,51 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     /** 与 ai-service/services/document_processor.py 的 CHARS_PER_PAGE 保持一致（降级估算分页用）。*/
     private static final int CHARS_PER_PAGE = 1500;
 
+    /**
+     * 文档处理异步线程池（替代 CompletableFuture.runAsync 默认的 ForkJoinPool.commonPool()）。
+     *
+     * <p>文档处理为 IO 密集型（等待 Python 向量化返回，单任务可达分钟级），使用专用线程池：
+     * ① 避免占用公共 ForkJoinPool（影响其他并行任务）；② 队列满时 CallerRunsPolicy 由调用线程
+     * （上传请求线程）兜底执行，形成背压、不丢任务也不无限堆积；③ daemon 线程 + allowCoreThreadTimeOut
+     * 避免空闲常驻。核心/最大线程数与队列深度可按并发上传量调整。</p>
+     */
+    private static final ExecutorService DOC_PROCESS_EXECUTOR = new ThreadPoolExecutor(
+            2, 8, 60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(16),
+            new ThreadFactory() {
+                private final AtomicInteger seq = new AtomicInteger(1);
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "doc-process-" + seq.getAndIncrement());
+                    t.setDaemon(true);
+                    return t;
+                }
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
+    static {
+        // 允许核心线程空闲超时回收，避免无上传时仍常驻 2 个线程
+        ((ThreadPoolExecutor) DOC_PROCESS_EXECUTOR).allowCoreThreadTimeOut(true);
+    }
+
     @Override
     public List<PageContentVO> getDocumentPages(Long docId, Long tenantId, User user) {
         Document doc = this.getById(docId);
         ThrowUtils.throwIf(doc == null, ErrorCode.NOT_FOUND_ERROR, "文档不存在");
         ThrowUtils.throwIf(!tenantId.equals(doc.getTenantId()), ErrorCode.NO_AUTH_ERROR, "无权限查看该文档");
 
-        // 优先调 AI 服务真实解析（PDF 真实页码 / docx/txt/md 估算页码，与引用来源一致）
+        // 1) 优先：AI 服务真实解析原文件（PDF 真实页码 / docx/txt/md 估算页码，与引用来源一致）
         List<Map<String, Object>> pages = aiServiceClient.extractPages(doc.getFilePath(), doc.getFileType());
         if (pages != null && !pages.isEmpty()) {
-            List<PageContentVO> result = new ArrayList<>(pages.size());
-            int fallbackNo = 1;
-            for (Map<String, Object> p : pages) {
-                PageContentVO vo = new PageContentVO();
-                Object pageNo = p.get("page_no");
-                vo.setPageNo(pageNo instanceof Number ? ((Number) pageNo).intValue() : fallbackNo);
-                Object text = p.get("text");
-                vo.setText(text == null ? "" : text.toString());
-                result.add(vo);
-                fallbackNo++;
-            }
-            return result;
+            return toPageContentVOs(pages);
         }
-        // 降级：AI 不可用/失败，用已存全文按 CHARS_PER_PAGE 估算分页
+        // 2) 次优先：向量库已存分块重建（不依赖原文件，文档已向量化即可；
+        //    修复原文件被清理 / 中文路径解析失败导致预览为空的问题，M4-4 增强）
+        pages = aiServiceClient.getPagesFromDb(docId);
+        if (pages != null && !pages.isEmpty()) {
+            return toPageContentVOs(pages);
+        }
+        // 3) 降级：AI 不可用/失败，用已存全文按 CHARS_PER_PAGE 估算分页
         String content = doc.getContent();
         if (content == null || content.isEmpty()) {
             return List.of();
@@ -306,6 +390,22 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             idx = end;
         }
         return fallback;
+    }
+
+    /** 将 AI 服务返回的 {page_no, text} 列表转为 PageContentVO 列表（page_no 缺失时顺序补位）。*/
+    private List<PageContentVO> toPageContentVOs(List<Map<String, Object>> pages) {
+        List<PageContentVO> result = new ArrayList<>(pages.size());
+        int fallbackNo = 1;
+        for (Map<String, Object> p : pages) {
+            PageContentVO vo = new PageContentVO();
+            Object pageNo = p.get("page_no");
+            vo.setPageNo(pageNo instanceof Number ? ((Number) pageNo).intValue() : fallbackNo);
+            Object text = p.get("text");
+            vo.setText(text == null ? "" : text.toString());
+            result.add(vo);
+            fallbackNo++;
+        }
+        return result;
     }
 
     /**
@@ -353,7 +453,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                     log.info("文档处理被取消(主流程内): docId={}", docId);
                     return;
                 }
-                // 对齐 WeKnora finalizing=queryable：optimizing 表示向量已入库、文档已可检索，
+                // 对齐 业界 finalizing（异步增强）=queryable：optimizing 表示向量已入库、文档已可检索，
                 // 仅问答增强在后台进行中，同样视为成功落库（不阻塞用户检索）。
                 if ("ready".equals(status) || "optimizing".equals(status)) {
                     // 竞态守卫：用户中途取消，Python 仍跑完返回 ready/optimizing
@@ -380,15 +480,17 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 } else {
                     String errorType = result.get("error_type") != null ? result.get("error_type").toString() : null;
                     String error = result.get("error") != null ? result.get("error").toString() : "未知错误";
-                    // M3-3：模型配置错误（无 Key / Key 错 / 模型名错 / 维度不匹配）标记，前端引导重配
+                    // M3-3：模型配置错误（无 Key / Key 错 / 模型名错 / 维度不匹配）标记，前端引导重配；
+                    // 额度 / 限流（HTTP 429 / 5xx 过载 / 余额耗尽）标记，前端引导重试 / 检查额度（而非重配）
                     boolean modelConfigError = "MODEL_CONFIG_ERROR".equals(errorType);
-                    this.updateDocumentStatus(docId, "failed", null, error, modelConfigError);
+                    boolean quotaError = "MODEL_QUOTA_ERROR".equals(errorType);
+                    this.updateDocumentStatus(docId, "failed", null, error, modelConfigError, quotaError);
                     log.warn("文档处理失败: docId={}, errorType={}, error={}", docId, errorType, error);
                 }
             } catch (Exception e) {
                 log.error("文档处理异常: docId={}", docId, e);
                 this.updateDocumentStatus(docId, "failed", null, e.getMessage());
             }
-        });
+        }, DOC_PROCESS_EXECUTOR);
     }
 }

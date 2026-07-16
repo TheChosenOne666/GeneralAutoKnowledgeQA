@@ -2,7 +2,7 @@
 
 - PgVectorStore（默认）：向量持久化到 Postgres（pgvector halfvec，变维度），
   关键词检索复用 BM25，BM25 索引在启动时从 PG 重建，重启不丢知识。
-  对齐腾讯 WeKnora 的 Postgres 向量存储方案。
+  对齐业界成熟 RAG 方案 的 Postgres 向量存储方案。
 - InMemoryVectorStore：内存实现（零外部依赖），用于单测 / 演示。
 - MilvusVectorStore：可选集成（pymilvus）。
 """
@@ -47,6 +47,23 @@ def _bigrams(s: str) -> list[str]:
     """将文本转成字符 bigram（中文按字、英文按词处理都可用）。"""
     s = s.lower().replace(" ", "")
     return [s[i : i + 2] for i in range(len(s) - 1)] or [s]
+
+
+def _aggregate_pages(
+    records: list, content_getter, page_getter
+) -> list[dict]:
+    """按 page 升序聚合分块文本，返回 ``[{"page_no": int, "text": str}, ...]``。
+
+    Args:
+        records: 分块列表（内存记录或 dict）。
+        content_getter: 取分块文本的函数。
+        page_getter: 取分块页码的函数。
+    """
+    pages: dict[int, list[str]] = {}
+    for r in records:
+        p = page_getter(r)
+        pages.setdefault(p, []).append(content_getter(r))
+    return [{"page_no": p, "text": "\n".join(pages[p])} for p in sorted(pages)]
 
 
 def _bm25_search(records: list[_ChunkRecord], query: str, top_k: int = 20) -> list[RetrievalResult]:
@@ -125,13 +142,24 @@ class InMemoryVectorStore:
         kb_ids: list[str],
         tenant_id: str,
         top_k: int = 20,
+        chunk_types: list[str] | None = None,
     ) -> list[RetrievalResult]:
-        """向量检索 Top-K（余弦相似度）。"""
+        """向量检索 Top-K（余弦相似度）。
+
+        Args:
+            chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
+        """
         results = []
         for r in self._records:
             if r.metadata.get("tenant_id") != tenant_id:
                 continue
             if kb_ids and r.metadata.get("kb_id") not in kb_ids:
+                continue
+            # 常规检索默认排除 outline 块，大纲意图显式传 ["outline"]
+            if chunk_types is None:
+                if r.metadata.get("chunk_type") == "outline":
+                    continue
+            elif r.metadata.get("chunk_type") not in chunk_types:
                 continue
             if not r.embedding or not query_vector:
                 continue
@@ -152,14 +180,28 @@ class InMemoryVectorStore:
         return results[:top_k]
 
     async def keyword_search(
-        self, query: str, kb_ids: list[str], tenant_id: str, top_k: int = 20
+        self,
+        query: str,
+        kb_ids: list[str],
+        tenant_id: str,
+        top_k: int = 20,
+        chunk_types: list[str] | None = None,
     ) -> list[RetrievalResult]:
-        """BM25 关键词检索 Top-K。"""
+        """BM25 关键词检索 Top-K。
+
+        Args:
+            chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
+        """
+        # 常规检索默认排除 outline 块（chunk_types=None），大纲意图显式传 ["outline"]
+        def _type_ok(meta):
+            ct = meta.get("chunk_type")
+            return ct != "outline" if chunk_types is None else ct in chunk_types
         candidates = [
             r
             for r in self._records
             if r.metadata.get("tenant_id") == tenant_id
             and (not kb_ids or r.metadata.get("kb_id") in kb_ids)
+            and _type_ok(r.metadata)
         ]
         return _bm25_search(candidates, query, top_k)
 
@@ -180,6 +222,23 @@ class InMemoryVectorStore:
             if r.metadata.get("doc_id") == doc_id
             and r.metadata.get("chunk_type") != "qa"
         ]
+
+    async def get_document_pages(self, doc_id: str) -> list[dict]:
+        """从内存分块按页重建文档文本（预览兜底，不依赖原文件是否存在）。
+
+        排除 qa 增强块（与 :meth:`get_original_chunks` 一致）。按 page 升序聚合，
+        返回 ``[{"page_no": int, "text": str}, ...]``。
+        """
+        chunks = [
+            r
+            for r in self._records
+            if str(r.metadata.get("doc_id", "")) == str(doc_id)
+            and r.metadata.get("chunk_type") != "qa"
+        ]
+        chunks.sort(
+            key=lambda r: (r.metadata.get("page", 0) or 0, r.metadata.get("chunk_index", 0) or 0)
+        )
+        return _aggregate_pages(chunks, lambda r: r.content, lambda r: r.metadata.get("page", 0) or 0)
 
     @staticmethod
     def _cosine(a: list[float], b: list[float]) -> float:
@@ -257,12 +316,20 @@ class PgVectorStore:
         kb_ids: list[str],
         tenant_id: str,
         top_k: int = 20,
+        chunk_types: list[str] | None = None,
     ) -> list[RetrievalResult]:
-        """向量检索 Top-K（PG halfvec 余弦相似度，score = 1 - cosine_distance）。"""
+        """向量检索 Top-K（PG halfvec 余弦相似度，score = 1 - cosine_distance）。
+
+        Args:
+            chunk_types: 仅返回该列表内的 ``chunk_type``（如 ``["outline"]`` 用于大纲
+                意图召回）；为 None 时不限制。受限于 SQL 分支，指定时放大候选池到
+                ``max(top_k, 60)`` 再在内存过滤，保证足够召回。
+        """
         if not query_vector:
             return []
         dim = len(query_vector)
         qv = _to_halfvec(query_vector)
+        eff_top = top_k if chunk_types is None else max(top_k, 60)
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             if kb_ids:
@@ -278,7 +345,7 @@ class PgVectorStore:
                     tenant_id,
                     dim,
                     list(kb_ids),
-                    top_k,
+                    eff_top,
                 )
             else:
                 rows = await conn.fetch(
@@ -292,9 +359,9 @@ class PgVectorStore:
                     qv,
                     tenant_id,
                     dim,
-                    top_k,
+                    eff_top,
                 )
-        return [
+        results = [
             RetrievalResult(
                 content=r["content"],
                 source=r["source"] or "",
@@ -307,16 +374,37 @@ class PgVectorStore:
             )
             for r in rows
         ]
+        # 常规检索（chunk_types=None）默认排除 outline 块，避免稀释常规问答召回；
+        # 大纲意图检索显式传 ["outline"] 才只取大纲块。
+        if chunk_types is None:
+            results = [r for r in results if r.chunk_type != "outline"]
+        else:
+            results = [r for r in results if r.chunk_type in chunk_types]
+        return results[:top_k]
 
     async def keyword_search(
-        self, query: str, kb_ids: list[str], tenant_id: str, top_k: int = 20
+        self,
+        query: str,
+        kb_ids: list[str],
+        tenant_id: str,
+        top_k: int = 20,
+        chunk_types: list[str] | None = None,
     ) -> list[RetrievalResult]:
-        """BM25 关键词检索（兜底）—— 基于从 PG 预热的内存索引。"""
+        """BM25 关键词检索（兜底）—— 基于从 PG 预热的内存索引。
+
+        Args:
+            chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
+        """
+        # 常规检索默认排除 outline 块（chunk_types=None），大纲意图显式传 ["outline"]
+        def _type_ok(meta):
+            ct = meta.get("chunk_type")
+            return ct != "outline" if chunk_types is None else ct in chunk_types
         candidates = [
             r
             for r in self._bm25_records
             if r.metadata.get("tenant_id") == tenant_id
             and (not kb_ids or r.metadata.get("kb_id") in kb_ids)
+            and _type_ok(r.metadata)
         ]
         return _bm25_search(candidates, query, top_k)
 
@@ -355,6 +443,25 @@ class PgVectorStore:
             }
             for r in rows
         ]
+
+    async def get_document_pages(self, doc_id: str) -> list[dict]:
+        """从 PG 向量库按页重建文档文本（预览兜底，不依赖原文件是否存在）。
+
+        排除 qa 增强块（与 :meth:`get_original_chunks` 一致）。按 page、chunk_index
+        升序聚合，返回 ``[{"page_no": int, "text": str}, ...]``。
+        """
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT page, content, chunk_index
+                   FROM embeddings
+                   WHERE doc_id = $1
+                     AND (metadata IS NULL OR metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                   ORDER BY page, chunk_index""",
+                str(doc_id),
+            )
+        chunks = [{"content": r["content"], "page": r["page"] or 0} for r in rows]
+        return _aggregate_pages(chunks, lambda c: c["content"], lambda c: c["page"])
 
     async def warmup_bm25(self) -> None:
         """从 PG 全量加载分块到内存 BM25 索引（应用启动时调用，重启不丢兜底检索）。"""

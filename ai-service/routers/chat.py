@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from services.agent import run_agent
 from core.config import settings
 from services.llm import llm_service
-from services.model_config import ModelConfig, ModelConfigError
+from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError
 from services.rag import rag_service
 from services.web_search import web_search, format_search_results
 
@@ -126,6 +126,12 @@ async def chat_stream(body: ChatStreamRequest):
                     context = "\n\n".join(
                         f"[来源：{r.source} 第{r.page}页]\n{r.content}" for r in results
                     )
+            except ModelQuotaError as e:
+                logger.warning(f"模型额度/限流错误（检索阶段）：{e}")
+                yield _sse("error", {"error_type": "QUOTA_ERROR", "message": str(e)})
+                # 额度 / 限流，直接结束（提示用户稍后重试，而非重配模型）
+                yield _sse("done", {"conversation_id": body.conversation_id, "sources": []})
+                return
             except ModelConfigError as e:
                 logger.warning(f"模型配置错误（检索阶段）：{e}")
                 yield _sse("error", {"error_type": "MODEL_CONFIG_ERROR", "message": str(e)})
@@ -163,6 +169,9 @@ async def chat_stream(body: ChatStreamRequest):
                 context_source="kb" if body.mode == "rag" else "web",
             ):
                 yield _sse("token", {"content": token})
+        except ModelQuotaError as e:
+            logger.warning(f"模型额度/限流错误（生成阶段）：{e}")
+            yield _sse("error", {"error_type": "QUOTA_ERROR", "message": str(e)})
         except ModelConfigError as e:
             logger.warning(f"模型配置错误（生成阶段）：{e}")
             yield _sse("error", {"error_type": "MODEL_CONFIG_ERROR", "message": str(e)})

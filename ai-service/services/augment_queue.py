@@ -1,11 +1,11 @@
-"""问答增强持久化任务队列（对齐 WeKnora finalizing 任务队列 + sweep）。
+"""问答增强持久化任务队列（对齐 业界 finalizing（异步增强） 任务队列 + sweep）。
 
 设计要点：
 - 任务持久化在 Redis list（``xiongda:augment:queue``），服务重启不丢；
 - 采用 queue → processing 两段式（RPOPLPUSH），processing 中的任务携带 ``started_at``，
   启动时 ``sweep_stale`` 把卡死（处理中超时）的任务移回 queue，实现崩溃恢复；
 - 取消集（``xiongda:augment:cancelled``，set）记录已删除文档的 doc_id，
-  worker 取任务前检查，命中则跳过（文档已删无需增强，对齐 WeKnora 任务取消）。
+  worker 取任务前检查，命中则跳过（文档已删无需增强，对标业界成熟方案 任务取消）。
 """
 
 import json

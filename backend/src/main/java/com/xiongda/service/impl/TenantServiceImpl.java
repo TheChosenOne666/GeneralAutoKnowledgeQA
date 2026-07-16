@@ -55,7 +55,7 @@ public class TenantServiceImpl extends ServiceImpl<TenantMapper, Tenant> impleme
         slugQw.eq("slug", request.getSlug());
         ThrowUtils.throwIf(this.count(slugQw) > 0, ErrorCode.PARAMS_ERROR, "租户标识已存在");
 
-        // 管理员邮箱对应的用户必须已存在（不凭空创建账号，对齐 WeKnora）
+        // 管理员邮箱对应的用户必须已存在（不凭空创建账号，对标业界成熟方案）
         QueryWrapper<User> userQw = new QueryWrapper<>();
         userQw.eq("email", request.getAdminEmail());
         User admin = userMapper.selectOne(userQw);
@@ -72,7 +72,7 @@ public class TenantServiceImpl extends ServiceImpl<TenantMapper, Tenant> impleme
         tenant.setMaxDocuments(request.getMaxDocuments() != null ? request.getMaxDocuments() : 1000);
         this.save(tenant);
 
-        // 将已存在用户设为该租户首个管理员（类似 WeKnora EnsureOwner）
+        // 将已存在用户设为该租户首个管理员（类似 业界方案 EnsureOwner）
         admin.setTenantId(tenant.getId());
         admin.setRole(UserConstant.TENANT_ADMIN_ROLE);
         userMapper.updateById(admin);

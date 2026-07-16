@@ -1,4 +1,4 @@
-"""文档处理 检索/优化 阶段单测（对齐 WeKnora finalizing 持久化队列增强）。
+"""文档处理 检索/优化 阶段单测（对齐 业界 finalizing（异步增强） 持久化队列增强）。
 
 验证：
 - process() 向量化后立即 store 原始块并返回 optimizing，并把增强任务入持久化队列；

@@ -33,7 +33,7 @@ public class CommonConstant {
     public static final String TOKEN_PREFIX = "Bearer ";
 
     /**
-     * 平台超管切换目标租户时携带的租户ID请求头（对齐 WeKnora 的 TenantSelector）。
+     * 平台超管切换目标租户时携带的租户ID请求头（对齐 业界的 TenantSelector）。
      * 仅当登录用户为 super_admin 时后端才采纳该头，普通用户忽略以防越权切换租户。
      */
     public static final String TENANT_HEADER = "X-Tenant-ID";

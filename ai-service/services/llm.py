@@ -11,7 +11,7 @@ import httpx
 from loguru import logger
 
 from core.config import settings
-from services.model_config import ModelConfig, ModelConfigError
+from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError, is_quota_error
 
 
 class LlmService:
@@ -150,6 +150,7 @@ class LlmService:
                     async with c.stream(
                         "POST", f"{base_url}/chat/completions", headers=headers, json=json_body
                     ) as response:
+                        self._assert_usable_response(response)
                         if tools:
                             async for ev in self._iter_tokens_with_tools(response):
                                 yield ev
@@ -160,6 +161,7 @@ class LlmService:
                 async with client.stream(
                     "POST", f"{base_url}/chat/completions", headers=headers, json=json_body
                 ) as response:
+                    self._assert_usable_response(response)
                     if tools:
                         async for ev in self._iter_tokens_with_tools(response):
                             yield ev
@@ -168,6 +170,32 @@ class LlmService:
                             yield token
         except httpx.HTTPError as e:
             raise ModelConfigError(f"LLM 调用失败（模型名或 API Key 可能错误）：{e}") from e
+
+    @staticmethod
+    def _assert_usable_response(response: httpx.Response) -> None:
+        """读取流之前校验 LLM HTTP 响应状态码。
+
+        - 429 / 5xx（限流 / 服务端过载）→ :class:`ModelQuotaError`（额度 / 限流，提示稍后重试）；
+        - 4xx（Key / 模型名错误，或含额度关键词）→ 分别对应 :class:`ModelConfigError` / :class:`ModelQuotaError`。
+        避免把额度耗尽误判为「模型配置错误」而误导用户去重配。
+        """
+        status = response.status_code
+        if status == 429 or status >= 500:
+            raise ModelQuotaError(
+                f"LLM 调用被限流或暂时不可用（HTTP {status}），可能是模型额度不足，"
+                f"请稍后重试或检查账户额度"
+            )
+        if 400 <= status < 500:
+            body = ""
+            try:
+                body = response.text
+            except Exception:
+                pass
+            if is_quota_error(body):
+                raise ModelQuotaError(f"LLM 调用额度不足（HTTP {status}），请检查账户额度后重试")
+            raise ModelConfigError(
+                f"LLM 调用失败（API Key 或模型名可能错误，HTTP {status}）：{body[:200]}"
+            )
 
     @staticmethod
     async def _iter_tokens(response: httpx.Response) -> AsyncGenerator[str, None]:

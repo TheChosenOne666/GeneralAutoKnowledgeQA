@@ -18,6 +18,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -75,6 +77,7 @@ class AiConfigServiceImplTest {
 
         AiConfigUpdateRequest req = new AiConfigUpdateRequest();
         req.setLlmProvider("DeepSeek");
+        req.setLlmModel("deepseek-r1"); // 主模型显式填写（必填），与列表第一项不同以证未自动取列表首项
         req.setLlmModels(List.of("deepseek-v3", "deepseek-r1"));
 
         aiConfigService.updateConfig(1L, 2L, req);
@@ -83,7 +86,54 @@ class AiConfigServiceImplTest {
         verify(aiConfigMapper).insertOrUpdate(captor.capture());
         AiConfig saved = captor.getValue();
         assertEquals("[\"deepseek-v3\",\"deepseek-r1\"]", saved.getLlmModels());
-        assertEquals("deepseek-v3", saved.getLlmModel()); // 默认模型为空时取多模型第一项
+        // 主模型以显式填写为准，不会自动取列表第一项填充。
+        assertEquals("deepseek-r1", saved.getLlmModel());
+    }
+
+    @Test
+    void updateConfig_blankFieldClearsStoredValue() {
+        AiConfig stored = new AiConfig();
+        stored.setLlmModel("old-model");
+        stored.setEmbeddingModel("old-emb");
+        when(aiConfigMapper.selectOne(any(QueryWrapper.class), anyBoolean())).thenReturn(stored);
+        when(aiConfigMapper.insertOrUpdate(any(AiConfig.class))).thenReturn(true);
+
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        // provider 留空，仅验证「删掉模型名即清空旧值」（不触发模型必填拦截）
+        req.setLlmModel(""); // 主模型留空：应清空旧值，而非保留
+        req.setEmbeddingModel(""); // Embedding 模型留空：应清空旧值
+
+        aiConfigService.updateConfig(1L, 2L, req);
+
+        ArgumentCaptor<AiConfig> captor = ArgumentCaptor.forClass(AiConfig.class);
+        verify(aiConfigMapper).insertOrUpdate(captor.capture());
+        AiConfig saved = captor.getValue();
+        assertNull(saved.getLlmModel());
+        assertNull(saved.getEmbeddingModel());
+    }
+
+    @Test
+    void updateConfig_missingLlmModelWhenProviderSet_throws() {
+        when(aiConfigMapper.selectOne(any(QueryWrapper.class), anyBoolean())).thenReturn(null);
+
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setLlmProvider("OpenAI");
+        req.setLlmModel(""); // provider 已填但模型未填
+
+        assertThrows(IllegalArgumentException.class,
+                () -> aiConfigService.updateConfig(1L, 2L, req));
+    }
+
+    @Test
+    void updateConfig_missingEmbeddingModelWhenProviderSet_throws() {
+        when(aiConfigMapper.selectOne(any(QueryWrapper.class), anyBoolean())).thenReturn(null);
+
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setEmbeddingProvider("阿里云百炼");
+        req.setEmbeddingModel(""); // provider 已填但模型未填
+
+        assertThrows(IllegalArgumentException.class,
+                () -> aiConfigService.updateConfig(1L, 2L, req));
     }
 
     @Test
@@ -100,5 +150,37 @@ class AiConfigServiceImplTest {
         ArgumentCaptor<AiConfig> captor = ArgumentCaptor.forClass(AiConfig.class);
         verify(aiConfigMapper).insertOrUpdate(captor.capture());
         assertEquals("custom-default", captor.getValue().getLlmModel());
+    }
+
+    @Test
+    void updateConfig_embeddingDimensionRequired() {
+        when(aiConfigMapper.selectOne(any(QueryWrapper.class), anyBoolean())).thenReturn(null);
+
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setEmbeddingProvider("阿里云百炼");
+        req.setEmbeddingModel("text-embedding-v3");
+        req.setEmbeddingApiKey("sk-test");
+        // 未填向量维度
+
+        assertThrows(IllegalArgumentException.class,
+                () -> aiConfigService.updateConfig(1L, 2L, req));
+    }
+
+    @Test
+    void updateConfig_embeddingWithDimensionSucceeds() {
+        when(aiConfigMapper.selectOne(any(QueryWrapper.class), anyBoolean())).thenReturn(null);
+        when(aiConfigMapper.insertOrUpdate(any(AiConfig.class))).thenReturn(true);
+
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setEmbeddingProvider("阿里云百炼");
+        req.setEmbeddingModel("text-embedding-v3");
+        req.setEmbeddingApiKey("sk-test");
+        req.setEmbeddingDimension(1024);
+
+        aiConfigService.updateConfig(1L, 2L, req);
+
+        ArgumentCaptor<AiConfig> captor = ArgumentCaptor.forClass(AiConfig.class);
+        verify(aiConfigMapper).insertOrUpdate(captor.capture());
+        assertEquals(1024, captor.getValue().getEmbeddingDimension());
     }
 }

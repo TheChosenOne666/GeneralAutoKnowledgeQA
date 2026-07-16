@@ -157,6 +157,17 @@ public class KnowledgeBaseController {
     }
 
     /**
+     * 重试处理失败的文档（重新触发解析 / 分块 / 向量化）。
+     * 仅 failed / cancelled 终态可重试；原文件缺失则提示重新上传。
+     */
+    @PostMapping("/document/retry")
+    public BaseResponse<Boolean> retryDocument(@RequestBody DeleteRequest retryRequest, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        boolean result = documentService.retryDocument(retryRequest.getId(), loginUser.getTenantId(), loginUser);
+        return ResultUtils.success(result);
+    }
+
+    /**
      * 获取文档提取全文（供前端「查看内容」弹窗展示）。
      */
     @GetMapping("/document/content")

@@ -166,7 +166,7 @@ function AppLayoutInner() {
           <span className="text-lg font-extrabold tracking-tight text-slate-800">熊答</span>
         </div>
 
-        {/* 平台超管租户切换器（对齐 WeKnora TenantSelector）：切进某租户后当作该租户 admin 操作 */}
+        {/* 平台超管租户切换器（对齐 业界 TenantSelector（租户切换））：切进某租户后当作该租户 admin 操作 */}
         {user?.role === 'super_admin' && (
           <div className="px-3 pb-1 pt-2">
             <div className="text-[11px] text-slate-400 mb-1">当前操作租户</div>

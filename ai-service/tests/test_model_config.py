@@ -17,6 +17,7 @@ import services.document_processor as dp_mod
 import services.vector_store as vs_mod
 from main import app
 from services.document_processor import document_processor
+from services.model_config import ModelConfigError, ModelQuotaError
 from services.vector_store import InMemoryVectorStore
 
 
@@ -54,6 +55,44 @@ class ModelConfigErrorTest(unittest.TestCase):
         self.assertEqual(data["error_type"], "MODEL_CONFIG_ERROR")
         self.assertIn("Embedding", data["error"])
 
+    def test_document_process_quota_error(self):
+        """Embedding 被限流 / 额度不足（ModelQuotaError）→ 文档处理返回 MODEL_QUOTA_ERROR。"""
+        from unittest.mock import patch
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("测试文档内容用于向量化。")
+            path = f.name
+        try:
+            with patch(
+                "services.embedding.embedding_service.embed_batch",
+                side_effect=ModelQuotaError("Embedding 调用被限流（HTTP 429）"),
+            ):
+                resp = self.client.post(
+                    "/ai/document/process",
+                    json={
+                        "doc_id": "d2",
+                        "file_path": path,
+                        "file_type": "txt",
+                        "kb_id": "kb1",
+                        "tenant_id": "t1",
+                        "ai_config": {
+                            "embedding_api_key": "k",
+                            "embedding_model": "m",
+                            "embedding_dimension": 4,
+                            "llm_api_key": "k",
+                        },
+                    },
+                )
+                data = resp.json()
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["error_type"], "MODEL_QUOTA_ERROR")
+        self.assertIn("限流", data["error"])
+
     def test_chat_stream_model_config_error(self):
         """无 LLM API Key（search 模式跳过检索）→ SSE 推送 event: error。"""
         with self.client.stream(
@@ -70,6 +109,30 @@ class ModelConfigErrorTest(unittest.TestCase):
 
         self.assertIn("event: error", body)
         self.assertIn("MODEL_CONFIG_ERROR", body)
+        self.assertIn("event: done", body)
+
+    def test_chat_stream_quota_error(self):
+        """LLM 被限流 / 额度不足（ModelQuotaError）→ SSE 推送 event: error（QUOTA_ERROR）。"""
+        from unittest.mock import patch
+
+        with patch(
+            "services.llm.llm_service.stream_generate",
+            side_effect=ModelQuotaError("LLM 调用被限流（HTTP 429）"),
+        ):
+            with self.client.stream(
+                "POST",
+                "/ai/chat/stream",
+                json={
+                    "question": "你好",
+                    "tenant_id": "t1",
+                    "mode": "search",
+                    "ai_config": {"llm_api_key": "k"},
+                },
+            ) as resp:
+                body = "".join(resp.iter_text())
+
+        self.assertIn("event: error", body)
+        self.assertIn("QUOTA_ERROR", body)
         self.assertIn("event: done", body)
 
 

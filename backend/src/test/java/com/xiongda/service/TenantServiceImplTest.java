@@ -97,7 +97,7 @@ class TenantServiceImplTest {
 
         assertNotNull(vo);
         assertEquals("active", vo.getStatus());
-        // 已存在用户被设为新租户首个管理员（对齐 WeKnora EnsureOwner）
+        // 已存在用户被设为新租户首个管理员（对标业界成熟方案 EnsureOwner）
         assertEquals(999L, admin.getTenantId());
         assertEquals(UserConstant.TENANT_ADMIN_ROLE, admin.getRole());
         verify(userMapper).updateById(admin);

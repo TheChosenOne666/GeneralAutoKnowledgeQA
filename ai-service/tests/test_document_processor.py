@@ -11,7 +11,7 @@ import tempfile
 
 import pytest
 
-from services.document_processor import document_processor, CHARS_PER_PAGE
+from services.document_processor import document_processor, CHARS_PER_PAGE, PageSegment
 
 
 def _write_tmp(suffix: str, content: str) -> str:
@@ -73,3 +73,43 @@ def test_extract_pages_missing_file():
     """文件不存在应抛 FileNotFoundError，由路由捕获并降级。"""
     with pytest.raises(FileNotFoundError):
         asyncio.run(document_processor.extract_pages("/nonexistent/x.txt", "txt"))
+
+
+def test_extract_pdf_falls_back_to_pdfplumber(monkeypatch):
+    """PyMuPDF 不可用（如 _mupdf.pyd 因 DLL 加载失败）时降级到纯 Python 的 pdfplumber。
+
+    通过强制 ``import fitz`` 抛 ImportError 并注入假 pdfplumber 模块，确定性验证降级分支。
+    """
+    import builtins
+    import sys
+    import types
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "fitz" or name.startswith("fitz."):
+            raise ImportError("No module named 'mupdf'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    class _FakePage:
+        def extract_text(self):
+            return "降级提取文本"
+
+    class _FakePdf:
+        def __init__(self):
+            self.pages = [_FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    fake_pdfplumber = types.SimpleNamespace(open=lambda _path: _FakePdf())
+    monkeypatch.setitem(sys.modules, "pdfplumber", fake_pdfplumber)
+
+    pages = asyncio.run(document_processor._extract_pdf("dummy.pdf"))
+    assert pages == [PageSegment("降级提取文本", 1)]
+

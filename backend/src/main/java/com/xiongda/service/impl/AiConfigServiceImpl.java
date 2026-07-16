@@ -122,30 +122,52 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
      * 将请求字段应用到配置实体（用户级 / 平台级复用）。
      */
     private void applyUpdate(AiConfig config, AiConfigUpdateRequest req) {
-        if (StringUtils.isNotBlank(req.getLlmProvider())) config.setLlmProvider(req.getLlmProvider());
-        if (StringUtils.isNotBlank(req.getLlmModel())) config.setLlmModel(req.getLlmModel());
+        // Embedding 向量维度必填：只要配置了 Embedding（provider / model 任一非空），
+        // 就必须填写正整数向量维度，否则拒绝保存，引导用户到 AI 配置页补全。
+        if (StringUtils.isNotBlank(req.getEmbeddingProvider())
+                || StringUtils.isNotBlank(req.getEmbeddingModel())) {
+            Integer dim = req.getEmbeddingDimension();
+            if (dim == null || dim <= 0) {
+                throw new IllegalArgumentException("Embedding 向量维度为必填项且必须为正整数，请在 AI 配置页填写向量维度");
+            }
+        }
+        // 模型必填校验：只要配置了对应模块（provider 非空），就必须填写模型名称，
+        // 否则拒绝保存并提示用户补全，避免「删掉模型名却保存成功」导致后续 LLM / 向量化调用失败。
+        if (StringUtils.isNotBlank(req.getLlmProvider()) && StringUtils.isBlank(req.getLlmModel())) {
+            throw new IllegalArgumentException("LLM 模型名称为必填项，请在 AI 配置页填写 LLM 模型名称");
+        }
+        if (StringUtils.isNotBlank(req.getEmbeddingProvider()) && StringUtils.isBlank(req.getEmbeddingModel())) {
+            throw new IllegalArgumentException("Embedding 模型名称为必填项，请在 AI 配置页填写 Embedding 模型名称");
+        }
+        // 非密钥字段：空白即清空（空白统一归一为 null，不再用 isNotBlank 守卫保留旧值），
+        // 与前端「删除字段后保存即清空」一致，避免保存后字段被旧值自动回填。
+        // 仅 API Key 保留「留空不修改」语义，避免误覆盖已存密钥（前端占位提示亦如此）。
+        config.setLlmProvider(toBlankable(req.getLlmProvider()));
+        config.setLlmModel(toBlankable(req.getLlmModel()));
         if (StringUtils.isNotBlank(req.getLlmApiKey())) config.setLlmApiKey(req.getLlmApiKey());
-        if (StringUtils.isNotBlank(req.getLlmBaseUrl())) config.setLlmBaseUrl(req.getLlmBaseUrl());
-        if (req.getLlmTemperature() != null) config.setLlmTemperature(req.getLlmTemperature());
-        if (req.getLlmMaxTokens() != null) config.setLlmMaxTokens(req.getLlmMaxTokens());
+        config.setLlmBaseUrl(toBlankable(req.getLlmBaseUrl()));
+        config.setLlmTemperature(req.getLlmTemperature());
+        config.setLlmMaxTokens(req.getLlmMaxTokens());
         if (req.getLlmModels() != null) {
             try {
                 config.setLlmModels(OBJECT_MAPPER.writeValueAsString(req.getLlmModels()));
             } catch (Exception e) {
                 config.setLlmModels(null);
             }
-            if (StringUtils.isBlank(config.getLlmModel()) && !req.getLlmModels().isEmpty()) {
-                config.setLlmModel(req.getLlmModels().get(0));
-            }
         }
-        if (StringUtils.isNotBlank(req.getEmbeddingProvider())) config.setEmbeddingProvider(req.getEmbeddingProvider());
-        if (StringUtils.isNotBlank(req.getEmbeddingModel())) config.setEmbeddingModel(req.getEmbeddingModel());
+        config.setEmbeddingProvider(toBlankable(req.getEmbeddingProvider()));
+        config.setEmbeddingModel(toBlankable(req.getEmbeddingModel()));
         if (StringUtils.isNotBlank(req.getEmbeddingApiKey())) config.setEmbeddingApiKey(req.getEmbeddingApiKey());
-        if (StringUtils.isNotBlank(req.getEmbeddingBaseUrl())) config.setEmbeddingBaseUrl(req.getEmbeddingBaseUrl());
-        if (req.getEmbeddingDimension() != null) config.setEmbeddingDimension(req.getEmbeddingDimension());
-        if (StringUtils.isNotBlank(req.getRerankProvider())) config.setRerankProvider(req.getRerankProvider());
-        if (StringUtils.isNotBlank(req.getRerankModel())) config.setRerankModel(req.getRerankModel());
+        config.setEmbeddingBaseUrl(toBlankable(req.getEmbeddingBaseUrl()));
+        config.setEmbeddingDimension(req.getEmbeddingDimension());
+        config.setRerankProvider(toBlankable(req.getRerankProvider()));
+        config.setRerankModel(toBlankable(req.getRerankModel()));
         if (StringUtils.isNotBlank(req.getRerankApiKey())) config.setRerankApiKey(req.getRerankApiKey());
+    }
+
+    /** 将字符串空白（null 或全空白）归一为 null，用于非密钥字段「空白即清空」语义。*/
+    private static String toBlankable(String v) {
+        return StringUtils.isNotBlank(v) ? v : null;
     }
 
     private AiConfigVO toVO(AiConfig config) {

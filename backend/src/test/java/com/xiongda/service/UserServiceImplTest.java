@@ -614,7 +614,7 @@ class UserServiceImplTest {
         verify(userMapper).deleteById(200L);
     }
 
-    // ==================== 配额拦截（M3-5，对齐 WeKnora） ====================
+    // ==================== 配额拦截（M3-5，对标业界成熟方案） ====================
 
     @Test
     void acceptInvitation_quotaExceeded() {

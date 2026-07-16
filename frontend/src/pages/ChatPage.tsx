@@ -377,7 +377,7 @@ function AgentSteps({ steps }: { steps: AgentStep[] }) {
 const SUGGESTIONS = [
   '文档"这是一个测试文档.docx"的具体内容是什么？',
   '如何编辑首页文档中的愿景和目标部分？',
-  'Weknora是什么平台或工具？',
+  '业界方案是什么平台或工具？',
   '如何利用img标签的onerror属性执行JavaScript代码？',
   '"Hello.txt"文档的内容是什么？',
   '测试数据.xlsx中SKU0079的库存量是多少？',
@@ -411,6 +411,8 @@ export default function ChatPage() {
   const [missingModels, setMissingModels] = useState<('llm' | 'embedding')[]>([])
   // 模型配置「填了但填错」（API Key/模型名等运行时错误），由 Python 的 error 事件触发
   const [modelConfigError, setModelConfigError] = useState(false)
+  // 模型额度不足 / 被限流（HTTP 429 / 5xx 过载 / 余额耗尽），由 Python 的 error 事件触发
+  const [quotaError, setQuotaError] = useState(false)
 
   // 对话模型下拉：从 AI 配置读取可选模型并支持切换
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null)
@@ -529,6 +531,7 @@ export default function ChatPage() {
     abortRef.current = controller
     setStreaming(true)
     setModelConfigError(false)
+    setQuotaError(false)
     followRef.current = true // 发送后主动跳到底部并跟随 AI 回复
     setMessages((prev) => [...prev, { role: 'user', content: text, time: formatTime(new Date()) }, { role: 'assistant', content: '', mode }])
     scrollToBottom('smooth')
@@ -605,6 +608,8 @@ export default function ChatPage() {
               const msg = parsed.message || '模型调用失败'
               if (parsed.error_type === 'MODEL_CONFIG_ERROR') {
                 setModelConfigError(true)
+              } else if (parsed.error_type === 'QUOTA_ERROR') {
+                setQuotaError(true)
               }
               updateLast({ content: `错误：${msg}` })
               // 收到错误事件立即结束流式：避免一直停在"思考中"且输入框无法恢复
@@ -669,6 +674,20 @@ export default function ChatPage() {
             >
               去配置
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 模型额度 / 限流提示（区别于「配置错误」：此处应稍后重试 / 检查账户额度） */}
+      {quotaError && (
+        <div className="flex-shrink-0 px-6 pt-3">
+          <div className="max-w-3xl mx-auto flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+            <div className="flex-1 text-sm text-amber-800 leading-relaxed">
+              <span className="font-semibold">模型额度不足或被限流</span>（如 HTTP 429 / 服务端繁忙 / 账户余额耗尽）。这通常不是配置错误，请稍后重试，或检查该模型的账户额度 / 套餐后再次提问。
+            </div>
           </div>
         </div>
       )}

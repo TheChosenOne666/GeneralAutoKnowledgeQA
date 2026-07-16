@@ -19,6 +19,32 @@ class ModelConfigError(Exception):
     """
 
 
+class ModelQuotaError(Exception):
+    """可识别的「模型额度 / 限流错误」。
+
+    区别于 :class:`ModelConfigError`：本类表示调用被限流（HTTP 429）、
+    服务端暂时不可用（5xx 过载）或账户额度 / 余额不足，而**非**配置
+    （Key / 模型名 / 维度）错误。Java 透传该错误类型给前端，提示用户
+    「额度不足 / 被限流，请稍后重试或检查账户额度」，而非误导其去重配模型。
+    """
+
+
+# 额度 / 限流类错误的响应体关键词（大小写不敏感匹配），用于从 4xx 响应体中
+# 区分「额度耗尽」与「Key / 模型名错误」两类问题。
+_QUOTA_KEYWORDS = (
+    "quota", "额度", "余额", "insufficient", "rate limit", "rate_limit",
+    "exceeded", "frequency", "限流", "429", "too many requests", "balance",
+)
+
+
+def is_quota_error(text: str | None) -> bool:
+    """根据响应体文本判断是否为额度 / 限流类错误（区别于配置错误）。"""
+    if not text:
+        return False
+    low = text.lower()
+    return any(k in low for k in _QUOTA_KEYWORDS)
+
+
 @dataclass
 class ModelConfig:
     """一次请求使用的 AI 模型配置（LLM / Embedding / Rerank）。"""

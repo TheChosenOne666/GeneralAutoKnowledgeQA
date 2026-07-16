@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from services.augment_queue import mark_cancelled
 from services.document_processor import document_processor
-from services.model_config import ModelConfig, ModelConfigError
+from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError
 from services.vector_store import vector_store_service
 
 router = APIRouter()
@@ -69,6 +69,14 @@ async def process_document(body: ProcessRequest):
             "chunk_count": result.get("chunk_count", 0),
             "content": result.get("content", ""),
         }
+    except ModelQuotaError as e:
+        logger.warning(f"模型额度/限流错误（文档处理）：{e}")
+        return {
+            "doc_id": body.doc_id,
+            "status": "failed",
+            "error_type": "MODEL_QUOTA_ERROR",
+            "error": str(e),
+        }
     except ModelConfigError as e:
         logger.warning(f"模型配置错误（文档处理）：{e}")
         return {
@@ -107,12 +115,33 @@ async def extract_pages(body: ExtractPagesRequest):
         return {"status": "failed", "error": str(e)}
 
 
+class PagesFromDbRequest(BaseModel):
+    """从向量库重建分页请求（预览兜底，不依赖原文件）。"""
+
+    doc_id: str
+
+
+@router.post("/document/pages-from-db")
+async def pages_from_db(body: PagesFromDbRequest):
+    """从向量库已存分块重建文档按页文本（预览兜底，不依赖原文件）。
+
+    文档已向量化即可重建，不依赖原文件是否存在 / 路径中文 / content 字段，
+    解决「原文件被清理或中文路径解析失败导致预览为空」的问题。
+    """
+    try:
+        pages = await vector_store_service.get_document_pages(body.doc_id)
+        return {"status": "ok", "pages": pages}
+    except Exception as e:
+        logger.warning(f"从向量库重建分页失败 doc_id={body.doc_id}: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
 @router.delete("/document/{doc_id}")
 async def delete_document(doc_id: str):
     """删除文档时同步清理其向量（避免 PG 中残留孤立向量），并取消其排队中的增强任务。"""
     try:
         await vector_store_service.delete_by_doc(doc_id)
-        # 标记增强任务取消（队列中待增强任务将被 worker 跳过，对齐 WeKnora 任务取消）
+        # 标记增强任务取消（队列中待增强任务将被 worker 跳过，对标业界成熟方案 任务取消）
         await mark_cancelled(doc_id)
         return {"doc_id": doc_id, "status": "deleted"}
     except Exception as e:
@@ -125,7 +154,7 @@ async def cancel_document(doc_id: str):
     """取消文档处理（软取消，保留 DB 记录）：清已写向量 + 标记增强任务取消。
 
     与 ``DELETE /document/{doc_id}`` 区别：本接口不删除文档，仅清理向量并取消排队增强，
-    配合 Java 侧将状态置为 cancelled（对齐 WeKnora 任务取消）。主流程若在跑，会在
+    配合 Java 侧将状态置为 cancelled（对标业界成熟方案 任务取消）。主流程若在跑，会在
     ``process()`` 的取消检查点读到 cancelled 标记后停止并清理。
     """
     try:

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     enable_qa_augment: bool = True
     # 单文档最多生成的问答对数量（限制 LLM 调用成本）
     qa_max_pairs: int = 20
-    # 问答增强并发度（对齐 WeKnora：分批并发生成而非单线程串行，降低「优化中」耗时）
+    # 问答增强并发度（对标业界成熟方案：分批并发生成而非单线程串行，降低「优化中」耗时）
     qa_concurrency: int = 5
     # 单个问答对的 LLM 生成超时（秒），超时则该块跳过，不阻塞整篇增强
     qa_per_qa_timeout: float = 120.0
@@ -38,12 +38,18 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     embedding_dimension: int = 1536
 
+    # 多模态 Embedding（doubao-embedding-vision 系列）的 /embeddings/multimodal 端点
+    # 单次仅支持单条 input，无法批量；文档分块数多时若逐条串行调用会极慢
+    #（3000+ 块可达数分钟，且期间取消无法中断）。用受控并发替代串行（同时作用于
+    # 限流退避重试），显著压缩整段向量化耗时。标准 /embeddings 批量接口不受影响。
+    embedding_concurrency: int = 16
+
     # Rerank
     rerank_model: str = ""
     rerank_api_key: str = ""
     rerank_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
 
-    # Vector DB —— 默认 pgvector（Postgres 持久化，对齐 WeKnora，重启不丢知识）
+    # Vector DB —— 默认 pgvector（Postgres 持久化，对标业界成熟方案，重启不丢知识）
     # 可选：memory（零依赖演示）/ milvus（需装 pymilvus + 启动服务）
     vector_store_type: str = "pgvector"
     milvus_host: str = "localhost"
@@ -81,7 +87,7 @@ class Settings(BaseSettings):
     retrieval_bm25_tie_overlap_min: float = 0.25  # 触发平手决胜的最小词法重合度
     retrieval_bm25_tie_top_n: int = 10            # 预留：参与平手决胜的 BM25 候选条数（当前未使用）
 
-    # 重排方式（对齐 WeKnora Rerank 跨领域判别意图，但用已配置的 LLM 代替写死的领域词 / OpenAI rerank endpoint）：
+    # 重排方式（对标业界成熟方案 Rerank 跨领域判别意图，但用已配置的 LLM 代替写死的领域词 / OpenAI rerank endpoint）：
     # - llm（默认）：用已配置的 LLM 对候选块逐块打 0~1 相关性分并重排，跨领域判别最稳、不写死领域，
     #   且不新增服务 / 密钥（复用 AI 配置页已填的 LLM）。
     # - api：调用 OpenAI 兼容 /rerank 接口（需配置 rerank_api_key；火山原生 rerank 非此格式，不可用）。
@@ -91,14 +97,20 @@ class Settings(BaseSettings):
                                      # 重排再精排取 top_n，提升模糊问句召回（真正相关块未必进前 top_n），
                                      # 又不带回跨领域噪声。关闭重排（method=none）时不起作用。
 
-    # 普通问答增强（对齐 WeKnora KnowledgeQA 的 query rewrite + query expansion）：
+    # 方案C 大纲意图召回：问「架构/大纲/目录/考点」类问题时，优先召回章节标题
+    # outline 块的数量（保送到结果前部，使 LLM 能基于真实章节主题归纳知识框架）。
+    retrieval_outline_top_n: int = 12
+                                     # 重排再精排取 top_n，提升模糊问句召回（真正相关块未必进前 top_n），
+                                     # 又不带回跨领域噪声。关闭重排（method=none）时不起作用。
+
+    # 普通问答增强（对齐 业界 KnowledgeQA 方案 的 query rewrite + query expansion）：
     # 仅作用于 rag 模式（retrieve(enhance=True) 时触发），Agent 模式不开启（Agent 内部
     # 由 LLM 自生成子查询，不做二次改写，避免画蛇添足）。
     enable_query_rewrite: bool = True    # 检索前用 LLM 把口语化问题改写成检索友好 query
     enable_query_expansion: bool = True  # 主检索召回不足时用 LLM 生成扩展查询再检索并 RRF 合并
     retrieval_expansion_min: int = 3     # 主检索结果数 < 此值才触发 expansion（避免无谓额外调用）
 
-    # 检索无结果兜底策略（对齐 WeKnora）：知识库/文档为空或检索不匹配时
+    # 检索无结果兜底策略（对标业界成熟方案）：知识库/文档为空或检索不匹配时
     #  - fixed：直接返回固定文案（不调用 LLM，省成本）
     #  - model（默认）：交给 LLM 用通用知识兜底，但须在回答中声明「知识库暂无相关内容」
     fallback_strategy: str = "model"

@@ -1,4 +1,4 @@
-"""查询改写与扩展（对齐 WeKnora KnowledgeQA 的 query rewrite + query expansion）。
+"""查询改写与扩展（对齐 业界 KnowledgeQA 方案 的 query rewrite + query expansion）。
 
 仅用于普通问答（rag 模式 retrieve(enhance=True)）：
 - ``rewrite_query``：把口语化 / 长问句改写成检索友好的关键词短句，提升措辞不一致时的召回。

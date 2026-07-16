@@ -60,8 +60,8 @@
 | 业务数据库 | PostgreSQL | 多租户行级隔离 |
 | 缓存 | Redis | 三层缓存（L3 会话 / L1 检索 / L2 嵌入） |
 | **AI 服务** | **Python + FastAPI**（RAG 检索 / 自研 ReAct Agent 推理 / 文档处理；LangChain 为可选依赖） | RAG 检索、Agent 推理、文档处理 |
-| 向量数据库 | Postgres pgvector（默认持久化，对齐 WeKnora）/ Milvus（可选）/ 内存（演示） | 文档向量存储与检索，重启不丢知识 |
-| 文档解析 | PyMuPDF（PDF）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
+| 向量数据库 | Postgres pgvector（默认持久化，对标业界成熟方案）/ Milvus（可选）/ 内存（演示） | 文档向量存储与检索，重启不丢知识 |
+| 文档解析 | PyMuPDF（PDF，C 扩展不可用降级 pdfplumber）/ python-docx（DOCX）/ MD·TXT 直读 + LangChain RecursiveCharacterTextSplitter 分块 | 未引入 unstructured |
 
 ---
 
@@ -151,7 +151,7 @@ public Object doInterceptor(ProceedingJoinPoint joinPoint, AuthCheck authCheck) 
 
 > **M4-2 共享/个人知识库（2026-07-14 完成）**：前述数据级权限已落地。
 > - **后端（M3-1 已完成并单测覆盖）**：`service/KbPermission.java` 的 `assertCanCreate` / `assertCanWrite` 集中实现——共享库仅 `tenant_admin` / `super_admin` 可创建与写入（上传/删除文档），个人库仅 owner 可写，超管跨租户完全放行，并叠加租户隔离第一维度；`DocumentServiceImpl.uploadDocument` / `deleteDocument` 与 `KnowledgeBaseServiceImpl.createKnowledgeBase` 均调用校验，`KbPermissionTest` 12 例覆盖全部路径。
-> - **前端（本次补齐）**：`KnowledgeBasePage.tsx` 引入 `useAuth()` 取当前角色，计算 `canWrite`（共享库仅管理员为真、个人库全员为真，因个人库列表仅返回本人库）；据此隐藏「新建知识库 / 上传文档 / 文档删除」按钮与上传区，普通成员在共享库下呈**只读模式**，并显示横幅提示「仅租户管理员可维护」；个人库保持完整管理（创建/上传/删除）。后端校验为最终防线，前后端一致。
+> - **前端（本次补齐）**：`KnowledgeBasePage.tsx` 引入 `useAuth()` 取当前角色，计算 `canWrite`（共享库仅管理员为真、个人库全员为真，因个人库列表仅返回本人库）；据此隐藏「新建知识库 / 批量上传 / 批量删除」按钮，普通成员在共享库下呈**只读模式**，并显示横幅提示「仅租户管理员可维护」；个人库保持完整管理（创建/上传/删除）。后端校验为最终防线，前后端一致。
 
 ### 3.3 菜单动态渲染
 
@@ -175,17 +175,17 @@ const menuItems = [
 **租户管理**（`TenantController` `/api/tenant`，仅超管）：
 
 - `GET /list`：分页列出全部租户，VO 实时统计 `memberCount` / `docCount`。
-- `POST /create`：创建租户，并把指定**已注册**邮箱用户设为该租户首个 `tenant_admin`（对齐 WeKnora EnsureOwner）；slug 全局唯一；拒绝把 `super_admin` 设为租户管理员。
+- `POST /create`：创建租户，并把指定**已注册**邮箱用户设为该租户首个 `tenant_admin`（对标业界成熟方案 EnsureOwner）；slug 全局唯一；拒绝把 `super_admin` 设为租户管理员。
 - `POST /{id}/status`：`active` ↔ `suspended` 启用停用。
 - `POST /{id}/quota`：设置成员数 / 文档数上限（`<=0` 视为不限）。
 
-**配额执行（对齐 WeKnora）**：`DocumentServiceImpl.uploadDocument` 与 `UserServiceImpl` 邀请/注册入租户时，校验 `Tenant.maxDocuments` / `maxMembers`，达到上限即拒绝（`OPERATION_ERROR`）。
+**配额执行（对标业界成熟方案）**：`DocumentServiceImpl.uploadDocument` 与 `UserServiceImpl` 邀请/注册入租户时，校验 `Tenant.maxDocuments` / `maxMembers`，达到上限即拒绝（`OPERATION_ERROR`）。
 
 **平台默认 AI 配置**：`AiConfigController` 新增 `GET/POST /ai-config/platform-default`（仅超管），以 `tenant_id=0` 哨兵行作为全租户兜底；用户配置回退链：`用户级 → 租户级 → 平台级`。前端 `AIConfigPage` 在超管视角下提供「我的配置 / 平台默认配置」作用域切换。
 
 **全局审计日志**：`AuditLogController.listLogs` 对 `super_admin` 走 `listAllLogs`（跨租户），对 `tenant_admin` 走 `listLogsByTenant`（本租户）。
 
-**超管切换租户操作（方案A，对齐 WeKnora TenantSelector）**：平台超管除平台级页面（租户管理 / 全局审计 / 平台默认 AI 配置）外，还常以"某个租户管理员"身份进入其知识库、成员、对话、租户级 AI 配置。采用**租户上下文切换**而非新建跨租户列表页：
+**超管切换租户操作（方案A，对齐 业界 TenantSelector（租户切换））**：平台超管除平台级页面（租户管理 / 全局审计 / 平台默认 AI 配置）外，还常以"某个租户管理员"身份进入其知识库、成员、对话、租户级 AI 配置。采用**租户上下文切换**而非新建跨租户列表页：
 
 - **后端**：`UserServiceImpl.getLoginUser` 解析出登录用户后，若角色为 `super_admin` 且请求头携带 `X-Tenant-ID`（`CommonConstant.TENANT_HEADER`），则将其 `tenantId` 临时覆盖为该请求头值（仅内存对象，不写库）；普通用户忽略该头，防止越权切换租户。`AuthInterceptor` 对 `super_admin` 直接放行全部接口，故切进某租户后可访问其 `tenant_admin` 专属业务接口（如成员管理 `@AuthCheck(mustRole=tenant_admin)`）。
 - **前端**：新增 `TenantContext`（`context/TenantContext.tsx`），超管登录后加载全部租户并默认选中 `localStorage` 中已选（否则第一个）；切换器写入 `localStorage` 的 `xiongda_current_tenant`。`api/client.ts` 请求拦截器携带 `X-Tenant-ID` 头。`AppLayout` 仅对超管渲染租户切换器，并将其有效角色映射为可见 `tenant_admin` 菜单（知识库 / 成员管理），同时主内容区以 `currentTenantId` 为 `key` 重挂，触发各业务页重新加载该租户数据；`ChatContext` 在 `currentTenantId` 变化时清空并刷新对话列表。
@@ -224,7 +224,7 @@ CREATE TABLE document (
     file_size   BIGINT,
     status      VARCHAR(20) DEFAULT 'processing',
     -- processing → parsing → retrieving → optimizing(已可检索) → ready / failed
-    -- （对齐 WeKnora finalizing=queryable：向量化完成即可检索，optimizing 仅问答增强后台进行中）
+    -- （对齐 业界 finalizing（异步增强）=queryable：向量化完成即可检索，optimizing 仅问答增强后台进行中）
     chunk_count INTEGER DEFAULT 0,
     error_msg   TEXT,
     uploaded_by BIGINT NOT NULL,
@@ -295,19 +295,29 @@ LLM 生成回答（SSE 流式输出）
 引用溯源（标注来源文档 + 页码）
 ```
 
-> **普通问答增强（A 档，2026-07-14，对齐 WeKnora KnowledgeQA）**：rag 模式检索前对 query 做 LLM 改写（rewrite）+ 召回不足时扩展检索（expansion），提升「措辞不一致」场景的召回鲁棒性。仅作用于 rag 模式（`retrieve(enhance=True)`）；Agent 模式不开启（Agent 内部由 LLM 自生成子查询，二次改写会画蛇添足）。
+> **普通问答增强（A 档，2026-07-14，对齐 业界 KnowledgeQA 方案）**：rag 模式检索前对 query 做 LLM 改写（rewrite）+ 召回不足时扩展检索（expansion），提升「措辞不一致」场景的召回鲁棒性。仅作用于 rag 模式（`retrieve(enhance=True)`）；Agent 模式不开启（Agent 内部由 LLM 自生成子查询，二次改写会画蛇添足）。
 > - **query rewrite**：`services/query_rewrite.py:rewrite_query` 用一次 LLM 调用把口语化 / 长问句改写成检索友好的关键词短句；模型配置错误（`ModelConfigError`）向上抛出由路由转 `MODEL_CONFIG_ERROR`，其他异常降级用原话检索。
 > - **query expansion**：主检索结果数 `< retrieval_expansion_min`（默认 3）时，`expand_query` 生成 1~2 个语义不同角度的扩展 query，分别检索后 RRF 合并兜底；任何异常降级不扩展。
 > - 开关：`core/config.py` 的 `enable_query_rewrite` / `enable_query_expansion`（默认开），可独立关闭。`retrieve` 的 L1 缓存 key 仍用用户原话（改写仅提升本次召回，不污染缓存键）；rewrite / expansion 失败均不阻断主流程（配置错误除外）。
 > - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
 
-> **LLM 重排（2026-07-16，对齐 WeKnora Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。WeKnora 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 **0.40**，2026-07-16 由 0.30 上调，更激进剔除跨主题噪音，保留跨库召回）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
+> **LLM 重排（2026-07-16，对标业界成熟方案 Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。业界方案 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 **0.40**，2026-07-16 由 0.30 上调，更激进剔除跨主题噪音，保留跨库召回）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
 
 > **重排候选池（2026-07-16 方案A）**：开启重排时，向量/BM25 融合不再直接取 `top_n`（默认 5）送重排，而是先取更大融合池 `retrieval_rerank_top_k`（默认 10），由 LLM 在整个池内精排后取 `top_n`。解决「模糊问句真正相关块未进前 `top_n`、LLM 只在这 `top_n` 内打分致全 0 漏召回」的回归；相关块落在第 6~10 位时能被救回，且不带回跨领域噪声（最终仍按阈值过滤取 `top_n`）。关闭重排（`method=none`）时该池不起作用，直接截断 `top_n`。L1 缓存 key 已纳入 `rerank_top_k` 与 `top_n`，切换后旧缓存自动失效。
 
+> **大纲感知分块与大纲召回（2026-07-16 方案C）**：问「知识架构 / 大纲 / 目录 / 有哪些模块」类问题时，原检索在概述页命中的是泛泛介绍，AI 难以归纳出文档真实章节框架。方案C 不引入父子分块 / GraphRAG，而是**大纲感知分块 + 大纲专用召回路由**：
+> - **分块**：`document_processor.chunk_text` 在常规内容块之外，逐页扫描标题行生成 `chunk_type=outline` 的标题块（记录 `section_title`），不破坏内容块；标题识别启发式（编号章节 `1.`/`1.2`/`(1)`/`一、`/`第X章` + 架构/大纲/目录/知识点/考点/体系 关键词），已收紧规则去掉追问句与冒号短句噪声，避免 outline 块过多稀释常规检索。QA 增强跳过 outline 块（仅对内容块生成问答对）。
+> - **检索过滤**：`vector_store` 两种实现的 `search`/`keyword_search` 新增 `chunk_types` 过滤；**常规检索（`chunk_types=None`）默认排除 outline 块**，仅大纲意图显式传 `["outline"]` 才召回，避免稀释常规问答。
+> - **大纲意图路由**：`rag.py` 的 `_is_outline_query`（关键词：架构/大纲/目录/有哪些/知识点/考点/体系/模块…）命中时，在检索主流程后追加一轮仅召回 outline 块的「向量 + BM25 融合」，并将这些大纲块**保送结果前部**（跳过 rerank 阈值与相关性门槛过滤，避免短标题块被误剔除），再补常规结果，使 LLM 既能看到知识框架标题又能看到正文细节。新增配置 `retrieval_outline_top_n=12`。
+> - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成 outline 块；新上传文档自动带 outline 块。
+
+> **Embedding 并发化（2026-07-16 修复）**：多模态 Embedding 端点（`doubao-embedding-vision` 的 `/embeddings/multimodal`）单次仅支持单条 input，原实现逐条串行，大文档（分块数千）整段向量化可达 10 分钟、且取消无法中断。改为 `asyncio.Semaphore(embedding_concurrency=16)` 限流并发 + 429/5xx 退避重试（详见 task-breakdown M4）。纯文本文档建议用标准 `doubao-embedding`（批量、秒级）。
+
+> **文档处理异步线程池（2026-07-16）**：Java 侧文档处理（`triggerDocumentProcessing`）已由默认 `ForkJoinPool.commonPool()` 改为专用 `ThreadPoolExecutor`（核心2/最大8/队列16，前缀 `doc-process-`，`CallerRunsPolicy` 背压，空闲回收），隔离上传密集 IO 任务、避免挤占公共池。上传请求仍立即返回，进度由前端轮询。
+
 ### 5.3 Agent 多步推理（M4-1 + M4-B function calling 升级）
 
-M4-1 采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），与腾讯 WeKnora 的自研 ReAct 引擎思路一致，基于 LLM 文本协议（Thought / Action / Action Input / Final Answer）。M4-B 升级为 **OpenAI 兼容原生 function calling**，LLM 直接返回结构化 `tool_calls`，解析可靠，同时保留 ReAct 文本降级路径兼容不支持 function calling 的模型。
+M4-1 采用**自研轻量 ReAct 循环**（非 LangChain AgentExecutor），与业界成熟 RAG 方案 的自研 ReAct 引擎思路一致，基于 LLM 文本协议（Thought / Action / Action Input / Final Answer）。M4-B 升级为 **OpenAI 兼容原生 function calling**，LLM 直接返回结构化 `tool_calls`，解析可靠，同时保留 ReAct 文本降级路径兼容不支持 function calling 的模型。
 
 - **触发方式**：问答页底部「普通问答 / 智能推理」分段切换，前端 `mode=agent` 经 Java 透传至 Python `/ai/chat/stream`（`ChatController` → `AiServiceClient` 早已支持 `mode` 透传，Java 无需改动）。
 - **主路径（M4-B function calling）**：`run_agent` 每轮调用 `llm_service.stream_agent_turn(messages, TOOLS)` → 流式 yield 思考文本 token + 流末 tool_calls → 调用 `_execute_tool` 执行工具 → 回填 `assistant(tool_calls)` + `tool` 消息（标准 function-calling 协议），进入下一轮推理，直到模型产出纯文本答案（无 tool_calls）或达到最大轮数（`MAX_AGENT_ITERATIONS=5`）。
@@ -343,11 +353,11 @@ Final Answer: 年假...病假...区别...
 
 ---
 
-### 5.4 文档处理深度对齐 WeKnora（M5 规划）
+### 5.4 文档处理深度对标业界成熟方案（M5 规划）
 
-> 目标：把 M4-8.1 的「finalizing 队列」思想扩展到整条主流程，并补齐 WeKnora 的健壮性（重试 / 多检查点守卫 / 阶段 span）与功能广度（父子分块 / 多模态 / GraphRAG / 复合检索）。逐项落地前本节仅记录规划，各子任务完成后再补充对应详细设计。
+> 目标：把 M4-8.1 的「finalizing 队列」思想扩展到整条主流程，并补齐 业界方案 的健壮性（重试 / 多检查点守卫 / 阶段 span）与功能广度（父子分块 / 多模态 / GraphRAG / 复合检索）。逐项落地前本节仅记录规划，各子任务完成后再补充对应详细设计。
 >
-> 与 WeKnora 的 8 点差异及实现顺序（详见 `docs/task-breakdown.md` M5）：
+> 与 业界的 8 点差异及实现顺序（详见 `docs/task-breakdown.md` M5）：
 > 1. M5-1 主流程持久化队列化（解析+向量化入队，对齐 Asynq 整流程异步）
 > 2. M5-2 主流程重试机制（MaxRetry + 退避）
 > 3. M5-3 多检查点取消守卫（对齐 4 处 isKnowledgeAborted）
@@ -546,8 +556,8 @@ multi-rag-employee/
         │
 ② 知识库与文档
    创建知识库 POST /api/knowledge/add（scope: shared / personal）
-   上传文档  POST /api/knowledge/document/upload（MultipartFile；批量上传由前端 <input multiple> 循环调用此接口）
-        → Document 状态机：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（对齐 WeKnora finalizing，前端轮询列表状态）
+   上传文档  POST /api/knowledge/document/upload（MultipartFile；批量上传由前端弹窗选文件入列表、点击「确认上传」后循环调用此接口统一解析）
+        → Document 状态机：processing → parsing → retrieving → optimizing(已可检索) → ready / failed（对齐 业界 finalizing（异步增强），前端轮询列表状态）
    批量删除 POST /api/knowledge/document/batch-delete（body: { ids: [] }；fail-fast 全量鉴权后逐个删向量+逻辑删除，只清一次 L1 缓存，返回实际删除数量）
         │
 ③ 问答
@@ -574,7 +584,7 @@ Java DocumentServiceImpl.triggerDocumentProcessing
    │
    ▼
 Python POST /ai/document/process → DocumentProcessor.process()
-   1) extract_text：PDF(PyMuPDF) / DOCX(python-docx) / MD·TXT(直读)
+   1) extract_text：PDF(PyMuPDF，C 扩展不可用降级 pdfplumber) / DOCX(python-docx) / MD·TXT(直读)
    2) chunk_text：RecursiveCharacterTextSplitter(512 / 50)
    3) 检索阶段：回调 status=retrieving → embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
    4) 原始块立即 store_chunks 入库（PG 按 doc_id 幂等覆盖）→ 文档【立即可被检索】
@@ -594,7 +604,7 @@ Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCou
         │
    └─ 失败分支：更新 status=failed + errorMsg（default 异常兜底）
 
-> **对齐 WeKnora finalizing=queryable + 任务队列**：向量化完成即可检索，optimizing 仅表示问答增强
+> **对齐 业界 finalizing（异步增强）=queryable + 任务队列**：向量化完成即可检索，optimizing 仅表示问答增强
 > 后台进行中，不再阻塞用户检索（旧版串行等待增强，大文档会卡在「优化中」约 20 分钟）。增强任务改为
 > **持久化队列**（`services/augment_queue.py`，Redis list `xiongda:augment:queue`，进程内 asyncio 任务
 > 改为跨重启不丢）：`process()` 向量化后仅 store 原始块 + 回调 optimizing + 入队即返回；常驻 worker
@@ -605,7 +615,7 @@ Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCou
 > **崩溃恢复（sweep）**：队列采用 queue → processing 两段式（RPOPLPUSH，processing 记录带 started_at），
 > 启动时 `sweep_stale` 把卡死（处理中超时）的任务移回 queue，服务重启不丢增强任务。
 > **任务取消**：Java 删除文档时调 Python `DELETE /ai/document/{doc_id}`，清向量库并 `mark_cancelled(doc_id)`，
-> worker 取任务前检查 cancelled 集 / 原始块是否已不存在，命中则跳过（不回调 ready），对齐 WeKnora 任务取消。
+> worker 取任务前检查 cancelled 集 / 原始块是否已不存在，命中则跳过（不回调 ready），对标业界成熟方案 任务取消。
 > Java `updateDocumentStatus` 带「终态守卫」：ready/failed 落定后忽略迟到的最终之前阶段回调，防止竞态回退。
 ```
 
@@ -613,9 +623,13 @@ Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCou
 
 > **文档批量删除（2026-07-16）**：`POST /api/knowledge/document/batch-delete`（body `{ ids: [] }`）→ `DocumentService.deleteDocuments` 先对全部文档 fail-fast 校验（存在 / 租户隔离 / 知识库写权限），任一不通过即抛异常、不删除任何文档；全部通过后逐个调 Python 清向量 + 逻辑删除，最后**只清一次**该租户 `retrieval:{tenant}:*` L1 缓存并统一同步涉及知识库的文档数（较单删循环 N 次清缓存更高效），返回实际删除数量。批量上传复用单文件上传接口，由前端循环调用，后端零改动。详见 `docs/task-breakdown.md` 对应小节。
 
+> **知识库批量上传/删除改为弹窗表单（2026-07-16 前端）**：`KnowledgeBasePage` 不再在文档列表旁用行内勾选，顶部工具栏改为「新建知识库 / 批量上传 / 批量删除」三个独立按钮。**批量上传**：点击弹出模态框，用户从本地选择文件或拖拽文件进入列表（可多次添加），**选完不立即解析**；列表中可单条移除；点击「确认上传」后才统一循环调用 `uploadDocument` 走完整上传+解析流程（含逐个进度、失败汇总）。**批量删除**：点击弹出模态框，展示当前知识库文档列表（带全选/取消全选），勾选后点击「确认删除」统一调 `batch-delete`。后端接口零改动，仅前端交互形态变更。详见 `docs/task-breakdown.md` 对应小节。
+
 > **文档取消（软取消，2026-07-15）**：用户可在处理中任意阶段（processing/parsing/retrieving/optimizing）点「取消」停止。`POST /api/knowledge/document/cancel` → Java 标 `cancelled`（终态，终态守卫阻止中间态回退）→ `POST /ai/document/{doc_id}/cancel` 清向量 + `mark_cancelled`；Python `process()` 在嵌入前 / 入库后两处检查 `is_cancelled`，命中即清向量 + 回调 `cancelled`。竞态：若取消发生在 Python 跑完返回 ready/optimizing 之后，因 DB 已 cancelled，触发分支主动清向量，避免残留可检索但已取消的文档。详见 `docs/task-breakdown.md` 对应小节。
 
-> **M5 规划**：上述主流程（解析+向量化）当前仍跑在 Python 同步 handler 内，且缺重试 / 多检查点守卫 / 阶段 span / 父子分块 / 多模态 / GraphRAG / 复合检索。这 8 点将在 M5 阶段逐一对齐 WeKnora（见 `docs/task-breakdown.md` M5）。
+> **文档处理失败重试（2026-07-16）**：`failed`/`cancelled` 终态文档在操作列显示「重试」。`POST /api/knowledge/document/retry` → Java 校验权限 + 仅终态可重试 + 校验原文件仍存在 → 绕过终态守卫直接重置为 `processing` 并清空 `errorMsg`/`modelConfigError`/`chunkCount` → 复用原上传者 AI 配置重新触发处理。附带修复两处：① `AiServiceClient` 的 WebClient 响应缓冲上限从默认 256KB 放宽到 20MB（`maxInMemorySize`），修复大文档（如 394 页 PDF 全文随响应返回）触发 `DataBufferLimitException`；② `updateDocumentStatus` 成功终态（ready/optimizing）强制清空 `errorMsg`/`modelConfigError`，且因 MyBatis-Plus `updateById` 默认 `NOT_NULL` 策略忽略 null 字段，给 `Document.errorMsg`/`modelConfigError` 加 `@TableField(updateStrategy=ALWAYS)` 使置 null 能写库，避免重试成功后旧错误信息残留。详见 `docs/task-breakdown.md` 对应小节。
+
+> **M5 规划**：上述主流程（解析+向量化）当前仍跑在 Python 同步 handler 内，且缺重试 / 多检查点守卫 / 阶段 span / 父子分块 / 多模态 / GraphRAG / 复合检索。这 8 点将在 M5 阶段逐一对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
 
 ### 9.3 RAG 问答全链路（含三层缓存）
 
@@ -652,7 +666,7 @@ Python event_generator（routers/chat.py）
    └─ 发 event: done（conversation_id, sources）
 ```
 
-> **检索无结果兜底策略（对齐 WeKnora，2026-07-14）**：知识库/文档为空或检索不匹配时不再让 LLM 静默凭通用知识作答，而是走可配置兜底（`core/config.py` 的 `fallback_strategy`，默认 `model`）：
+> **检索无结果兜底策略（对标业界成熟方案，2026-07-14）**：知识库/文档为空或检索不匹配时不再让 LLM 静默凭通用知识作答，而是走可配置兜底（`core/config.py` 的 `fallback_strategy`，默认 `model`）：
 > - **rag 普通问答**：
 >   - `fixed`：检索无结果直接发 `event: token`（内容=`fallback_response` 固定文案「知识库暂无相关内容…」），**不调用 LLM**（省成本），随后 `done`。
 >   - `model`（默认）：仍调用 `llm.stream_generate`，但传入 `no_kb_content=True`，在 system 指令中要求 LLM 用通用知识兜底并**明确声明「知识库中暂无相关内容，以下回答基于通用知识，仅供参考」、严禁编造或声称内容来自知识库**。
@@ -663,7 +677,14 @@ Python event_generator（routers/chat.py）
 > **前端停止生成（已修复）**：流式未正常结束（如 LLM 响应极慢、HMR 热更新保留状态）会让 `streaming` 卡在 `true`，导致输入框 `disabled` 无法输入。改用 `AbortController`：`streamChat` 透传 `signal`，生成中显示「停止」按钮可主动中断（`AbortError` 不报错、保留已生成内容）；切换会话时 `useEffect` 自动 `abort()` 旧流并重置 `streaming`，恢复输入态。
 > **未配置模型常驻提示（M3-3 前端）**：进入问答页即调用 `GET /api/ai-config/`，按「provider 与 model 均非空」判定 LLM / Embedding 是否已配置（API Key 不在前端可见范围，故不纳入判定）；任一未配置则在消息区顶部渲染常驻琥珀色横幅并列出缺失项（仅 LLM / 仅 Embedding / 两者皆缺），附「去配置」跳转到 `/ai-config`。接口异常时静默忽略，不打扰对话。
 > **模型配置正确性运行时检测（M3-3 已实现）**：上述常驻提示只覆盖"字段是否为空"。M3-3 额外覆盖**配置填了但填错**的情况——API Key 错误 / 模型名错误 / 提供商不匹配 / 向量维度不匹配，会导致上传文档向量化失败或对话 LLM 调用失败。落地：① Python 新增 `ModelConfigError` 并真正消费用户配置、**取消静默降级**（无 Key 直接抛错而非造假向量/假回答），调用失败 / 维度不匹配抛此错误；② Java `AiServiceClient.toAiConfigMap` 把配置以 `ai_config` 透传 Python，失败时解析 `error_type==MODEL_CONFIG_ERROR` 置 `document.modelConfigError`；③ 前端 `ChatPage` 解析 SSE `event: error` 的 `MODEL_CONFIG_ERROR` 渲染红色「模型配置不正确」横幅 + 跳转，`KnowledgeBasePage` 在文档 `modelConfigError` 时同样提示。与存在性常驻横幅构成"存在性+正确性"两层提示。
+> **Embedding 向量维度：必填 + 按提供商白名单透传（2026-07-17 调整）**：向量维度由"可选、标准路径不传"改为**必填**，且**按提供商白名单决定是否透传 `dimensions`**。① **必填（前端体验与普通字段一致）**：`AIConfigPage` 的「向量维度」字段**不显示红色必填星号/红框、选厂商时也不自动填充**（与「模型名称」等普通字段一致）；保存时若已配置 Embedding 但维度非正整数，则在维度框**下方内联**提示「请填写向量维度（正整数）」并拦截提交；Java `AiConfigServiceImpl.applyUpdate` 对 `embeddingProvider/model` 非空但 `embeddingDimension` 为 null/≤0 抛 `IllegalArgumentException`；Python `_embed_remote` 在 `embedding_dimension` 为空时直接抛 `ModelConfigError`（维度必填仍保留，用于结尾维度一致性校验）；② **按白名单透传**：`embedding.py` 顶部定义 `DIMENSION_SUPPORTED_PROVIDERS = {"火山方舟", "OpenAI", "阿里云百炼"}`，仅当 `cfg.embedding_provider` 在白名单内才发送 `dimensions=用户填写值`，白名单外的提供商（如 `BGE` 的 bge-m3）不识别该参数（传入会 400）故**不传**、使用模型默认维度；L2 缓存 key 已纳入维度避免不同维度串缓存。这样百炼 / 火山方舟 / OpenAI 严格按用户填的维度向量化，而 BGE 等走原生维度。
+> **AI 配置保存「删除即清空、不自动回填」（2026-07-17 修复）**：此前 `AiConfigServiceImpl.applyUpdate` 对所有非密钥字段用 `if (StringUtils.isNotBlank(...))` 守卫——**空白时不更新、保留旧值**，导致前端删掉字段（如模型名称）后点保存，后端保留旧值并在返回 `updated` 中带回，前端 `setForm(toForm(updated))` 又把旧值填回，用户误以为"自动填写"；同时 LLM 主模型空但「更多模型」列表非空时会自动取列表第一项填充主模型。修复：① 非密钥字段（provider / model / baseUrl / temperature / maxTokens / embedding* / rerank* / dimension）改为**空白即清空**——新增 `toBlankable(String)` 将 null 或全空白归一为 `null` 后 `set`，删除字段保存后即为空白、不再回填；② **移除** `llmModel = llmModels.get(0)` 的自动填充，主模型留空就留空；③ **仅 API Key 保留「留空不修改」语义**（避免误覆盖已存密钥，前端占位提示亦如此）。前端无需改动——后端现在返回空白值，表单自然显示空白。单测 `AiConfigServiceImplTest` 新增 `updateConfig_blankFieldClearsStoredValue`（空白清空旧值）、并将 `updateConfig_persistsLlmModelsJsonAndFillsDefaultModel` 断言改为「主模型留空不再自动取第一项」（仍验证 llmModels 列表持久化），**10 例全过**。
+> **AI 配置模型必填校验 + 删除 Rerank（2026-07-17 再调整）**：① **模型必填拦截**：在「删除即清空」之上新增**保存拦截**——`AiConfigServiceImpl.applyUpdate` 在 `llmProvider`（或 `embeddingProvider`）非空但对应 `model` 为空时抛 `IllegalArgumentException("LLM/Embedding 模型名称为必填项，请在 AI 配置页填写…")`，拒绝保存；前端 `handleSave` 增加预校验，provider 已选但模型名空白时直接在顶部红字提示「请填写 LLM/Embedding 模型名称」并阻止提交（与后端拦截一致）。这样「删掉模型名」既不会自动回填、也不会静默保存成功，而是明确引导用户补全。② **删除 Rerank 配置区块**：AI 模型配置页移除「Rerank 重排序模型」卡片、`RERANK_ICON` 常量与状态概览中的 Rerank 项（仅前端页面，未动后端 `ai_config` 表与 `toVO` 字段）。单测 `AiConfigServiceImplTest` 新增 `updateConfig_missingLlmModelWhenProviderSet_throws` / `updateConfig_missingEmbeddingModelWhenProviderSet_throws`（provider 已填、模型空白抛异常），并将 `updateConfig_persistsLlmModelsJsonAndFillsDefaultModel` 改为显式设 `llmModel`（证明主模型以显式填写为准、不取列表首项），`updateConfig_blankFieldClearsStoredValue` 去掉 provider 以免触发必填；**12 例全过（BUILD SUCCESS）**；重启 Java（PID 28352）Tomcat on 8080 Started。
 > **模型配置错误的前端快速恢复（2026-07-14 修复）**：对话 LLM 调用失败触发 `MODEL_CONFIG_ERROR` 时，前端 `ChatPage` 收到 `event: error` 立即 `break` 结束流式，使输入框恢复、不再卡在"思考中"；同时 Python `llm.py` 将 httpx 连接超时收紧为 10s、`base_url` 为空时立即抛错，避免请求悬挂导致前端长时间等待。`routers/chat.py` 在检索阶段命中 `ModelConfigError` 时补发 `done` 并结束，避免重复 `event: error`。
+
+> **额度/限流错误与配置错误分离（2026-07-17 修复）**：此前 Embedding/LLM 调用遇到 HTTP 429（额度耗尽/限流）或 5xx（服务过载）时被**统一转成 `ModelConfigError`**，前端误报"模型配置不正确，请重新配置"，诱导用户去改配置——而真实原因是 Qwen 等模型额度减少/被限流。修复：① Python 新增 `ModelQuotaError`（额度/限流错误类型）与 `is_quota_error()` 关键字判定（quota/额度/余额/insufficient/rate limit/429/too many requests/balance…）；`embedding.py` 429/5xx 重试耗尽、或 4xx 响应体含上述关键字时抛 `ModelQuotaError`，其余 4xx（Key/模型名错）仍为 `ModelConfigError`；`llm.py` 在 `_assert_usable_response` 中套用同规则；② 路由层 `routers/document.py` 返回 `error_type: MODEL_QUOTA_ERROR`、`routers/chat.py` 产出 SSE `error_type: QUOTA_ERROR`；③ Java `Document`/`DocumentVO` 新增 `quota_error` 列（`schema.sql` 已 `ALTER TABLE` 上线），`DocumentServiceImpl.triggerDocumentProcessing` 解析 `error_type==MODEL_QUOTA_ERROR` 置位、`updateDocumentStatus` 6 参重载透传、`getDocumentVO`/`retryDocument` 同步清位；④ 前端 `KnowledgeBasePage` 在文档 `quotaError` 时渲染**琥珀色**"额度不足/被限流，请稍后重试"横幅 + 「重试」按钮（区别于红色"去配置"配置错误横幅），`ChatPage` SSE `QUOTA_ERROR` 同样渲染琥珀色横幅。与红色配置错误提示构成"配置错误→去改配置 / 额度限流→稍后重试"的精准分流。
+
+> **批量 Embedding 超限（batch size > 20）修复（2026-07-17）**：`EmbeddingService._embed_remote` 标准路径此前将整篇文档全部 chunk 一次性作为 `input` 发给 Embedding API，超出阿里云百炼等接口的每批 ≤ 20 条硬限制而报 `HTTP 400 batch size is invalid`；且原代码把任意 4xx 笼统归为 `ModelConfigError`，误导用户去改配置。修复为按 `EMBEDDING_BATCH_SIZE = 20` 分批调用再按序合并，对所有 OpenAI 兼容提供商均安全。详见 task-breakdown.md M3-3。
 
 ### 9.4 SSE 事件流协议
 
@@ -734,7 +755,7 @@ data: {"conversation_id": "1234567890", "sources": [...]}
 | 前端 | Java | 会话/知识库/用户 CRUD | REST + JWT |
 | 前端 | Java | `/api/knowledge/document/file/{docId}` | HTTP 文件流（M4-4 预览，iframe） |
 | 前端 | Java | `/api/knowledge/document/file/status/{docId}` | 预览前置校验：检测原文件是否被删 / 被改，返回 `{exists, changed, message}`（避免 Whitelabel 错误页） |
-| 前端 | Java | `/api/knowledge/document/pages?docId=` | 真实分页预览（M4-4 增强）：返回 `[{pageNo, text}]`，PDF 真实页码 / docx-txt-md 估算页码，与引用来源一致；AI 不可用时降级用已存全文估算 |
+| 前端 | Java | `/api/knowledge/document/pages?docId=` | 真实分页预览（M4-4 增强）：返回 `[{pageNo, text}]`，PDF 真实页码 / docx-txt-md 估算页码，与引用来源一致；三级兜底——① AI 解析原文件 `extract-pages` → ② 向量库已存分块重建 `pages-from-db`（2026-07-16 新增，原文件被清理/中文路径失败仍可用）→ ③ AI 不可用时已存全文估算 |
 | Java | Python | `/ai/chat/stream` | HTTP SSE 透传（WebClient） |
 | Java | Python | `/ai/document/process` | HTTP（异步触发） |
 | Java | Python | `/ai/cache/invalidate` | HTTP（文档变更清 L1） |

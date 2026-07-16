@@ -59,6 +59,20 @@ public interface DocumentService extends IService<Document> {
     boolean cancelDocument(Long docId, Long tenantId, User user);
 
     /**
+     * 重试处理失败的文档（重新触发解析 / 分块 / 向量化）。
+     *
+     * <p>仅终态 {@code failed} / {@code cancelled} 可重试（网络抖动、模型配置已修正后等场景）；
+     * 处理中（processing/parsing/...）或已就绪（ready）无需重试，调用抛业务异常。
+     * 重试复用原上传者的 AI 模型配置（保证文档与上传者配置绑定一致），并校验原文件仍存在，
+     * 否则提示重新上传。状态由终态重置为 processing 并清空错误标记 / 分块数。</p>
+     *
+     * @param docId    文档 ID
+     * @param tenantId 租户 ID（用于隔离校验）
+     * @param user     当前登录用户（用于知识库写权限校验）
+     */
+    boolean retryDocument(Long docId, Long tenantId, User user);
+
+    /**
      * 获取文档 VO。
      */
     DocumentVO getDocumentVO(Document doc);
@@ -84,6 +98,22 @@ public interface DocumentService extends IService<Document> {
      */
     boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
             Boolean modelConfigError);
+
+    /**
+     * 更新文档处理状态（含模型配置错误 / 额度限流双标记）。
+     *
+     * <p>在 5 参版本基础上增加 {@code quotaError}：区分「模型配置错误」与「模型额度不足 / 被限流」，
+     * 前端据此分别引导「去重配」或「稍后重试 / 检查账户额度」，避免把额度问题误判为配置错误。
+     *
+     * @param docId           文档 ID
+     * @param status          新状态（parsing / ready / failed）
+     * @param chunkCount      分块数量（可空）
+     * @param errorMsg        错误信息（可空）
+     * @param modelConfigError 是否因模型配置错误导致失败（引导重配）
+     * @param quotaError       是否因模型额度不足 / 被限流导致失败（引导重试 / 检查额度）
+     */
+    boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError, Boolean quotaError);
 
     /**
      * 保存文档提取全文（Python 解析后回填，供前端「查看内容」弹窗展示）。

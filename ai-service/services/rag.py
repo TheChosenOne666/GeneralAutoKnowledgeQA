@@ -6,7 +6,7 @@
 3. BM25 关键词检索（Top-K=20）
 4. 向量主导融合（语义优先，BM25 仅补充不足）
 5. LLM 重排（用已配置 LLM 对候选块打 0~1 相关性分并重排，抑制弱向量跨领域串味；
-   对齐 WeKnora Rerank 意图但复用已有 LLM，不写死领域词、不新增服务）
+   对标业界成熟方案 Rerank 意图但复用已有 LLM，不写死领域词、不新增服务）
 """
 
 import hashlib
@@ -25,6 +25,12 @@ from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.query_rewrite import expand_query, rewrite_query
 from services.vector_store import RetrievalResult, _bigrams
+
+# 大纲意图关键词（触发 outline 块优先召回，方案C）：问「知识架构/大纲/目录/考点」类问题
+OUTLINE_KEYWORDS = (
+    "架构", "大纲", "目录", "有哪些", "知识框架", "考点", "知识点",
+    "包含哪些", "涵盖", "体系", "主要学", "重点", "模块",
+)
 
 
 class RagService:
@@ -61,7 +67,7 @@ class RagService:
             kb_ids: 知识库 ID 列表
             tenant_id: 租户 ID
             top_n: 最终返回的结果数
-            enhance: 普通问答增强（对齐 WeKnora KnowledgeQA）。为 True 时先对 query
+            enhance: 普通问答增强（对齐 业界 KnowledgeQA 方案）。为 True 时先对 query
                 做 LLM 改写（rewrite），主检索召回不足时再做 LLM 扩展检索（expansion）
                 并 RRF 合并。仅 rag 模式开启；Agent 模式不传（避免二次改写 LLM 自生成
                 的子查询，画蛇添足）。
@@ -96,6 +102,30 @@ class RagService:
         vec_results, bm25_results, best_vec, best_bm25 = await self._search_core(
             search_query, kb_ids, tenant_id, cfg
         )
+
+        # 方案C：大纲意图检测（架构/大纲/目录/考点类问题优先召回章节标题块），
+        # 让 LLM 基于文档真实章节主题归纳知识框架，而非仅命中概述页。
+        is_outline = self._is_outline_query(query)
+        outline_results: list[RetrievalResult] = []
+        if is_outline:
+            try:
+                query_vec = await embedding_service.embed_text(query, cfg)
+                ov = await vector_store_module.vector_store_service.search(
+                    query_vec, kb_ids, tenant_id,
+                    top_k=settings.retrieval_outline_top_n, chunk_types=["outline"],
+                )
+                ob = await vector_store_module.vector_store_service.keyword_search(
+                    query, kb_ids, tenant_id,
+                    top_k=settings.retrieval_outline_top_n, chunk_types=["outline"],
+                )
+                outline_results = (
+                    self._merge_vector_dominant(ov, ob, settings.retrieval_outline_top_n, query)
+                    if ov else ob
+                )
+            except Exception as e:
+                logger.warning(f"[检索诊断] 大纲块召回失败，降级常规检索: {e}")
+                outline_results = []
+
 
         # A2 query expansion：主检索召回不足时，生成扩展 query 再检索并合并兜底
         if enhance and settings.enable_query_expansion and len(vec_results) < settings.retrieval_expansion_min:
@@ -151,7 +181,7 @@ class RagService:
                     (cfg.rerank_base_url if cfg else None) or settings.rerank_base_url,
                     (cfg.rerank_model if cfg else None) or settings.rerank_model,
                 )
-        # 重排阈值过滤（对齐 WeKnora rerank.go：低于阈值的跨主题块直接剔除，
+        # 重排阈值过滤（对标业界成熟方案 rerank.go：低于阈值的跨主题块直接剔除，
         # 仅当最优分仍 >= 0.15 时保留 top1 兜底，避免全部误删）。未重排时直接截断 top_n。
         if rerank_applied:
             th = settings.retrieval_rerank_min_relevance
@@ -162,15 +192,35 @@ class RagService:
         else:
             merged = merged[:top_n]
 
+        # 方案C：大纲意图将 outline 块保送结果前部（短标题块不应被 rerank 阈值剔除），
+        # 并补充常规结果，使 LLM 既能看到知识框架标题又能看到正文细节。
+        if is_outline and outline_results:
+            sent: set = set()
+            combined: list[RetrievalResult] = []
+            for r in outline_results[: settings.retrieval_outline_top_n]:
+                key = (r.doc_id, r.kb_id, r.chunk_index)
+                sent.add(key)
+                combined.append(r)
+            for r in merged:
+                key = (r.doc_id, r.kb_id, r.chunk_index)
+                if key in sent:
+                    continue
+                sent.add(key)
+                combined.append(r)
+            merged = combined[:top_n]
+            rerank_applied = False  # 大纲块保送，不应用 rerank 阈值过滤
+
         # 诊断日志：打印召回信号，便于排查「知识库有内容却检索不到」
         logger.info(
             f"[检索诊断] query={query!r} search_query={search_query!r} kb_ids={kb_ids} tenant={tenant_id} "
             f"vec_top={best_vec:.3f} bm25_top={best_bm25:.3f} "
-            f"merged={len(merged)} rerank={'on(' + rerank_method + ')' if rerank_applied else 'off'}"
+            f"merged={len(merged)} outline={'on' if is_outline else 'off'} "
+            f"rerank={'on(' + rerank_method + ')' if rerank_applied else 'off'}"
         )
 
         # 7. 相对相关性过滤：剔除与最优分差距过大的跨主题噪声（基于最终 top-N）
-        if settings.retrieval_relevance_gate and merged:
+        # 大纲意图下保送 outline 块，跳过此过滤（避免短标题块被误剔除）
+        if settings.retrieval_relevance_gate and merged and not is_outline:
             best = merged[0].score
             floor = max(best * settings.retrieval_relative_ratio, settings.retrieval_vector_min_relevance)
             filtered = [r for r in merged if r.score >= floor]
@@ -178,7 +228,8 @@ class RagService:
                 merged = filtered
 
         # 8. 相关性门槛（全局信号兜底）：全部不相关时视为「无相关文档」
-        if settings.retrieval_relevance_gate and merged and not self._is_relevant(
+        # 大纲意图下保送 outline 块，跳过此过滤
+        if settings.retrieval_relevance_gate and merged and not is_outline and not self._is_relevant(
             merged, rerank_applied, best_vec, best_bm25
         ):
             logger.info(
@@ -385,6 +436,11 @@ class RagService:
         # 向量不可用（走 BM25 兜底）：只要有 BM25 召回即视为相关，
         # 不要求 retrieval_bm25_min_relevance（那是向量主导时 BM25 补充的强相关门槛）
         return best_bm25 > 0.0
+
+    @staticmethod
+    def _is_outline_query(query: str) -> bool:
+        """判断问题是否属大纲/架构类意图（应优先召回章节标题 outline 块，方案C）。"""
+        return any(kw in query for kw in OUTLINE_KEYWORDS)
 
     async def _rerank_with_llm(
         self,

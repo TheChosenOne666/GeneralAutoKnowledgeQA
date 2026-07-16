@@ -40,6 +40,7 @@ public class Document implements Serializable {
 
     private Integer chunkCount;
 
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String errorMsg;
 
     /**
@@ -52,8 +53,17 @@ public class Document implements Serializable {
      * 是否因 AI 模型配置错误导致处理失败（M3-3，引导用户到 /ai-config 重新配置）。
      * 仅当 status=failed 时可能为 true。
      */
-    @TableField("model_config_error")
+    @TableField(value = "model_config_error", updateStrategy = FieldStrategy.ALWAYS)
     private Boolean modelConfigError;
+
+    /**
+     * 是否因模型额度不足 / 被限流（HTTP 429 / 5xx 过载 / 余额耗尽）导致处理失败。
+     * 与 modelConfigError 区分：本字段表示「额度问题」而非「配置错误」，
+     * 前端据此提示「稍后重试或检查账户额度」，而非误导用户去重配模型。
+     * 仅当 status=failed 时可能为 true。
+     */
+    @TableField(value = "quota_error", updateStrategy = FieldStrategy.ALWAYS)
+    private Boolean quotaError;
 
     private Long uploadedBy;
 

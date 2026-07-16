@@ -22,12 +22,16 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
@@ -154,7 +158,7 @@ class DocumentServiceImplTest {
 
     @Test
     void uploadDocument_tenantAdminCrossTenant_denied() {
-        // 租户 10 的 tenant_admin 不能写租户 99 的共享库（对齐 WeKnora own-KB 判定）
+        // 租户 10 的 tenant_admin 不能写租户 99 的共享库（对齐 业界 own-KB（自有 KB）判定）
         when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "shared", 999L, 99L));
 
         BusinessException ex = assertThrows(BusinessException.class,
@@ -197,7 +201,7 @@ class DocumentServiceImplTest {
         boolean result = documentService.deleteDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
         assertTrue(result);
         verify(documentMapper).deleteById(1L);
-        // 删除文档时同步清理 Python 侧向量并取消增强任务（对齐 WeKnora 任务取消）
+        // 删除文档时同步清理 Python 侧向量并取消增强任务（对标业界成熟方案 任务取消）
         verify(aiServiceClient).deleteDocument(1L);
     }
 
@@ -352,7 +356,7 @@ class DocumentServiceImplTest {
         assertEquals(5, doc.getChunkCount());
     }
 
-    // ==================== 异步增强（对齐 WeKnora finalizing=queryable） ====================
+    // ==================== 异步增强（对齐 业界 finalizing（异步增强）=queryable） ====================
 
     @Test
     void triggerDocumentProcessing_optimizingTreatedAsSuccess() {
@@ -385,6 +389,21 @@ class DocumentServiceImplTest {
         boolean ok = documentService.updateDocumentStatus(1L, "optimizing", null, null, null);
         assertFalse(ok);
         assertEquals("ready", doc.getStatus());
+    }
+
+    @Test
+    void updateDocumentStatus_successClearsStaleError() {
+        // 成功终态（ready）应清空残留的 error_msg / model_config_error
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "failed");
+        doc.setErrorMsg("boom");
+        doc.setModelConfigError(true);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        boolean ok = documentService.updateDocumentStatus(1L, "ready", 5, null, null);
+        assertTrue(ok);
+        assertNull(doc.getErrorMsg());
+        assertFalse(doc.getModelConfigError());
     }
 
     @Test
@@ -464,6 +483,116 @@ class DocumentServiceImplTest {
         verify(aiServiceClient, timeout(3000)).invalidateCache(10L);
     }
 
+    @Test
+    void triggerDocumentProcessing_runsOnCustomThreadPool() {
+        // 验证文档处理异步任务提交到自定义线程池（线程名前缀 doc-process-），
+        // 而非 CompletableFuture.runAsync 默认的 ForkJoinPool.commonPool()。
+        String[] execThread = {null};
+        when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
+        doAnswer(invocation -> {
+            execThread[0] = Thread.currentThread().getName();
+            return Map.of("status", "ready", "chunk_count", 3, "content", "c");
+        }).when(aiServiceClient).processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any());
+        when(documentMapper.selectById(1L)).thenReturn(buildDoc(1L, "t.pdf", "pdf", "processing"));
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        documentService.triggerDocumentProcessing(1L, "/p", "txt", 1L, 10L, 100L);
+
+        verify(aiServiceClient, timeout(3000)).processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any());
+        assertNotNull(execThread[0], "processDocument 应被异步线程执行");
+        assertTrue(execThread[0].startsWith("doc-process-"),
+                "应运行在自定义线程池线程，实际线程=" + execThread[0]);
+    }
+
+    // ==================== 重试文档处理（M5 易用性增强） ====================
+
+    @Test
+    void retryDocument_failed_resetAndReTrigger() throws IOException {
+        // 创建真实临时文件，确保原文件存在（重试前置校验通过）
+        Path tmp = Files.createTempFile("retry", ".pdf");
+        // 每次 getById 返回全新副本：重置调用的实例不会被异步触发线程改写，
+        // 以便断言「重置为 processing + 清空错误标记 / 分块」这一中间态。
+        when(documentMapper.selectById(1L)).thenAnswer(inv -> {
+            Document d = buildDoc(1L, "t.pdf", "pdf", "failed");
+            d.setKbId(1L);
+            d.setFilePath(tmp.toString());
+            d.setModelConfigError(true);
+            d.setErrorMsg("boom");
+            d.setChunkCount(3);
+            return d;
+        });
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+        when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
+        when(aiServiceClient.processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any()))
+                .thenReturn(Map.of("status", "ready", "chunk_count", 5, "content", "c"));
+
+        boolean result = documentService.retryDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE));
+        assertTrue(result);
+
+        // 第一次 updateById 即重置：status=processing + 清空错误标记 / 分块
+        ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper, org.mockito.Mockito.atLeast(1)).updateById(cap.capture());
+        Document reset = cap.getAllValues().get(0);
+        assertEquals("processing", reset.getStatus());
+        assertFalse(reset.getModelConfigError());
+        assertNull(reset.getErrorMsg());
+        assertEquals(0, reset.getChunkCount());
+        // 复用原上传者配置重新触发处理（processDocument 被异步调用）
+        verify(aiServiceClient, timeout(3000)).processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any());
+    }
+
+    @Test
+    void retryDocument_notFound() {
+        when(documentMapper.selectById(999L)).thenReturn(null);
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.retryDocument(999L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.NOT_FOUND_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void retryDocument_readyRejected() {
+        // 已就绪（非 failed/cancelled）不可重试
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "ready");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.retryDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.OPERATION_ERROR.getCode(), ex.getCode());
+        verify(documentMapper, never()).updateById(any(Document.class));
+    }
+
+    @Test
+    void retryDocument_fileMissing_rejected() {
+        // 原文件已不存在，重试应被拒并提示重新上传
+        Document doc = buildDoc(1L, "gone.pdf", "pdf", "failed");
+        doc.setKbId(1L);
+        doc.setFilePath("/uploads/does-not-exist-xyz.pdf");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 100L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.retryDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.OPERATION_ERROR.getCode(), ex.getCode());
+        verify(documentMapper, never()).updateById(any(Document.class));
+        verify(aiServiceClient, never()).processDocument(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void retryDocument_personalNotOwner_denied() {
+        Document doc = buildDoc(1L, "t.pdf", "pdf", "failed");
+        doc.setKbId(1L);
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(knowledgeBaseService.getById(1L)).thenReturn(kb(1L, "personal", 999L, 10L));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> documentService.retryDocument(1L, 10L, user(100L, UserConstant.DEFAULT_ROLE)));
+        assertEquals(ErrorCode.NO_AUTH_ERROR.getCode(), ex.getCode());
+    }
+
     // ==================== 辅助方法 ====================
 
     private Document buildDoc(Long id, String filename, String fileType, String status) {
@@ -482,7 +611,7 @@ class DocumentServiceImplTest {
         return doc;
     }
 
-    // ==================== 配额拦截（M3-5，对齐 WeKnora） ====================
+    // ==================== 配额拦截（M3-5，对标业界成熟方案） ====================
 
     @Test
     void uploadDocument_quotaExceeded() {

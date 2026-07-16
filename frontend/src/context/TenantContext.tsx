@@ -1,4 +1,4 @@
-/** 租户上下文 — 供平台超管切换当前操作的租户（对齐 WeKnora 的 TenantSelector）。
+/** 租户上下文 — 供平台超管切换当前操作的租户（对齐 业界的 TenantSelector）。
  *
  * 普通租户用户不使用本上下文：其租户由 JWT 决定，前端不携带 X-Tenant-ID。
  * 仅平台超管在切换器中选择租户后，会把 tenantId 写入 localStorage，

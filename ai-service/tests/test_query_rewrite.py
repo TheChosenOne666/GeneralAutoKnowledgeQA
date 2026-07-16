@@ -1,4 +1,4 @@
-"""查询改写 / 扩展单元测试（对齐 WeKnora KnowledgeQA 的 query rewrite + expansion）。
+"""查询改写 / 扩展单元测试（对齐 业界 KnowledgeQA 方案 的 query rewrite + expansion）。
 
 M3-3 取消静默降级后，rewrite / expansion 须复用真实 LLM；此处用 AsyncMock 替换
 ``llm_service.complete``，聚焦改写 / 扩展的解析与失败降级逻辑，不依赖真实模型 Key。

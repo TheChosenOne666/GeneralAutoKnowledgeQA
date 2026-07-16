@@ -53,6 +53,8 @@ export interface Document {
   errorMsg: string | null
   /** 是否因 AI 模型配置错误导致处理失败（用于前端提示重配）。*/
   modelConfigError: boolean | null
+  /** 是否因模型额度不足 / 被限流（HTTP 429 / 5xx 过载 / 余额耗尽）导致失败（区别于配置错误，提示重试 / 检查额度）。*/
+  quotaError: boolean | null
   createTime: string
 }
 
