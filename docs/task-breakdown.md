@@ -761,6 +761,22 @@ Python（AI 服务）
 - 重启 Python（uvicorn 8001）加载新代码，`/health`=200 ✅
 - 待用户联调：重新上传/重试 `Redis笔记.docx` 应向量化成功（不再报 batch size 400）。
 
+**M3-3 Bug 修复（2026-07-17）：重新配置保存后旧「模型配置不正确」横幅不消失**
+
+现象（用户反馈）：用户修正 AI 配置（如补全 Embedding API Key / 模型名 / 维度）并保存成功后，知识库页仍持续显示红色横幅「模型配置不正确，部分文档向量化失败，请检查 Embedding 的 API Key、模型名或向量维度后重新配置，并重新上传。去配置」，不随重新配置而消失。
+
+根因：`KnowledgeBasePage` 横幅由 `documents.some(d => d.modelConfigError)` 驱动。历史失败文档在首次向量化失败时被置 `model_config_error=true`，而该标记**仅在成功终态、`retryDocument`、或命中 `MODEL_QUOTA_ERROR` 时才清位**。用户重新保存一份（可能）正确的配置后，后端并未清除旧归因标记，文档仍带着 `modelConfigError=true`，横幅因此持续存在——误导用户以为配置仍错。
+
+修复（后端，前端逻辑无需改动）：保存 AI 配置成功后，清除该租户失败文档上基于旧配置的归因标记，使横幅消失、交由用户手动重试以按新配置重新归因。
+- **Java `DocumentService` 接口**：新增 `int clearFailedConfigErrorFlags(Long tenantId)`（`tenantId` 为 null 时清除全库失败文档，供平台级默认配置更新影响所有租户）。
+- **Java `DocumentServiceImpl`**：实现用 `UpdateWrapper` 仅对 `status='failed'` 且 `model_config_error=true` 或 `quota_error=true` 的记录，按 `tenantId`（非空时）过滤并清零两标记；`getBaseMapper().update` 返回真实影响行数。文档保持 `failed` 终态不变（需用户手动重试重新归因）。
+- **Java `AiConfigServiceImpl`**：`updateConfig` 保存成功后调 `documentService.clearFailedConfigErrorFlags(tenantId)`（清本租户）；`updatePlatformDefault` 保存成功后调 `clearFailedConfigErrorFlags(null)`（清全库）。
+
+验证：
+- Java 单测 `AiConfigServiceImplTest`（旧位置 `com.xiongda.service` + 新位置 `com.xiongda.service.impl`）各新增 `updateConfig_clearsFailedDocErrorFlagsForTenant` / `updatePlatformDefault_clearsFailedDocErrorFlagsGlobally`（断言保存后调用 `clearFailedConfigErrorFlags` 传对应 `tenantId`/`null`）；`DocumentServiceImplTest` 新增 `clearFailedConfigErrorFlags_callsMapperWithWrapper` / `clearFailedConfigErrorFlags_nullTenantClearsGlobally`（断言 `documentMapper.update` 被调用并传 `UpdateWrapper`）。本次连同原有共 **52 例全过（mvn clean test BUILD SUCCESS）** ✅
+- 注：发现并修复了遗留的重复测试文件 `com/xiongda/service/AiConfigServiceImplTest.java`（旧包名位置、未适配 `documentService` 依赖注入），补 `@Mock DocumentService` + `setUp` 显式 `setField` 后通过，未删除以保留其独特覆盖。
+- 待用户联调：重新保存配置后，知识库页红色「去配置」横幅应自动消失（旧失败文档标记已清），文档仍显示「失败」状态，点「重试」按新配置重新向量化。
+
 - **依赖**: M1-2
 - **产出**: 可在前端配置 AI 模型；配置填错（API Key/模型名/维度）时，对话失败与文档向量化失败均能被识别并引导到 /ai-config 重配
 

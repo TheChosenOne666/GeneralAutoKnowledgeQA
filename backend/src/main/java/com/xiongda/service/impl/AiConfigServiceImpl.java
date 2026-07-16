@@ -10,6 +10,8 @@ import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.AiConfig;
 import com.xiongda.model.vo.AiConfigVO;
 import com.xiongda.service.AiConfigService;
+import com.xiongda.service.DocumentService;
+import jakarta.annotation.Resource;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +31,9 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
      * 平台级默认配置的租户哨兵（不等于任何真实租户 ID，对所有租户生效）。
      */
     private static final Long PLATFORM_TENANT_ID = 0L;
+
+    @Resource
+    private DocumentService documentService;
 
     @Override
     public AiConfigVO getConfig(Long tenantId, Long userId) {
@@ -57,6 +62,9 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         }
         applyUpdate(config, req);
         this.saveOrUpdate(config);
+        // 配置已更新：清除本租户失败文档基于旧配置的归因标记，
+        // 避免知识库页持续展示「模型配置不正确，请重新配置」横幅（M3-3 修复）
+        documentService.clearFailedConfigErrorFlags(tenantId);
         return toVO(config);
     }
 
@@ -115,6 +123,9 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
         }
         applyUpdate(config, req);
         this.saveOrUpdate(config);
+        // 平台级默认配置影响所有租户：清除全库失败文档基于旧配置的归因标记，
+        // 避免知识库页持续展示「模型配置不正确，请重新配置」横幅（M3-3 修复）
+        documentService.clearFailedConfigErrorFlags(null);
         return toVO(config);
     }
 

@@ -686,6 +686,8 @@ Python event_generator（routers/chat.py）
 
 > **批量 Embedding 超限（batch size > 20）修复（2026-07-17）**：`EmbeddingService._embed_remote` 标准路径此前将整篇文档全部 chunk 一次性作为 `input` 发给 Embedding API，超出阿里云百炼等接口的每批 ≤ 20 条硬限制而报 `HTTP 400 batch size is invalid`；且原代码把任意 4xx 笼统归为 `ModelConfigError`，误导用户去改配置。修复为按 `EMBEDDING_BATCH_SIZE = 20` 分批调用再按序合并，对所有 OpenAI 兼容提供商均安全。详见 task-breakdown.md M3-3。
 
+> **重新配置保存后清除旧归因标记（2026-07-17 修复）**：知识库页红色「模型配置不正确」横幅由 `documents.some(d => d.modelConfigError)` 驱动。历史失败文档的 `model_config_error` 标记仅在成功终态、`retryDocument`、或命中 `MODEL_QUOTA_ERROR` 时清位，用户重新保存一份（可能）正确的配置后该标记仍残留，横幅持续误导"配置仍错"。修复：`AiConfigServiceImpl.updateConfig` 保存成功后调 `documentService.clearFailedConfigErrorFlags(tenantId)`，平台级 `updatePlatformDefault` 成功后代 `null` 清全库；`DocumentServiceImpl.clearFailedConfigErrorFlags` 用 `UpdateWrapper` 仅对 `status='failed'` 且 `model_config_error/quota_error` 为 true 的记录清零（文档保持 `failed` 终态，需用户手动重试按新配置重新归因）。前端逻辑无需改动——后端清位后下次刷新即消失。
+
 ### 9.4 SSE 事件流协议
 
 实际事件类型（见 `routers/chat.py` `_sse`）：`thinking` → `sources`（可选）→ `token`（多个）→ `done`。

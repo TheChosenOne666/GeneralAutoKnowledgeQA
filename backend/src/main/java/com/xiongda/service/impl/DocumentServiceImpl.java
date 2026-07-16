@@ -1,6 +1,7 @@
 package com.xiongda.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.xiongda.annotation.AuditLog;
 import com.xiongda.client.AiServiceClient;
@@ -492,5 +493,20 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 this.updateDocumentStatus(docId, "failed", null, e.getMessage());
             }
         }, DOC_PROCESS_EXECUTOR);
+    }
+
+    @Override
+    public int clearFailedConfigErrorFlags(Long tenantId) {
+        // 仅针对失败文档且带旧归因标记（模型配置错误 / 额度限流）的记录清零，
+        // 文档保持 failed 终态，交由用户手动重试以按新配置重新归因。
+        UpdateWrapper<Document> uw = new UpdateWrapper<>();
+        uw.eq("status", "failed")
+                .and(w -> w.eq("model_config_error", true).or().eq("quota_error", true));
+        if (tenantId != null) {
+            uw.eq("tenant_id", tenantId);
+        }
+        uw.set("model_config_error", false).set("quota_error", false);
+        // getBaseMapper().update 返回影响行数（int）；entity 传 null，仅用 wrapper 的 set/where 片段
+        return this.getBaseMapper().update(null, uw);
     }
 }

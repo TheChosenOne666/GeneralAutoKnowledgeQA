@@ -148,4 +148,17 @@ public interface DocumentService extends IService<Document> {
      */
     void triggerDocumentProcessing(Long docId, String filePath, String fileType, Long kbId, Long tenantId,
             Long userId);
+
+    /**
+     * 清除失败文档上基于旧 AI 配置的归因标记（模型配置错误 / 额度限流）。
+     *
+     * <p>当用户重新保存 AI 模型配置后，历史失败文档上由旧配置归因得到的
+     * {@code model_config_error} / {@code quota_error} 已不可信，应清除，
+     * 避免知识库页持续展示「模型配置不正确，请重新配置」横幅。文档仍保持
+     * {@code failed} 终态，需用户手动重试以按新配置重新归因。
+     *
+     * @param tenantId 租户 ID；为 null 时清除全库失败文档（如平台级默认配置更新影响所有租户）
+     * @return 被更新的文档数量
+     */
+    int clearFailedConfigErrorFlags(Long tenantId);
 }

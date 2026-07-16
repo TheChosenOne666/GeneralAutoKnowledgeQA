@@ -5,6 +5,7 @@ import com.xiongda.mapper.AiConfigMapper;
 import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.AiConfig;
 import com.xiongda.model.vo.AiConfigVO;
+import com.xiongda.service.DocumentService;
 import com.xiongda.service.impl.AiConfigServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,12 +33,18 @@ class AiConfigServiceImplTest {
     @Mock
     private AiConfigMapper aiConfigMapper;
 
+    @Mock
+    private DocumentService documentService;
+
     private AiConfigServiceImpl aiConfigService;
 
     @BeforeEach
     void setUp() {
         aiConfigService = new AiConfigServiceImpl();
         ReflectionTestUtils.setField(aiConfigService, "baseMapper", aiConfigMapper);
+        // @Resource 注入的 DocumentService 在单测中显式设置（updateConfig/updatePlatformDefault
+        // 保存配置后会清除失败文档旧归因标记，缺省会导致 NPE）
+        ReflectionTestUtils.setField(aiConfigService, "documentService", documentService);
     }
 
     // ==================== 平台级默认配置 ====================

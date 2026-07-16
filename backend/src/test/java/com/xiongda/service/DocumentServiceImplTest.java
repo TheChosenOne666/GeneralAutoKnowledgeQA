@@ -1,6 +1,7 @@
 package com.xiongda.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.constant.UserConstant;
 import com.xiongda.exception.BusinessException;
@@ -628,5 +629,29 @@ class DocumentServiceImplTest {
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> documentService.uploadDocument(1L, 10L, u, "f.pdf", "pdf", 10L, "/p"));
         assertEquals(ErrorCode.OPERATION_ERROR.getCode(), ex.getCode());
+    }
+
+    // ==================== 清除失败文档旧归因标记（M3-3 修复） ====================
+
+    @Test
+    void clearFailedConfigErrorFlags_callsMapperWithWrapper() {
+        ArgumentCaptor<UpdateWrapper<Document>> cap = ArgumentCaptor.forClass(UpdateWrapper.class);
+        when(documentMapper.update(any(), any())).thenReturn(2);
+
+        int n = documentService.clearFailedConfigErrorFlags(7L);
+
+        assertEquals(2, n);
+        verify(documentMapper).update(any(), cap.capture());
+        assertNotNull(cap.getValue());
+    }
+
+    @Test
+    void clearFailedConfigErrorFlags_nullTenantClearsGlobally() {
+        when(documentMapper.update(any(), any())).thenReturn(0);
+
+        int n = documentService.clearFailedConfigErrorFlags(null);
+
+        assertEquals(0, n);
+        verify(documentMapper).update(any(), any());
     }
 }

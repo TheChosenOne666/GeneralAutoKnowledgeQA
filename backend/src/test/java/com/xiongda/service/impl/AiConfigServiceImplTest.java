@@ -5,6 +5,7 @@ import com.xiongda.mapper.AiConfigMapper;
 import com.xiongda.model.dto.config.AiConfigUpdateRequest;
 import com.xiongda.model.entity.AiConfig;
 import com.xiongda.model.vo.AiConfigVO;
+import com.xiongda.service.DocumentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,6 +38,9 @@ class AiConfigServiceImplTest {
     @Mock
     private AiConfigMapper aiConfigMapper;
 
+    @Mock
+    private DocumentService documentService;
+
     @InjectMocks
     private AiConfigServiceImpl aiConfigService;
 
@@ -44,6 +48,8 @@ class AiConfigServiceImplTest {
     void setUp() {
         // ServiceImpl 的 baseMapper 由 Spring 启动时注入，单测需手动设置
         ReflectionTestUtils.setField(aiConfigService, "baseMapper", aiConfigMapper);
+        // @Resource 注入的 DocumentService 在单测中显式设置
+        ReflectionTestUtils.setField(aiConfigService, "documentService", documentService);
     }
 
     @Test
@@ -182,5 +188,33 @@ class AiConfigServiceImplTest {
         ArgumentCaptor<AiConfig> captor = ArgumentCaptor.forClass(AiConfig.class);
         verify(aiConfigMapper).insertOrUpdate(captor.capture());
         assertEquals(1024, captor.getValue().getEmbeddingDimension());
+    }
+
+    @Test
+    void updateConfig_clearsFailedDocErrorFlagsForTenant() {
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setEmbeddingProvider("OpenAI");
+        req.setEmbeddingModel("text-embedding-3-small");
+        req.setEmbeddingDimension(1536);
+        when(aiConfigMapper.insertOrUpdate(any(AiConfig.class))).thenReturn(true);
+
+        aiConfigService.updateConfig(5L, 9L, req);
+
+        // 保存配置成功后应清除该租户失败文档基于旧配置的归因标记
+        verify(documentService).clearFailedConfigErrorFlags(5L);
+    }
+
+    @Test
+    void updatePlatformDefault_clearsFailedDocErrorFlagsGlobally() {
+        AiConfigUpdateRequest req = new AiConfigUpdateRequest();
+        req.setEmbeddingProvider("OpenAI");
+        req.setEmbeddingModel("text-embedding-3-small");
+        req.setEmbeddingDimension(1536);
+        when(aiConfigMapper.insertOrUpdate(any(AiConfig.class))).thenReturn(true);
+
+        aiConfigService.updatePlatformDefault(req);
+
+        // 平台级默认配置影响所有租户，应清除全库失败文档的归因标记（tenantId=null）
+        verify(documentService).clearFailedConfigErrorFlags(null);
     }
 }
