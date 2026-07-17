@@ -100,6 +100,11 @@ def patched(monkeypatch):
     monkeypatch.setattr(dp_module.augment_queue, "enqueue", fake_q.enqueue)
     monkeypatch.setattr(dp_module.augment_queue, "ack", fake_q.ack)
     monkeypatch.setattr(dp_module.augment_queue, "is_cancelled", fake_q.is_cancelled)
+    # M5-3：主流程 process() 取消守卫改用 process_queue 取消集，默认未取消（正常流程用例）；
+    # 取消相关用例各自覆盖 patch dp_module.process_queue.is_cancelled。
+    async def _not_cancelled(doc_id):
+        return False
+    monkeypatch.setattr(dp_module.process_queue, "is_cancelled", _not_cancelled)
     monkeypatch.setattr(dp_module.settings, "enable_qa_augment", True)
     monkeypatch.setattr(dp_module.settings, "qa_max_pairs", 20)
     monkeypatch.setattr(dp_module.settings, "qa_concurrency", 5)
@@ -201,7 +206,8 @@ def test_process_cancelled_before_embed(patched, monkeypatch):
     async def always_cancelled(doc_id):
         return True
 
-    monkeypatch.setattr(dp_module.augment_queue, "is_cancelled", always_cancelled)
+    # M5-3：嵌入前检查点改用主流程 process_queue 取消集（xiongda:doc:cancelled）
+    monkeypatch.setattr(dp_module.process_queue, "is_cancelled", always_cancelled)
 
     path = _write_tmp(".txt", ORIGINAL_CONTENT)
     try:
@@ -218,7 +224,7 @@ def test_process_cancelled_before_embed(patched, monkeypatch):
 
 
 def test_process_cancelled_after_store_cleans_vectors(patched, monkeypatch):
-    """取消检查点（入库后）：已取消则清理已写向量 + 回调 cancelled + 不返回 optimizing。"""
+    """取消检查点④（入库后）：已取消则清理已写向量 + 回调 cancelled + 不返回 optimizing。"""
     stored, notifies, fake_q = patched
     deletes = []
 
@@ -229,14 +235,12 @@ def test_process_cancelled_after_store_cleans_vectors(patched, monkeypatch):
         dp_module.vector_store_module.vector_store_service, "delete_by_doc", fake_delete
     )
 
-    calls = {"n": 0}
+    async def cancel_after_store(doc_id):
+        # 以「向量是否已入库」为判据：嵌入前 / 索引前（store 未调用）不取消，
+        # 入库后（store 已调用一次）才取消，精准命中检查点④。
+        return stored.get("calls", 0) >= 1
 
-    async def cancel_after_embed(doc_id):
-        calls["n"] += 1
-        # 嵌入前（第 1 次）未取消；入库后（第 2 次）已取消
-        return calls["n"] >= 2
-
-    monkeypatch.setattr(dp_module.augment_queue, "is_cancelled", cancel_after_embed)
+    monkeypatch.setattr(dp_module.process_queue, "is_cancelled", cancel_after_store)
 
     path = _write_tmp(".txt", ORIGINAL_CONTENT)
     try:
@@ -252,4 +256,41 @@ def test_process_cancelled_after_store_cleans_vectors(patched, monkeypatch):
     assert "cancelled" in [s for _, s in notifies]
     assert "optimizing" not in [s for _, s in notifies]
     # 未入增强队
+    assert len(fake_q.queue) == 0
+
+
+def test_process_cancelled_before_index(patched, monkeypatch):
+    """取消检查点③（索引/入库前，M5-3 新增）：Embedding 完成后、store 之前取消，
+    直接放弃且不写向量（未入库无需清理），回调 cancelled、不返回 optimizing。"""
+    stored, notifies, fake_q = patched
+    deletes = []
+
+    async def fake_delete(doc_id):
+        deletes.append(doc_id)
+
+    monkeypatch.setattr(
+        dp_module.vector_store_module.vector_store_service, "delete_by_doc", fake_delete
+    )
+
+    calls = {"n": 0}
+
+    async def cancel_before_index(doc_id):
+        calls["n"] += 1
+        # 嵌入前（第 1 次）未取消；索引前（第 2 次）已取消
+        return calls["n"] >= 2
+
+    monkeypatch.setattr(dp_module.process_queue, "is_cancelled", cancel_before_index)
+
+    path = _write_tmp(".txt", ORIGINAL_CONTENT)
+    try:
+        result = _run(document_processor.process(path, "txt", "kb1", "docZ", "t1", None, None))
+    finally:
+        os.unlink(path)
+
+    assert result["status"] == "cancelled"
+    # 索引前取消：未写向量、无需清理
+    assert stored.get("calls", 0) == 0
+    assert deletes == []
+    assert "cancelled" in [s for _, s in notifies]
+    assert "optimizing" not in [s for _, s in notifies]
     assert len(fake_q.queue) == 0

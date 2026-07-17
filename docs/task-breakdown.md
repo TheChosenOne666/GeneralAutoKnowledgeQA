@@ -1294,26 +1294,37 @@ Python（AI 服务）
 - **单测**：Python `test_process_queue.py` 覆盖 enqueue/dequeue、cancelled 集、sweep_stale（超时移回/近期保留）、worker 跳过 cancelled、worker 在 `ModelConfigError` 时回调 failed 且标 `model_config_error`；全量 **145 例通过**（含 `test_document_processor` / `test_document_augment` / `test_query_rewrite` / `test_model_config`，无回归）。Java `DocumentServiceImplTest` 38 例通过（含 M5-1 契约更新：`processing` 视为成功、向量清理竞态移交 Python worker 后 Java 不再调 `deleteDocument`、入队成功清 L1 缓存）。
 - **产出**：主流程可崩溃恢复、不阻塞上传 HTTP；文档全文/状态完全由 worker 回调驱动；为 M5-2 / M5-3 打底。
 
-### M5-2 主流程重试机制（MaxRetry + 退避）[全栈] P1 · 0.5d ⬜ 待开始
+### M5-2 主流程重试机制（MaxRetry + 退避）[全栈] P1 · 0.5d ✅ 完成
 
 - **需求**：对标业界成熟方案 Asynq `MaxRetry(3)` + 自定义退避，主流程（解析/向量化）失败自动重试；非临时错误（模型配置错误）直接 fail 不重试。
-- **改造**：
-  - 队列消费侧增加失败重试计数（task 带 `retry` 字段）；达上限回写 `failed` + 错误码。
-  - `ModelConfigError` 视为不可重试，直接 fail（与 M3-3 语义一致）。
-  - 退避策略（`asynqRetryDelayFunc` 风格）：固定/指数间隔。
-- **依赖**：M5-1
-- **产出**：主流程失败可自愈，减少人工干预。
+- **改造**（`services/process_queue.py` + `services/document_processor.py`）：
+  - 任务新增 `retry` 字段（`enqueue` 默认 0）；`process_queue` 新增常量 `MAX_RETRY=3`、`RETRY_BASE_DELAY=30`、`RETRY_MAX_DELAY=600`。
+  - 退避计算 `backoff_delay(attempt)`：指数退避 `min(BASE * 2^attempt, MAX)`（30→60→120 秒，封顶 10 分钟），对齐业界 `asynqRetryDelayFunc` 风格。
+  - 延迟重试队列：新增 `DELAYED_KEY`（Redis zset，score = `next_attempt_at`）；`requeue_delayed` 把失败任务从 processing 移出、写入延迟 zset；worker 每轮 `promote_delayed()` 把到期任务搬回主队列（无需额外定时器），服务重启后到期即恢复。
+  - `_run_process_task` 重试分流：`ModelConfigError`（密钥/模型名/维度错误）**不可重试**，直接回调 `failed` + `model_config_error=True`；其余异常（网络/`ModelQuotaError` 限流/DB 瞬时错误等）按 `retry` 计数指数退避重入队，达 `MAX_RETRY` 上限后回调 `failed`（error_msg 含「已重试 N 次」）。
+  - **幂等保障**：PG `store_chunks` 先 `DELETE` 同 `doc_id` 再 `INSERT`，重试重处理不产生重复分块（Milvus 路径当前未启用，不受影响）。
+- **改动文件**：`process_queue.py`、`document_processor.py`、`tests/test_process_queue.py`（扩展 FakeRedis 支持 zset + 新增 4 例）。
+- **单测**：`test_process_queue.py` 新增 `test_backoff_delay`（30/60/120/封顶）、`test_requeue_delayed_then_promote`（延迟重入队→promote 搬回、retry 递增、去除 next_attempt_at）、`test_worker_retries_then_fails`（瞬时异常重试满 MAX_RETRY 次后 failed、error_msg 含「已重试」、不标 modelConfigError）、`test_worker_does_not_retry_model_config_error`（模型配置错误仅执行 1 次直接 failed 不重入队）；Python 全量 **145 例通过**，无回归。
+- **产出**：主流程瞬时失败可自愈（网络抖动/限流/DB 瞬时错误自动重试），减少人工干预；模型配置类错误快速失败不空耗重试；崩溃重启后延迟任务可恢复。
+- **说明（错误码）**：失败的 `error_msg` 已携带重试次数与原始错误（如「处理失败（已重试3次）：…」），未新增 Java 独立 `error_code` 列；如需在 DB 落独立错误码，可后续在 `InternalDocStatusRequest` + `Document` 实体追加字段，属非破坏性扩展。
 
-### M5-3 多检查点取消守卫 [全栈] P1 · 0.5d ⬜ 待开始
+### M5-3 多检查点取消守卫 [全栈] P1 · 0.5d ✅ 完成（2026-07-17）
 
-> 注：取消守卫核心已通过「文档处理取消按钮」功能先行实现——`document_processor.process()` 已在嵌入前 / 入库后两处检查 `is_cancelled` 并清理向量，`DocStatusEnum` 已加 `cancelled` 终态，`triggerDocumentProcessing` 已处理竞态清理。本任务剩余工作：补全 业界方案 完整 4 处检查点（翻 processing 前 / 写 chunk 前 / 索引前 / 标 completed 前）并适配 M5-1 主流程队列化。详见上方「文档处理取消按钮」小节。
+> 注：取消守卫核心已通过「文档处理取消按钮」功能先行实现（嵌入前 / 入库后两处检查 + `cancelled` 终态 + 竞态清理）。本任务在其基础上补全业界方案完整 4 处检查点并统一主流程取消集语义。
 
-- **需求**：对标业界成熟方案 4 处 `isKnowledgeAborted` 检查（翻 processing 前 / 写 chunk 前 / 索引前 / 标 completed 前），防取消竞态。
-- **改造**：
-  - 主流程 worker 在关键阶段边界调用 `is_cancelled(doc_id)`（复用 `xiongda:doc:cancelled` set，删文档时 Java 调 Python 标记）。
-  - 命中则中止并清理（不回写 failed，视为已取消）；增强阶段已有 1 处检查，补齐其余检查点。
-- **依赖**：M5-1
-- **产出**：删除文档时主流程不残留孤儿任务/孤立向量。
+- **需求**：对标业界成熟方案 4 处 `isKnowledgeAborted` 检查点（翻 processing 前 / 写 chunk（嵌入）前 / 索引前 / 标 completed（optimizing）前），防取消竞态。
+- **改造**（`services/document_processor.py`）：
+  - **统一主流程取消集语义（M5-3 关键修正）**：`process()` 内所有主流程检查点改用 `process_queue.is_cancelled`（即 `xiongda:doc:cancelled` set——删除/取消接口均会标记）。此前 M5-1 前遗留的「嵌入前 / 入库后」检查点误用 `augment_queue.is_cancelled`（增强队列取消集），语义错位；现统一归主流程队列，与 worker 取任务前的 `process_queue.is_cancelled` 判据一致。
+  - **取消检查点①（翻 processing 前）**：`_run_process_task` worker 取任务前 `process_queue.is_cancelled` → 跳过（不回调 ready）。
+  - **取消检查点②（写 chunk / 嵌入前）**：`process()` 在 `embed_chunks` 前检查 → 未消耗 Embedding 调用、未入库，直接 `cancelled` 返回。
+  - **取消检查点③（索引 / 入库前，M5-3 新增）**：`embed_chunks` 完成（可能耗时数分钟）后、调 `store_chunks` 之前新增检查 → 未写向量、无需清理，直接 `cancelled` 返回，避免「先写后删」无谓 IO。
+  - **取消检查点④（标 completed / optimizing 前）**：`store_chunks` 入库后、回调 optimizing 之前检查 → 已写向量必须清理（防残留「已取消却可检索」孤立向量）+ 回调 `cancelled` + 返回 `cancelled`（不返回 optimizing）。
+  - **增强阶段守卫（既有）**：`run_augment_worker` 取任务前检查 `augment_queue.is_cancelled` / 原始块是否已不存在 → 跳过，与 M5-1 取消小节一致。
+- **删除/取消接口**：`routers/document.py` 的 `cancel` / `delete` 同时标记 `xiongda:doc:cancelled`（process_queue）与 `xiongda:augment:cancelled`（augment_queue）两个集合，故主流程与增强流程任一阶段取消均生效，运行时行为不变。
+- **改动文件**：`document_processor.py`、`tests/test_document_augment.py`（fixture 默认 patch `process_queue.is_cancelled`；嵌入前用例改判据为 `process_queue`；入库后用例改以「向量是否已入库」为判据；新增「索引前取消」用例）。
+- **单测**：`test_document_augment.py` 新增 `test_process_cancelled_before_index`（Embedding 完成后、store 前取消 → 未写向量、无需清理、回调 cancelled、不返回 optimizing）；嵌入前用例改 patch `process_queue`；Python 全量 **149 例通过**，无回归。
+- **依赖**：M5-1（主流程队列化）、M5-2（重试）
+- **产出**：文档处理任意阶段（嵌入前 / 索引前 / 入库后）取消均真正可中断，且无孤立向量残留；主流程取消集语义统一清晰。
 
 ### M5-4 阶段化 span 时间线追踪 [全栈] P1 · 1d ⬜ 待开始
 

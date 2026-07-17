@@ -20,10 +20,18 @@ from core.redis_client import get_redis
 QUEUE_KEY = "xiongda:doc:queue"
 PROCESSING_KEY = "xiongda:doc:processing"
 CANCELLED_KEY = "xiongda:doc:cancelled"
+# M5-2：延迟重试 zset，member = 任务 json，score = 该任务可再次执行的时刻（epoch 秒）。
+# 用 zset 实现「退避到期」语义，worker 每轮把到期任务搬回主队列，无需额外定时器。
+DELAYED_KEY = "xiongda:doc:delayed"
 
 # 主流程（提取+向量化）单任务最大处理时长（秒），超过视为卡死、sweep 重新入队。
 # 大文档向量化可能耗时数分钟，故设为 30 分钟，远大于正常处理时间。
 PROCESS_MAX_AGE = 1800.0
+
+# M5-2：主流程失败重试（对标业界 Asynq MaxRetry + 退避）
+MAX_RETRY = 3                 # 首次失败后最多额外重试次数（共 MAX_RETRY+1 次尝试）
+RETRY_BASE_DELAY = 30.0       # 指数退避基期（秒）
+RETRY_MAX_DELAY = 600.0       # 退避上限（秒），避免间隔过长
 
 
 def _dump(task: dict) -> str:
@@ -38,6 +46,7 @@ async def enqueue(task: dict) -> None:
     r = await get_redis()
     t = dict(task)
     t.setdefault("started_at", None)
+    t.setdefault("retry", 0)
     await r.rpush(QUEUE_KEY, _dump(t))
 
 
@@ -88,4 +97,49 @@ async def sweep_stale(max_age: float = PROCESS_MAX_AGE) -> int:
             t2["started_at"] = None
             await r.rpush(QUEUE_KEY, _dump(t2))
             moved += 1
+    return moved
+
+
+def backoff_delay(attempt: int) -> float:
+    """计算第 ``attempt`` 次失败后的退避延迟（秒，指数退避 + 上限）。
+
+    第 0 次失败（首次尝试后）→ ``RETRY_BASE_DELAY``；每次失败后翻倍，封顶
+    ``RETRY_MAX_DELAY``。用于 ``requeue_delayed`` 设置延迟重试时刻。
+    """
+    return min(RETRY_BASE_DELAY * (2 ** max(0, int(attempt))), RETRY_MAX_DELAY)
+
+
+async def requeue_delayed(task: dict, retry_count: int, delay: float) -> None:
+    """将失败任务按退避延迟重新入队（M5-2 重试核心）。
+
+    从 processing 移除当前记录，写入 ``DELAYED_KEY``（zset，score = 现在 + delay），
+    worker 每轮经 :func:`promote_delayed` 把到期任务搬回主队列再次执行。
+    ``retry_count`` 写入任务的 ``retry`` 字段，供下次判断是否已达 ``MAX_RETRY``。
+    """
+    r = await get_redis()
+    # 从 processing 移除（按 json 精确匹配当前 dequeued 记录）
+    await r.lrem(PROCESSING_KEY, 1, _dump(task))
+    t = dict(task)
+    t["retry"] = retry_count
+    t["started_at"] = None
+    t["next_attempt_at"] = time.time() + delay
+    await r.zadd(DELAYED_KEY, {_dump(t): t["next_attempt_at"]})
+
+
+async def promote_delayed() -> int:
+    """把到期的延迟重试任务搬回主队列（worker 每轮调用）。返回搬回数量。
+
+    ``next_attempt_at <= now`` 的任务视为到期，移除 ``next_attempt_at`` 后重新入队。
+    服务重启后这些任务仍留在 zset，到期即被搬回，崩溃可恢复。
+    """
+    r = await get_redis()
+    now = time.time()
+    items = await r.zrangebyscore(DELAYED_KEY, 0, now)
+    moved = 0
+    for raw in items:
+        await r.zrem(DELAYED_KEY, raw)
+        t = json.loads(raw)
+        t.pop("next_attempt_at", None)
+        await r.rpush(QUEUE_KEY, _dump(t))
+        moved += 1
     return moved

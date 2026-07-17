@@ -287,8 +287,9 @@ class DocumentProcessor:
 
         # 3. 检索阶段：向量化 + 构建原始块（使文档可被检索）
         await notify_document_status(doc_id, "retrieving")
-        # 取消检查点（嵌入前）：用户中途取消则不消耗 Embedding 调用、不入库
-        if await augment_queue.is_cancelled(doc_id):
+        # M5-3 取消检查点②（写 chunk / 嵌入前）：用户中途取消则不消耗 Embedding 调用、不入库。
+        # 主流程统一复用 process_queue 取消集（xiongda:doc:cancelled，删除/取消接口均会标记）。
+        if await process_queue.is_cancelled(doc_id):
             logger.info(f"[文档诊断] 处理中被取消（嵌入前），放弃 doc_id={doc_id}")
             await notify_document_status(doc_id, "cancelled")
             return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
@@ -313,16 +314,23 @@ class DocumentProcessor:
                 }
             )
 
+        # M5-3 取消检查点③（索引 / 入库前）：Embedding 可能耗时数分钟，期间取消则
+        # 直接放弃、不写向量（此前向量未入库，无需清理），避免「先写后删」的无谓 IO。
+        if await process_queue.is_cancelled(doc_id):
+            logger.info(f"[文档诊断] 处理中被取消（入库前），放弃 doc_id={doc_id}")
+            await notify_document_status(doc_id, "cancelled")
+            return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
+
         # 4. 原始块先入库 —— 向量一旦入库，文档即可被检索（对齐 业界 finalizing（异步增强）=queryable）
         await vector_store_module.vector_store_service.store_chunks(
             chunk_dicts, kb_id, doc_id, tenant_id
         )
         logger.info(f"[文档诊断] 原始块入库完成 doc_id={doc_id} 块数={len(chunk_dicts)}（已可检索）")
 
-        # 5. 优化阶段：取消检查点（入库后、notify optimizing 之前）
+        # M5-3 取消检查点④（标 completed / optimizing 之前）：入库后、回调 optimizing 之前
         # 用户中途取消 → 清理已写向量 + 回调 cancelled，避免广播「已可检索」假提示
         # （向量已入库可检索，必须清理避免残留「已取消却可检索」的孤立向量）
-        if await augment_queue.is_cancelled(doc_id):
+        if await process_queue.is_cancelled(doc_id):
             logger.info(f"[文档诊断] 处理中被取消（入库后），清理向量 doc_id={doc_id}")
             await vector_store_module.vector_store_service.delete_by_doc(doc_id)
             await notify_document_status(doc_id, "cancelled")
@@ -462,11 +470,14 @@ class DocumentProcessor:
         入增强队）。状态完全经 ``notify_document_status`` 回调 Java 推进（retrieving /
         optimizing / ready / failed），HTTP 上传仅 enqueue 不阻塞。
 
-        队列持久化于 Redis，进程重启后由 lifespan 的 ``process_queue.sweep_stale`` 恢复卡死任务。
+        队列持久化于 Redis，进程重启后由 lifespan 的 ``process_queue.sweep_stale`` 恢复卡死任务；
+        M5-2：每轮先 ``promote_delayed`` 把到期退避重试任务搬回主队列。
         """
         logger.info("[主流程] 文档处理队列 worker 启动")
         while True:
             try:
+                # M5-2：把到期的延迟重试任务搬回主队列（退避到期即重试）
+                await process_queue.promote_delayed()
                 task = await process_queue.dequeue()
                 if task is None:
                     await asyncio.sleep(poll_interval)
@@ -477,8 +488,16 @@ class DocumentProcessor:
                 await asyncio.sleep(poll_interval)
 
     async def _run_process_task(self, task: dict) -> None:
-        """执行单个主流程任务（M5-1），失败回调 Java failed。"""
+        """执行单个主流程任务（M5-1），含 M5-2 失败重试（指数退避，模型配置错误不重试）。
+
+        重试策略（对标业界 Asynq ``MaxRetry`` + 退避）：
+        - ``ModelConfigError``（密钥/模型名/维度错误）不可重试，直接回调 ``failed``
+          并标记 ``model_config_error``；
+        - 其余异常（网络/限流 ``ModelQuotaError``/DB 瞬时错误等）视为临时错误，
+          按 ``retry`` 计数指数退避重新入队，达 ``MAX_RETRY`` 上限后回调 ``failed``。
+        """
         doc_id = task.get("doc_id")
+        retried = False
         try:
             if await process_queue.is_cancelled(doc_id):
                 logger.info(f"[主流程] 任务已取消，跳过 doc_id={doc_id}")
@@ -498,18 +517,36 @@ class DocumentProcessor:
                 ai_config_dict=task.get("ai_config"),
             )
         except ModelConfigError as e:
-            logger.warning(f"[主流程] 模型配置错误 doc_id={doc_id}: {e}")
+            # 模型配置错误（密钥/模型名/维度等）不可重试，直接失败
+            logger.warning(f"[主流程] 模型配置错误（不重试）doc_id={doc_id}: {e}")
             await notify_document_status(
                 doc_id, "failed", error_msg=str(e), model_config_error=True
             )
         except Exception as e:
-            logger.exception(f"[主流程] 文档处理失败 doc_id={doc_id}: {e}")
-            await notify_document_status(doc_id, "failed", error_msg=str(e)[:500])
+            attempt = int(task.get("retry", 0) or 0)
+            if attempt < process_queue.MAX_RETRY:
+                delay = process_queue.backoff_delay(attempt)
+                logger.warning(
+                    f"[主流程] 处理失败，安排第 {attempt + 1} 次重试"
+                    f"（共 {process_queue.MAX_RETRY} 次）doc_id={doc_id}: {e}"
+                )
+                await process_queue.requeue_delayed(task, attempt + 1, delay)
+                retried = True
+                return
+            logger.exception(
+                f"[主流程] 重试耗尽，文档处理最终失败 doc_id={doc_id}: {e}"
+            )
+            await notify_document_status(
+                doc_id,
+                "failed",
+                error_msg=f"处理失败（已重试{process_queue.MAX_RETRY}次）：{str(e)[:400]}",
+            )
         finally:
-            try:
-                await process_queue.ack(task)
-            except Exception as e:
-                logger.warning(f"[主流程] ack 失败 doc_id={doc_id}: {e}")
+            if not retried:
+                try:
+                    await process_queue.ack(task)
+                except Exception as e:
+                    logger.warning(f"[主流程] ack 失败 doc_id={doc_id}: {e}")
 
     async def _generate_qa_augment(
         self, chunks: list[DocumentChunk], cfg: ModelConfig | None = None, client=None
