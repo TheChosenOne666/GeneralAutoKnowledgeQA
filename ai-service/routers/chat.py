@@ -123,8 +123,11 @@ async def chat_stream(body: ChatStreamRequest):
                 )
                 sources = [asdict(r) for r in results]
                 if results:
+                    # M5-5 父子分块：喂 LLM 的上下文优先用回溯到的父块完整内容（更连贯），
+                    # 引用来源（sources）仍用子块 content 精确定位命中片段。
                     context = "\n\n".join(
-                        f"[来源：{r.source} 第{r.page}页]\n{r.content}" for r in results
+                        f"[来源：{r.source} 第{r.page}页]\n{r.parent_content or r.content}"
+                        for r in results
                     )
             except ModelQuotaError as e:
                 logger.warning(f"模型额度/限流错误（检索阶段）：{e}")

@@ -44,7 +44,8 @@ class RagService:
         kb_part = ",".join(sorted(kb_ids)) if kb_ids else ""
         q_hash = hashlib.md5(
             f"{query}|{kb_part}|{settings.retrieval_rerank_method}|"
-            f"{settings.retrieval_rerank_top_k}|{top_n}".encode("utf-8")
+            f"{settings.retrieval_rerank_top_k}|{top_n}|"
+            f"{settings.retrieval_parent_context}".encode("utf-8")
         ).hexdigest()
         return f"retrieval:{tenant_id}:{q_hash}"
 
@@ -239,6 +240,14 @@ class RagService:
                 f"rerank_applied={rerank_applied} best_vec={best_vec:.3f} best_bm25={best_bm25:.3f}"
             )
             merged = []
+
+        # M5-5 父子分块：命中子块后回溯其父块完整内容（small-to-big），供 LLM 获得更连贯的上下文。
+        # best-effort：回溯失败不影响已排好的检索结果。
+        if settings.retrieval_parent_context and merged:
+            try:
+                merged = await vector_store_module.vector_store_service.attach_parents(merged)
+            except Exception as e:
+                logger.warning(f"[父子分块] 回溯父块内容失败，降级用子块内容: {e}")
 
         try:
             r = await get_redis()

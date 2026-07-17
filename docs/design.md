@@ -313,6 +313,16 @@ LLM 生成回答（SSE 流式输出）
 > - **大纲意图路由**：`rag.py` 的 `_is_outline_query`（关键词：架构/大纲/目录/有哪些/知识点/考点/体系/模块…）命中时，在检索主流程后追加一轮仅召回 outline 块的「向量 + BM25 融合」，并将这些大纲块**保送结果前部**（跳过 rerank 阈值与相关性门槛过滤，避免短标题块被误剔除），再补常规结果，使 LLM 既能看到知识框架标题又能看到正文细节。新增配置 `retrieval_outline_top_n=12`。
 > - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成 outline 块；新上传文档自动带 outline 块。
 
+> **M5-5 父子分块（parent/child chunk，small-to-big，2026-07-17 已落地）**：对标业界成熟方案——父块入库供上下文召回、子块进向量索引，提升检索精度与上下文连贯度。采用 small-to-big 叠加式（最小侵入现有链路）：
+> - **分块**：开启 `enable_parent_child`（默认开）时，`chunk_text` 先按 `parent_chunk_size=1500` 切父块（`chunk_type=parent`/`is_parent=true`），再在父块内用 `chunk_size=512` 切子块并记录 `parent_id` 归属；关闭时退化为原单层分块。父子块与既有 outline 块并行产出、互不破坏。
+> - **向量化**：`embed_chunks` 跳过父块（embedding 保持 None，落库 dimension=0 天然不进向量检索），省 Embedding 成本。
+> - **入库**：父子块均入 PG（父块带 `chunk_type=parent` 元数据），但 BM25 兜底索引排除父块（过长会干扰关键词召回）。
+> - **检索回溯**：`RetrievalResult` 新增 `parent_id`/`parent_content`；`rag.retrieve` 末尾 best-effort 调 `attach_parents`，按 `(doc_id, parent_id)` 批量读回父块内容 small-to-big 填充；`chat.py` 喂 LLM 的上下文优先用 `parent_content`（更连贯），引用来源 `sources` 仍用子块 `content` 精确定位。检索缓存 key 纳入 `retrieval_parent_context`，开关变更自动失效。
+> - **增强透传**：`_run_augment_task` 读回父块与子块+qa 增强块一并全量 store（幂等覆盖），避免增强入库时父块丢失。
+> - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成 parent 块；新上传文档自动带父子两层。
+
+
+
 > **Embedding 并发化（2026-07-16 修复）**：多模态 Embedding 端点（`doubao-embedding-vision` 的 `/embeddings/multimodal`）单次仅支持单条 input，原实现逐条串行，大文档（分块数千）整段向量化可达 10 分钟、且取消无法中断。改为 `asyncio.Semaphore(embedding_concurrency=16)` 限流并发 + 429/5xx 退避重试（详见 task-breakdown M4）。纯文本文档建议用标准 `doubao-embedding`（批量、秒级）。
 
 > **文档处理异步线程池（2026-07-16）**：Java 侧文档处理（`triggerDocumentProcessing`）已由默认 `ForkJoinPool.commonPool()` 改为专用 `ThreadPoolExecutor`（核心2/最大8/队列16，前缀 `doc-process-`，`CallerRunsPolicy` 背压，空闲回收），隔离上传密集 IO 任务、避免挤占公共池。上传请求仍立即返回，进度由前端轮询。
@@ -641,7 +651,7 @@ Java triggerDocumentProcessing：发请求后置 status=parsing；仅当 Python 
 
 > **M5-2 主流程重试机制（2026-07-17，已落地）**：在 M5-1 队列基础上叠加失败重试（对标 Asynq `MaxRetry(3)` + 退避）。任务新增 `retry` 字段；`run_process_worker` 每轮先 `promote_delayed()` 把到期的延迟重试任务搬回主队列。重试分流（`_run_process_task`）：`ModelConfigError`（密钥/模型名/维度）**不可重试**，直接回调 `failed` + `model_config_error=True`；其余瞬时异常（网络/`ModelQuotaError` 限流/DB 瞬时错误）按 `retry` 计数经 `requeue_delayed` 写入延迟 zset `xiongda:doc:delayed`（score = `next_attempt_at = now + backoff_delay(attempt)`，指数退避 30/60/120s 封顶 600s），到期后由 worker 重新执行；达 `MAX_RETRY=3` 上限回调 `failed`（error_msg 含「已重试 N 次」）。PG `store_chunks` 先删后插保证重试幂等、不重复分块；延迟任务持久化于 zset，服务重启后到期即恢复。详见 `docs/task-breakdown.md` M5-2。
 
-> **M5 规划（余下 4 项）**：M5-1 / M5-2 / M5-3 / M5-4 已完成；剩余 M5-5 父子分块 / M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+> **M5 规划**：M5-1 / M5-2 / M5-3 / M5-4 / M5-5 已完成；剩余 M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
 
 > **M5-4 阶段化 span 时间线追踪（2026-07-17 已落地）**：文档处理全程拆成带时间线与指标的阶段——解析(parsing) → 分块(chunking) → 向量化(embedding) → 入库(indexing) → 增强(optimizing)。Python 经 `_StageTimer` 上下文管理器在每阶段边界回调 `notify_stage`（best-effort POST `/api/internal/document/stage`，携带 `startedAt/endedAt/elapsedMs/error/metrics`），Java `recordDocumentStage` 按 `stage` 幂等合并写入文档 `process_stages`（TEXT JSON 数组）；前端 `KnowledgeBasePage` 状态单元格下以 `StageTimeline` 展示阶段链（done 绿✓+耗时 / failed 红✕ / active 旋转符），便于细粒度进度观察与失败定位。详见 `docs/task-breakdown.md` M5-4。
 

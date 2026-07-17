@@ -1347,15 +1347,21 @@ Python（AI 服务）
 - **依赖**：M4-8.1 状态回调体系、M5-1、M5-3
 - **产出**：用户可见细粒度处理进度（解析→分块→向量化→入库→增强）与失败精确定位（失败阶段红标 + error）。
 
-### M5-5 父子分块（parent/child chunk）[Python] P1 · 1d ⬜ 待开始
+### M5-5 父子分块（parent/child chunk）[Python] P1 · 1d ✅ 完成（2026-07-17）
 
-- **需求**：对标业界成熟方案 父子分块——父块入库供上下文召回、子块进向量索引，提升检索精度。
-- **改造**：
-  - `chunk_text` 产出 parent/child 两层；metadata 加 `parent_id` / `is_parent`。
-  - `store_chunks` 父块入 PG 但不写向量索引（或写占位）；检索时子块命中回溯父块拼上下文。
-  - `vector_store.search` 返回时携带父块内容。
+- **需求**：对标业界成熟方案 父子分块（small-to-big）——父块入库供上下文召回、子块进向量索引，提升检索精度与上下文连贯度。
+- **实现**（采用 small-to-big 叠加式，最小侵入现有链路）：
+  - **config**：新增 `enable_parent_child`（默认开）、`parent_chunk_size=1500`、`parent_chunk_overlap=100`、`retrieval_parent_context`（默认开，检索回溯父块内容）。
+  - **`chunk_text`（document_processor.py）**：开启开关时，先按 `parent_chunk_size` 切父块（`chunk_type=parent`/`is_parent=true`），再在父块内用 `chunk_size` 切子块并记录 `parent_id` 归属；关闭时退化为原单层分块。父子块并行于既有 outline 块产出（不破坏）。
+  - **`embed_chunks`**：跳过父块向量化（embedding 保持 None，落库 dimension=0 天然不进向量检索），避免无谓 Embedding 成本。
+  - **`store_chunks`**：父子块均入 PG；父块写带 `chunk_type=parent` 的元数据，BM25 兜底索引排除父块（父块过长会干扰关键词召回）。
+  - **检索回溯（`vector_store.py`）**：`RetrievalResult` 新增 `parent_id` / `parent_content`；新增模块级 `attach_parent_contents` + 各实现的 `attach_parents`，按 `(doc_id, parent_id)` 批量读回父块内容 small-to-big 填充；`get_parents_by_doc` 读回父块；`get_original_chunks` / `get_document_pages` / BM25 `keyword_search` 均排除父块。Pg `warmup_bm25` 现携带 `chunk_type`/`parent_id`，修复重启后 outline 块被误召回问题。
+  - **`rag.retrieve`**：检索末尾 best-effort 调用 `attach_parents`（失败降级用子块内容）。检索缓存 key 纳入 `retrieval_parent_context` 以便开关变更失效。
+  - **`chat.py`**：喂 LLM 的上下文优先用 `parent_content`（更连贯），引用来源 `sources` 仍用子块 `content` 精确定位。
+  - **增强 worker（`_run_augment_task`）**：读回父块透传、与子块+qa 增强块一并全量 store（幂等覆盖），避免增强入库时父块丢失；`_generate_qa_augment` 排除 parent 与 outline 块；Milvus 实现补齐空方法。
+- **测试**：`test_vector_store.py` 新增 5 例（父块排除检索/关键词/attach 回溯/get_parents_excludes）；`test_document_processor.py` 新增 3 例（父子两层产出/关闭退化/embed 跳过父块）；`test_document_augment.py` 补桩 `get_parents_by_doc`。全量 `pytest tests/` 161 passed。
 - **依赖**：M5-1（或现有 store_chunks）
-- **产出**：检索召回更完整、上下文更连贯。
+- **产出**：检索召回更完整、上下文更连贯；父块仅在命中后回溯，不增加向量检索噪声与 Embedding 成本。
 
 ### M5-6 多模态增强（图片 OCR + VLM caption）[Python] P2 · 2d ⬜ 待开始
 

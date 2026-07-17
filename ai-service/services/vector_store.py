@@ -20,7 +20,12 @@ from core.pg_client import get_pg_pool
 
 @dataclass
 class RetrievalResult:
-    """单条检索结果。"""
+    """单条检索结果。
+
+    M5-5 父子分块：``parent_id`` 为命中子块归属的父块 id；``parent_content`` 为回溯到的
+    父块完整内容（供 LLM 上下文使用，small-to-big），检索时由 :func:`attach_parent_contents`
+    填充。引用来源展示仍用 ``content``（精确定位命中片段）。
+    """
 
     content: str
     source: str
@@ -30,6 +35,8 @@ class RetrievalResult:
     kb_id: str = ""
     chunk_index: int = 0
     chunk_type: str = ""
+    parent_id: str = ""
+    parent_content: str = ""
 
 
 class _ChunkRecord:
@@ -114,9 +121,39 @@ def _bm25_search(records: list[_ChunkRecord], query: str, top_k: int = 20) -> li
             kb_id=r.metadata.get("kb_id", ""),
             chunk_index=r.metadata.get("chunk_index", 0),
             chunk_type=r.metadata.get("chunk_type", ""),
+            parent_id=r.metadata.get("parent_id", "") or "",
         )
         for s, r in scored[:top_k]
     ]
+
+
+async def attach_parent_contents(store, results: list[RetrievalResult]) -> list[RetrievalResult]:
+    """M5-5：为命中子块回溯并填充其父块完整内容（small-to-big）。
+
+    收集结果中出现的 ``(doc_id, parent_id)``，按文档批量读回父块内容后填入
+    ``RetrievalResult.parent_content``；无父块归属或父块缺失的结果保持 ``parent_content=''``。
+    职责置于 vector_store 模块，供 :mod:`services.rag` 在检索末尾统一调用。
+
+    Args:
+        store: 向量存储实例（需实现 :meth:`get_parents_by_doc`）。
+        results: 待回溯的检索结果列表（原地填充并返回）。
+    """
+    doc_ids = {r.doc_id for r in results if r.parent_id and r.doc_id}
+    if not doc_ids:
+        return results
+    parent_map: dict[tuple, str] = {}
+    for doc_id in doc_ids:
+        try:
+            parents = await store.get_parents_by_doc(doc_id)
+        except Exception as e:  # noqa: BLE001 - 回溯为增强项，失败不应中断检索
+            logger.warning(f"[父子分块] 读回父块失败 doc_id={doc_id}: {e}")
+            continue
+        for p in parents:
+            parent_map[(doc_id, str(p.get("parent_id", "")))] = p.get("content", "")
+    for r in results:
+        if r.parent_id:
+            r.parent_content = parent_map.get((r.doc_id, str(r.parent_id)), "")
+    return results
 
 
 class InMemoryVectorStore:
@@ -174,6 +211,7 @@ class InMemoryVectorStore:
                     kb_id=r.metadata.get("kb_id", ""),
                     chunk_index=r.metadata.get("chunk_index", 0),
                     chunk_type=r.metadata.get("chunk_type", ""),
+                    parent_id=r.metadata.get("parent_id", "") or "",
                 )
             )
         results.sort(key=lambda x: x.score, reverse=True)
@@ -192,9 +230,12 @@ class InMemoryVectorStore:
         Args:
             chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
         """
-        # 常规检索默认排除 outline 块（chunk_types=None），大纲意图显式传 ["outline"]
+        # 常规检索默认排除 outline 与 parent 块（chunk_types=None），大纲意图显式传 ["outline"]；
+        # parent 父块仅供回溯上下文，任何情况都不进关键词检索。
         def _type_ok(meta):
             ct = meta.get("chunk_type")
+            if ct == "parent":
+                return False
             return ct != "outline" if chunk_types is None else ct in chunk_types
         candidates = [
             r
@@ -210,7 +251,7 @@ class InMemoryVectorStore:
         self._records = [r for r in self._records if r.metadata.get("doc_id") != doc_id]
 
     async def get_original_chunks(self, doc_id: str) -> list[dict]:
-        """读回文档的原始块（排除 qa 增强块），供增强 worker 重建。"""
+        """读回文档的原始子块（排除 qa 增强块与 parent 父块），供增强 worker 重建。"""
         return [
             {
                 "content": r.content,
@@ -220,20 +261,39 @@ class InMemoryVectorStore:
             }
             for r in self._records
             if r.metadata.get("doc_id") == doc_id
-            and r.metadata.get("chunk_type") != "qa"
+            and r.metadata.get("chunk_type") not in ("qa", "parent")
         ]
+
+    async def get_parents_by_doc(self, doc_id: str) -> list[dict]:
+        """读回文档的所有父块（M5-5），供检索回溯与增强重建透传。"""
+        return [
+            {
+                "content": r.content,
+                "parent_id": r.metadata.get("parent_id", "") or "",
+                "chunk_index": r.metadata.get("chunk_index", 0),
+                "page": r.metadata.get("page", 0),
+                "source": r.metadata.get("source", ""),
+            }
+            for r in self._records
+            if r.metadata.get("doc_id") == doc_id
+            and r.metadata.get("chunk_type") == "parent"
+        ]
+
+    async def attach_parents(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
+        """M5-5：为命中子块回溯并填充父块内容（small-to-big）。"""
+        return await attach_parent_contents(self, results)
 
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从内存分块按页重建文档文本（预览兜底，不依赖原文件是否存在）。
 
-        排除 qa 增强块（与 :meth:`get_original_chunks` 一致）。按 page 升序聚合，
-        返回 ``[{"page_no": int, "text": str}, ...]``。
+        排除 qa 增强块与 parent 父块（父块内容与子块重合，纳入会导致预览重复）。
+        按 page 升序聚合，返回 ``[{"page_no": int, "text": str}, ...]``。
         """
         chunks = [
             r
             for r in self._records
             if str(r.metadata.get("doc_id", "")) == str(doc_id)
-            and r.metadata.get("chunk_type") != "qa"
+            and r.metadata.get("chunk_type") not in ("qa", "parent")
         ]
         chunks.sort(
             key=lambda r: (r.metadata.get("page", 0) or 0, r.metadata.get("chunk_index", 0) or 0)
@@ -290,7 +350,9 @@ class PgVectorStore:
                     json.dumps(meta, ensure_ascii=False),
                 )
             )
-            new_records.append(_ChunkRecord(c["content"], emb, meta))
+            # M5-5：父块仅供回溯上下文，不进 BM25 关键词索引（父块很长会干扰关键词召回）
+            if meta.get("chunk_type") != "parent":
+                new_records.append(_ChunkRecord(c["content"], emb, meta))
 
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
@@ -336,6 +398,7 @@ class PgVectorStore:
                 rows = await conn.fetch(
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
                               metadata->>'chunk_type' AS chunk_type,
+                              metadata->>'parent_id' AS parent_id,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3 AND kb_id = ANY($4)
@@ -351,6 +414,7 @@ class PgVectorStore:
                 rows = await conn.fetch(
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
                               metadata->>'chunk_type' AS chunk_type,
+                              metadata->>'parent_id' AS parent_id,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3
@@ -371,6 +435,7 @@ class PgVectorStore:
                 kb_id=r["kb_id"],
                 chunk_index=r["chunk_index"],
                 chunk_type=r["chunk_type"] or "",
+                parent_id=r["parent_id"] or "",
             )
             for r in rows
         ]
@@ -395,9 +460,12 @@ class PgVectorStore:
         Args:
             chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
         """
-        # 常规检索默认排除 outline 块（chunk_types=None），大纲意图显式传 ["outline"]
+        # 常规检索默认排除 outline 与 parent 块（chunk_types=None），大纲意图显式传 ["outline"]；
+        # parent 父块仅供回溯上下文，任何情况都不进关键词检索。
         def _type_ok(meta):
             ct = meta.get("chunk_type")
+            if ct == "parent":
+                return False
             return ct != "outline" if chunk_types is None else ct in chunk_types
         candidates = [
             r
@@ -419,7 +487,7 @@ class PgVectorStore:
         logger.info(f"[PgVectorStore] 删除向量 doc_id={doc_id}")
 
     async def get_original_chunks(self, doc_id: str) -> list[dict]:
-        """读回文档的原始块（排除 qa 增强块），供增强 worker 重建（不依赖上传文件是否仍在）。
+        """读回文档的原始子块（排除 qa 增强块与 parent 父块），供增强 worker 重建（不依赖上传文件是否仍在）。
 
         Returns:
             [{"content", "chunk_index", "page", "source"}]；文档已删则返回空列表。
@@ -430,7 +498,8 @@ class PgVectorStore:
                 """SELECT content, chunk_index, page, source
                    FROM embeddings
                    WHERE doc_id = $1
-                     AND (metadata IS NULL OR metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'parent')
                    ORDER BY chunk_index""",
                 doc_id,
             )
@@ -444,11 +513,42 @@ class PgVectorStore:
             for r in rows
         ]
 
+    async def get_parents_by_doc(self, doc_id: str) -> list[dict]:
+        """读回文档的所有父块（M5-5），供检索回溯与增强重建透传。
+
+        Returns:
+            [{"content", "parent_id", "chunk_index", "page", "source"}]。
+        """
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT content, metadata->>'parent_id' AS parent_id, chunk_index, page, source
+                   FROM embeddings
+                   WHERE doc_id = $1 AND metadata->>'chunk_type' = 'parent'
+                   ORDER BY chunk_index""",
+                doc_id,
+            )
+        return [
+            {
+                "content": r["content"],
+                "parent_id": r["parent_id"] or "",
+                "chunk_index": r["chunk_index"] or 0,
+                "page": r["page"] or 0,
+                "source": r["source"] or "",
+            }
+            for r in rows
+        ]
+
+    async def attach_parents(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
+        """M5-5：为命中子块回溯并填充父块内容（small-to-big）。"""
+        return await attach_parent_contents(self, results)
+
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从 PG 向量库按页重建文档文本（预览兜底，不依赖原文件是否存在）。
 
-        排除 qa 增强块（与 :meth:`get_original_chunks` 一致）。按 page、chunk_index
-        升序聚合，返回 ``[{"page_no": int, "text": str}, ...]``。
+        排除 qa 增强块与 parent 父块（与 :meth:`get_original_chunks` 一致；父块内容与
+        子块重合，纳入会导致预览重复）。按 page、chunk_index 升序聚合，返回
+        ``[{"page_no": int, "text": str}, ...]``。
         """
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
@@ -456,7 +556,8 @@ class PgVectorStore:
                 """SELECT page, content, chunk_index
                    FROM embeddings
                    WHERE doc_id = $1
-                     AND (metadata IS NULL OR metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'qa')
+                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'parent')
                    ORDER BY page, chunk_index""",
                 str(doc_id),
             )
@@ -464,12 +565,20 @@ class PgVectorStore:
         return _aggregate_pages(chunks, lambda c: c["content"], lambda c: c["page"])
 
     async def warmup_bm25(self) -> None:
-        """从 PG 全量加载分块到内存 BM25 索引（应用启动时调用，重启不丢兜底检索）。"""
+        """从 PG 全量加载分块到内存 BM25 索引（应用启动时调用，重启不丢兜底检索）。
+
+        M5-5：排除 parent 父块（父块仅供回溯上下文，不进关键词检索）；同时把
+        ``chunk_type`` / ``parent_id`` 一并载入 metadata，使重启后 outline 排除与父块
+        回溯归属仍然正确（此前 warmup 丢失 chunk_type 会导致重启后 outline 块被误召回）。
+        """
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT content, source, page, doc_id, kb_id, chunk_index, tenant_id
-                   FROM embeddings"""
+                """SELECT content, source, page, doc_id, kb_id, chunk_index, tenant_id,
+                          metadata->>'chunk_type' AS chunk_type,
+                          metadata->>'parent_id' AS parent_id
+                   FROM embeddings
+                   WHERE metadata->>'chunk_type' IS DISTINCT FROM 'parent'"""
             )
         self._bm25_records = [
             _ChunkRecord(
@@ -483,6 +592,8 @@ class PgVectorStore:
                     "kb_id": r["kb_id"],
                     "chunk_index": r["chunk_index"],
                     "tenant_id": r["tenant_id"],
+                    "chunk_type": r["chunk_type"] or "",
+                    "parent_id": r["parent_id"] or "",
                 },
             )
             for r in rows
@@ -634,6 +745,13 @@ class MilvusVectorStore:
     async def get_original_chunks(self, doc_id: str) -> list[dict]:
         # Milvus 当前未启用，且元数据未落库，无法区分 qa 块；返回空（不影响 pgvector 主路径）
         return []
+
+    async def get_parents_by_doc(self, doc_id: str) -> list[dict]:
+        # Milvus 当前未启用，父块元数据未落库；返回空（不影响 pgvector 主路径）
+        return []
+
+    async def attach_parents(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
+        return results
 
 
 def _to_halfvec(vec: list[float] | None):

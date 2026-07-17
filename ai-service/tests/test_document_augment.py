@@ -96,10 +96,17 @@ def patched(monkeypatch):
         # 模拟从向量库读回原始块（process 已 store 原始块）
         return [{"content": ORIGINAL_CONTENT, "chunk_index": 0, "page": 1, "source": "x.txt"}]
 
+    async def fake_get_parents_by_doc(doc_id):
+        # M5-5：增强重建时读回父块透传；本用例不验证父块，返回空列表避免触碰真实 PG
+        return []
+
     monkeypatch.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
     monkeypatch.setattr(dp_module.vector_store_module.vector_store_service, "store_chunks", fake_store)
     monkeypatch.setattr(
         dp_module.vector_store_module.vector_store_service, "get_original_chunks", fake_get_original_chunks
+    )
+    monkeypatch.setattr(
+        dp_module.vector_store_module.vector_store_service, "get_parents_by_doc", fake_get_parents_by_doc
     )
     monkeypatch.setattr(dp_module.llm_service, "complete", fake_complete)
     monkeypatch.setattr(dp_module, "notify_document_status", fake_notify)

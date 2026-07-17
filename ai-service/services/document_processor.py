@@ -202,41 +202,77 @@ class DocumentProcessor:
         标题并单独生成 ``chunk_type='outline'`` 的标题块（记录 ``section_title``）。
         这些大纲块供「知识架构/大纲/目录」类问题在检索时优先召回，让 LLM 能基于
         文档真实章节主题归纳出知识框架（见 :mod:`services.rag` 的大纲意图路由）。
+
+        M5-5 父子分块（``settings.enable_parent_child``）：先按 ``parent_chunk_size``
+        切较大的父块（``chunk_type='parent'``、``is_parent=True``、embedding 留空不进
+        向量索引），再在每个父块内用 ``chunk_size`` 切子块并记录 ``parent_id`` 归属；
+        子块进向量检索，命中后由 :mod:`services.rag` 回溯父块内容拼出更完整的上下文
+        （small-to-big）。关闭开关时退化为原单层分块。
         """
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-        splitter = RecursiveCharacterTextSplitter(
+        child_splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
         )
+        parent_splitter = (
+            RecursiveCharacterTextSplitter(
+                chunk_size=settings.parent_chunk_size,
+                chunk_overlap=settings.parent_chunk_overlap,
+            )
+            if settings.enable_parent_child
+            else None
+        )
         chunks: list[DocumentChunk] = []
-        global_index = 0
+        state = {"index": 0, "parent_seq": 0}
+
+        def _add_children(text: str, page: int, parent_id: str | None) -> None:
+            for c in child_splitter.split_text(text):
+                meta = {"chunk_index": state["index"], "page": page}
+                if parent_id is not None:
+                    meta["parent_id"] = parent_id
+                # 防御性再清洗：即便上游提取漏清，落库 chunk 也一定干净（避免 U+FFFD 进入引用来源）
+                chunks.append(DocumentChunk(content=_clean_text(c), metadata=meta))
+                state["index"] += 1
+
         for seg in pages:
             if not seg.text.strip():
                 continue
-            for c in splitter.split_text(seg.text):
-                # 防御性再清洗：即便上游提取漏清，落库 chunk 也一定干净（避免 U+FFFD 进入引用来源）
-                chunks.append(
-                    DocumentChunk(
-                        content=_clean_text(c),
-                        metadata={"chunk_index": global_index, "page": seg.page},
+            if parent_splitter is not None:
+                # 父块 → 子块两层：父块入库供回溯（不进向量索引），子块进检索
+                for pc in parent_splitter.split_text(seg.text):
+                    parent_id = str(state["parent_seq"])
+                    state["parent_seq"] += 1
+                    chunks.append(
+                        DocumentChunk(
+                            content=_clean_text(pc),
+                            metadata={
+                                "chunk_index": state["index"],
+                                "page": seg.page,
+                                "chunk_type": "parent",
+                                "is_parent": True,
+                                "parent_id": parent_id,
+                            },
+                        )
                     )
-                )
-                global_index += 1
+                    state["index"] += 1
+                    _add_children(pc, seg.page, parent_id)
+            else:
+                _add_children(seg.text, seg.page, None)
             # 大纲感知：扫描该页标题行，生成 outline 块（不破坏内容块，仅补充）
             for title in self._extract_outline_titles(seg.text):
                 chunks.append(
                     DocumentChunk(
                         content=_clean_text(title),
                         metadata={
-                            "chunk_index": global_index,
+                            "chunk_index": state["index"],
                             "page": seg.page,
                             "chunk_type": "outline",
                             "section_title": title,
                         },
                     )
                 )
-                global_index += 1
+                state["index"] += 1
         return chunks
 
     @staticmethod
@@ -281,10 +317,16 @@ class DocumentProcessor:
     async def embed_chunks(
         self, chunks: list[DocumentChunk], cfg: ModelConfig | None = None
     ) -> list[DocumentChunk]:
-        """向量化分块。"""
-        texts = [c.content for c in chunks]
+        """向量化分块。
+
+        M5-5：父块（``chunk_type='parent'``）仅供检索命中后回溯上下文，不进向量索引，
+        故跳过其向量化（embedding 保持 None，落库 dimension=0 天然不被向量检索命中），
+        避免无谓的 Embedding 调用与成本。
+        """
+        targets = [c for c in chunks if c.metadata.get("chunk_type") != "parent"]
+        texts = [c.content for c in targets]
         vectors = await embedding_service.embed_batch(texts, cfg)
-        for chunk, vec in zip(chunks, vectors):
+        for chunk, vec in zip(targets, vectors):
             chunk.embedding = vec
         return chunks
 
@@ -432,6 +474,27 @@ class DocumentProcessor:
                 return
 
             source = originals[0].get("source", "")
+            # M5-5：读回父块透传。store_chunks 幂等语义会先 DELETE 同 doc 全部块再插入，
+            # 若不带上父块会导致其在增强入库时丢失，破坏后续检索的父块回溯。
+            parents = await vector_store_module.vector_store_service.get_parents_by_doc(doc_id)
+            parent_dicts = [
+                {
+                    "content": p["content"],
+                    "metadata": {
+                        "doc_id": doc_id,
+                        "kb_id": kb_id,
+                        "tenant_id": tenant_id,
+                        "source": p.get("source", source),
+                        "chunk_index": p.get("chunk_index", 0),
+                        "page": p.get("page", 0),
+                        "chunk_type": "parent",
+                        "is_parent": True,
+                        "parent_id": p.get("parent_id", ""),
+                    },
+                    "embedding": None,
+                }
+                for p in parents
+            ]
             chunk_dicts: list[dict] = []
             chunks: list[DocumentChunk] = []
             for o in originals:
@@ -466,10 +529,13 @@ class DocumentProcessor:
                     timeout=settings.qa_background_timeout,
                 )
                 if augmented:
+                    # M5-5：连同父块一并全量 store（幂等覆盖），保留父块供回溯
                     await vector_store_module.vector_store_service.store_chunks(
-                        chunk_dicts + augmented, kb_id, doc_id, tenant_id
+                        chunk_dicts + parent_dicts + augmented, kb_id, doc_id, tenant_id
                     )
-                    logger.info(f"[优化] 增强入库完成 doc_id={doc_id} 增强块={len(augmented)}")
+                    logger.info(
+                        f"[优化] 增强入库完成 doc_id={doc_id} 增强块={len(augmented)} 父块={len(parent_dicts)}"
+                    )
                 else:
                     logger.info(f"[优化] 无增强块（LLM 不可用/配置错误），文档维持可检索 doc_id={doc_id}")
         except asyncio.TimeoutError:
@@ -603,9 +669,11 @@ class DocumentProcessor:
         best-effort：LLM 不可用 / 配置错误 / 单块超时，跳过剩余增强（文档仍就绪可用），
         不阻塞主流程。
         """
-        # 跳过 outline 块（章节标题），仅对内容块生成问答增强，避免短标题污染增强集
+        # 跳过 outline 块（章节标题）与 parent 父块（内容与子块重合），仅对子内容块生成问答增强
         selected = [
-            c for c in chunks if c.metadata.get("chunk_type") != "outline"
+            c
+            for c in chunks
+            if c.metadata.get("chunk_type") not in ("outline", "parent")
         ][: settings.qa_max_pairs]
         augmented: list[dict] = []
         results: list[tuple[int, dict | None, bool]] = [(i, None, False) for i in range(len(selected))]

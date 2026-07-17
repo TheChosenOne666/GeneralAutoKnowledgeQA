@@ -12,6 +12,7 @@ import tempfile
 import pytest
 
 from services.document_processor import document_processor, CHARS_PER_PAGE, PageSegment, _clean_text
+from services import document_processor as dp_module
 
 
 def _write_tmp(suffix: str, content: str) -> str:
@@ -131,4 +132,64 @@ def test_clean_text_strips_garbage():
     assert _clean_text("\ufeff\t\t标题\r\n正文") == "\t\t标题\r\n正文"
     # 空输入
     assert _clean_text("") == ""
+
+
+def test_chunk_text_parent_child_layers():
+    """M5-5：启用父子分块时，chunk_text 产出 parent 块与子块两层，且子块带 parent_id 归属。"""
+    # 用较长文本确保能切出多个父块/子块
+    text = ("熊答是企业知识问答助手，支持 RAG 检索与智能问答，具备多租户与成员管理能力。" * 30)
+    pages = [PageSegment(text, 1)]
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_parent_child", True)
+        chunks = asyncio.run(document_processor.chunk_text(pages))
+
+    parents = [c for c in chunks if c.metadata.get("chunk_type") == "parent"]
+    children = [c for c in chunks if c.metadata.get("chunk_type") != "parent"]
+    assert len(parents) >= 1, "应至少产出一个父块"
+    assert len(children) >= 1, "应至少产出子块"
+    # 每个子块都应有 parent_id 归属
+    assert all(c.metadata.get("parent_id") is not None for c in children)
+    # 父块不应与子块内容完全重复（父块更大）
+    assert all(len(p.content) >= len(c.content) for p in parents for c in children)
+
+
+def test_chunk_text_parent_child_disabled_fallback():
+    """M5-5：关闭父子分块开关时，退化为原单层分块（无 parent 块，子块无 parent_id）。"""
+    text = ("熊答是企业知识问答助手，支持 RAG 检索与智能问答。" * 10)
+    pages = [PageSegment(text, 1)]
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_parent_child", False)
+        chunks = asyncio.run(document_processor.chunk_text(pages))
+
+    assert all(c.metadata.get("chunk_type") != "parent" for c in chunks)
+    assert all("parent_id" not in c.metadata for c in chunks)
+
+
+def test_embed_chunks_skips_parent():
+    """M5-5：embed_chunks 跳过父块向量化，仅向量化非 parent 块。"""
+    from services.document_processor import DocumentChunk
+
+    chunks = [
+        DocumentChunk(
+            content="父块完整上下文",
+            metadata={"chunk_index": 0, "chunk_type": "parent", "is_parent": True, "parent_id": "p0"},
+        ),
+        DocumentChunk(
+            content="子块内容",
+            metadata={"chunk_index": 1, "chunk_type": "child", "parent_id": "p0"},
+        ),
+    ]
+
+    async def fake_embed_batch(texts, cfg=None):
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
+        out = asyncio.run(document_processor.embed_chunks(chunks))
+    # 父块 embedding 保持 None（不进向量索引）
+    assert out[0].embedding is None
+    # 子块被向量化
+    assert out[1].embedding is not None
+
+
 

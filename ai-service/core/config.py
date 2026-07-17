@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
 
+    # M5-5 父子分块（parent/child chunk, small-to-big retrieval）：
+    # 子块（chunk_size）进向量索引，检索语义聚焦、精度高；父块（parent_chunk_size）
+    # 入库但不进向量索引，检索命中子块后回溯其父块内容拼上下文，供 LLM 获得更完整连贯的语境。
+    enable_parent_child: bool = True         # 分块时额外产出父块并建立子→父归属
+    parent_chunk_size: int = 1500            # 父块大小（远大于子块，承载完整上下文）
+    parent_chunk_overlap: int = 100          # 父块间重叠
+    retrieval_parent_context: bool = True    # 检索命中子块后回溯父块内容填入 parent_content
+
     # 检索相关性门槛：检索结果均不相关时视为「无相关文档」，不向下游推送引用来源
     # （避免用户问知识库没有的内容时，AI 仍展示不相关的错误引用来源）。
     retrieval_relevance_gate: bool = True       # 总开关
