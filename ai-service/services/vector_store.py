@@ -21,7 +21,7 @@ from core.pg_client import get_pg_pool
 # 增强块类型（由 LLM 生成，非原文）：重建原始块/预览时必须排除，否则增强 worker
 # 重建时把上一轮增强块当原文再生成，导致无限膨胀。含 qa（M4-8）与 M5-7 的
 # question/summary/wiki/entity。parent 父块单独排除（内容与子块重合）。
-AUGMENT_CHUNK_TYPES = ("qa", "question", "summary", "wiki", "entity")
+AUGMENT_CHUNK_TYPES = ("qa", "question", "summary", "wiki", "entity", "ocr", "image_caption")
 
 
 def _exclude_chunk_types_sql(types: tuple[str, ...]) -> str:

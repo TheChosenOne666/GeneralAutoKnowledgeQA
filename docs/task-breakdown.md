@@ -1363,15 +1363,19 @@ Python（AI 服务）
 - **依赖**：M5-1（或现有 store_chunks）
 - **产出**：检索召回更完整、上下文更连贯；父块仅在命中后回溯，不增加向量检索噪声与 Embedding 成本。
 
-### M5-6 多模态增强（图片 OCR + VLM caption）[Python] P2 · 2d ⬜ 待开始
+### M5-6 多模态增强（图片 OCR + VLM caption）[Python] P2 · 2d ✅ 完成（2026-07-17）
 
-- **需求**：对齐 业界 `enable_multimodel → image:multimodal`，对文档内图片做 OCR + VLM caption，每图拆 OCR 块 + Caption 块入向量库。
-- **改造**：
-  - 解析阶段抽取图片（PDF 图片提取 / DOCX 内嵌图）；图片块每图拆 OCR 块 + Caption 块。
-  - OCR 用 OCR 服务/库；Caption 用 VLM（复用 M3-3 配置的多模态端点）。
-  - 增强队列增加 `image:multimodal` 子任务类型（复用 M5-1 队列）。
-- **依赖**：M5-1、M3-3 模型配置（多模态端点）
-- **产出**：图片内容可被检索问答。
+- **需求**：对标业界 `enable_multimodel → image:multimodal`，对文档内图片做 OCR + VLM caption，每图拆 OCR 块 + Caption 块入向量库，使图片内容可被检索问答。
+- **实现**（最小侵入现有增强队列与 `chunk_type` 体系，无新基础设施）：
+  - **config**：新增总开关 `enable_multimodal`（默认开）与 `multimodal_max_images=20`（每文档图片上限）、`multimodal_min_image_bytes=1024`（过滤图标/字形/分隔线等过小噪声）、`multimodal_ocr_caption_concurrency=4`（图片级并发）、`multimodal_per_image_timeout=120.0`（单图 VLM 超时）。
+  - **图片抽取（document_processor.py）**：新增 `extract_images` 按类型委派——PDF 走 `fitz` 逐页 `page.get_images` 抽取原始字节（`_extract_pdf_images`，PyMuPDF 不可用时返回空列表降级）；DOCX 走 `zipfile` 读 `word/media/`（`_extract_docx_images`，无真实页码记 `page=0`）；txt/md 不抽图。两函数均按 `min_image_bytes` 跳过过小图片。
+  - **OCR + Caption（复用 M3-3 配置的 LLM）**：新增 `_ocr_and_caption`，用 OpenAI 兼容多模态消息（`content` 为含 `image_url` 的 parts 列表）一次调用同时产出 OCR 文字与图像描述（JSON `{ocr, caption}`），由新增 `_parse_ocr_caption_json` 容错解析。需用户配置支持多模态/图片输入的 LLM。
+  - **增强生成与 worker 接入**：新增 `_generate_multimodal_augment`，复用增强任务 `task.file_path` 重新抽取图片（best-effort：文件不存在/无图/单图失败均跳过该图；`ModelConfigError` 整体放弃），对每图产出 `chunk_type=ocr`（OCR 文字）与 `chunk_type=image_caption`（图描述）两块并向量化；在 `_run_augment_task` 中于 qa/扩展增强之后合并 `all_augmented = augmented + extended + multimodal_blocks` 全量 store（幂等），日志含 `多模态=N`。
+  - **检索侧排除（vector_store.py / rag.py）**：`AUGMENT_CHUNK_TYPES` 新增 `ocr`/`image_caption`，使其默认排除为引用来源（并入 `retrieval_exclude_augment_blocks`，与 qa 增强块同语义），且不污染预览（`get_document_pages`）、不触发重建膨胀（`get_original_chunks`），但仍参与向量/BM25 检索提升召回；BM25 预热（`warmup_bm25`）保留其入关键词索引。
+- **测试**：`test_document_processor.py` 新增 5 例（图片抽取分发/txt 返回空、DOCX zip 真实抽取并过滤小图、多模态生成 ocr+caption 并向量化、关闭开关返回空、VLM 配置错误返回空）；`test_vector_store.py` 扩展两例覆盖 ocr/image_caption 被 `get_original_chunks`/`get_document_pages` 排除；`test_document_augment.py` 新增 worker 端到端验证图片文档产出 ocr/image_caption 块入库并向量化。相关 3 文件全量 + M5-6 单测 39 passed，全量 `pytest tests/` 无回归。
+- **依赖**：M5-1 增强队列、M3-3 模型配置（多模态端点）
+- **产出**：文档图片的 OCR 文字与描述可被向量/关键词检索并进入问答上下文，图片内容可检索问答。
+- **已知设计取舍**：OCR/caption 块默认不列为引用来源（与 qa 增强块一致），仅作为检索召回的语义桥接进入 LLM 上下文；后续如需把 OCR 文字当作可引用原文，可将其从 `AUGMENT_CHUNK_TYPES` 移除（需同步处理重建膨胀防护）。
 
 ### M5-7 GraphRAG + Auto-Wiki + 摘要/问题（增强内容丰富度扩展）[Python] P2 · 2d ✅ 完成（2026-07-17）
 

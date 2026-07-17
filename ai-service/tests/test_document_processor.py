@@ -273,4 +273,134 @@ def test_generate_extended_augment_model_config_error():
     assert out == []
 
 
+def test_extract_images_dispatch():
+    """M5-6：extract_images 对 txt/未知类型返回 []，对 pdf/docx 委派到对应抽取器。"""
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(
+            document_processor,
+            "_extract_pdf_images",
+            lambda fp: [{"bytes": b"p", "page": 1, "ext": "png"}],
+        )
+        mp.setattr(
+            document_processor,
+            "_extract_docx_images",
+            lambda fp: [{"bytes": b"d", "page": 0, "ext": "png"}],
+        )
+        assert asyncio.run(document_processor.extract_images("x.pdf", "pdf")) == [
+            {"bytes": b"p", "page": 1, "ext": "png"}
+        ]
+        assert asyncio.run(document_processor.extract_images("x.docx", "docx")) == [
+            {"bytes": b"d", "page": 0, "ext": "png"}
+        ]
+        # 非图片类文档（txt/md）直接返回空，不触发抽取
+        assert asyncio.run(document_processor.extract_images("x.txt", "txt")) == []
+        assert asyncio.run(document_processor.extract_images("x.md", "md")) == []
+
+
+def test_extract_docx_images_real_zip():
+    """M5-6：_extract_docx_images 从 zip(word/media/) 抽取图片，跳过过小的图片。"""
+    import zipfile
+
+    small = b"\x89PNG\r\n\x1a\n" + b"\x00" * 10  # 小于 min bytes，应被过滤
+    big = b"\x89PNG\r\n\x1a\n" + b"\x00" * 5000  # 大于 min bytes，保留
+
+    fd, path = tempfile.mkstemp(suffix=".docx")
+    os.close(fd)
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/image1.png", small)
+        z.writestr("word/media/image2.png", big)
+    try:
+        imgs = document_processor._extract_docx_images(path)
+        # 仅大图被保留（小图被 min bytes 过滤）
+        assert len(imgs) == 1
+        assert imgs[0]["ext"] == "png"
+        assert imgs[0]["page"] == 0  # DOCX 无真实页码
+    finally:
+        os.unlink(path)
+
+
+def test_generate_multimodal_augment_ocr_caption():
+    """M5-6：_generate_multimodal_augment 对图片产出 ocr + image_caption 块并向量化。"""
+    from services.vector_store import AUGMENT_CHUNK_TYPES
+
+    # 真实临时文件，使 _generate_multimodal_augment 的 os.path.exists 守卫通过
+    fd, img_pdf = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    task = {"file_path": img_pdf, "file_type": "pdf"}
+    try:
+
+        async def fake_extract_images(fp, ft):
+            return [{"bytes": b"imgbytes1", "page": 2, "ext": "png"}]
+
+        async def fake_complete(messages, model=None, cfg=None, client=None):
+            # 多模态消息 content 为 parts 列表（含 image_url），此处直接返回 OCR 结果
+            return '{"ocr": "图中显示登录流程图", "caption": "一张描述系统登录流程的示意图"}'
+
+        async def fake_embed_batch(texts, cfg=None, client=None):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(dp_module.settings, "enable_multimodal", True)
+            mp.setattr(document_processor, "extract_images", fake_extract_images)
+            mp.setattr(dp_module.llm_service, "complete", fake_complete)
+            mp.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
+            out = asyncio.run(document_processor._generate_multimodal_augment(task, None))
+    finally:
+        os.unlink(img_pdf)
+
+    types = {d["metadata"]["chunk_type"] for d in out}
+    assert types == {"ocr", "image_caption"}, types
+    # 每块都被向量化
+    assert all(d["embedding"] is not None for d in out)
+    ocr = [d for d in out if d["metadata"]["chunk_type"] == "ocr"][0]
+    assert ocr["content"] == "图中显示登录流程图"
+    assert ocr["metadata"]["page"] == 2
+    # 两块均被排除为引用来源（chunk_type 在 AUGMENT_CHUNK_TYPES）
+    assert "ocr" in AUGMENT_CHUNK_TYPES and "image_caption" in AUGMENT_CHUNK_TYPES
+
+
+def test_generate_multimodal_augment_no_images():
+    """M5-6：文档无图片时返回空列表（不影响原有增强）。"""
+    task = {"file_path": "x.txt", "file_type": "txt"}  # txt 不抽图
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_multimodal", True)
+        out = asyncio.run(document_processor._generate_multimodal_augment(task, None))
+    assert out == []
+
+
+def test_generate_multimodal_augment_disabled():
+    """M5-6：总开关 enable_multimodal 关闭时返回空列表。"""
+    task = {"file_path": "x.pdf", "file_type": "pdf"}
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_multimodal", False)
+        out = asyncio.run(document_processor._generate_multimodal_augment(task, None))
+    assert out == []
+
+
+def test_generate_multimodal_augment_model_config_error():
+    """M5-6：VLM 配置错误时整体跳过多模态增强（返回空列表）。"""
+    from services.model_config import ModelConfigError
+
+    task = {"file_path": "x.pdf", "file_type": "pdf"}
+
+    async def fake_extract_images(fp, ft):
+        return [{"bytes": b"img", "page": 1, "ext": "png"}]
+
+    async def fake_complete(messages, model=None, cfg=None, client=None):
+        raise ModelConfigError("bad key")
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_multimodal", True)
+        mp.setattr(document_processor, "extract_images", fake_extract_images)
+        mp.setattr(dp_module.llm_service, "complete", fake_complete)
+        out = asyncio.run(document_processor._generate_multimodal_augment(task, None))
+    assert out == []
+
+
+
+
+
 

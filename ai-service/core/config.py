@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     augment_ext_entity_max: int = 20         # 实体关系三元组上限
     augment_ext_per_call_timeout: float = 120.0  # 单类扩展增强 LLM 调用超时（秒）
 
+    # M5-6 多模态增强（图片 OCR + VLM caption）：解析阶段抽取文档图片，对每张图用 VLM
+    # （复用 M3-3 配置的 LLM，需支持多模态/图片输入）做一次调用，同时产出 OCR 文字块
+    # （chunk_type=ocr）与图像描述块（chunk_type=image_caption），均入向量库参与检索
+    # （默认排除为引用来源，并入 AUGMENT_CHUNK_TYPES，与 qa 增强块同语义）。
+    enable_multimodal: bool = True                 # 总开关：是否抽取图片做 OCR/caption 增强
+    multimodal_max_images: int = 20               # 每文档最多抽取图片数（避免大 PDF 图片爆炸）
+    multimodal_min_image_bytes: int = 1024        # 跳过过小的图片（图标/字形/分隔线等噪声）
+    multimodal_ocr_caption_concurrency: int = 4   # 图片级 OCR+caption 并发度
+    multimodal_per_image_timeout: float = 120.0   # 单张图片 VLM 调用超时（秒）
+
     # LLM
     llm_provider: str = "volcengine"
     llm_model: str = "doubao-pro"

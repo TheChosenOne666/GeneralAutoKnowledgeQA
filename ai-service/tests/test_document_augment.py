@@ -239,6 +239,43 @@ def test_worker_skips_deleted_doc(patched, monkeypatch):
     assert task not in fake_q.processing
 
 
+def test_worker_includes_multimodal_when_images(patched, monkeypatch):
+    """M5-6：文档含图片时，worker 抽取图片并产出 ocr/image_caption 块一并入库。"""
+    stored, notifies, fake_q = patched
+
+    async def fake_extract_images(fp, ft):
+        return [{"bytes": b"imgdata", "page": 2, "ext": "png"}]
+
+    async def fake_complete(messages, model=None, cfg=None, client=None):
+        # 多模态消息：content 为 parts 列表（含 image_url），区别于常规文本 system prompt
+        content = messages[0]["content"]
+        if isinstance(content, list):
+            return '{"ocr": "图中为薪酬结构表", "caption": "展示月度薪资构成的图表"}'
+        return '{"question": "什么是熊答？", "answer": "熊答是企业知识问答助手。"}'
+
+    monkeypatch.setattr(document_processor, "extract_images", fake_extract_images)
+    monkeypatch.setattr(dp_module.llm_service, "complete", fake_complete)
+
+    # 真实临时文件，使 _generate_multimodal_augment 的 os.path.exists 守卫通过
+    fd, img_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        task = {"doc_id": "docMM", "kb_id": "kb1", "tenant_id": "t1",
+                "file_path": img_path, "file_type": "pdf", "ai_config": None}
+        _run(document_processor._run_augment_task(task))
+    finally:
+        os.unlink(img_path)
+
+    types = {c["metadata"].get("chunk_type") for c in stored["last"][0]}
+    assert "ocr" in types
+    assert "image_caption" in types
+    ocr = [c for c in stored["last"][0] if c["metadata"].get("chunk_type") == "ocr"][0]
+    assert ocr["content"] == "图中为薪酬结构表"
+    assert ocr["metadata"]["page"] == 2
+    # 多模态块也被向量化（参与检索）
+    assert ocr["embedding"] is not None
+
+
 def test_parse_qa_json_robust():
     assert _parse_qa_json('{"question": "q", "answer": "a"}') == {"question": "q", "answer": "a"}
     # markdown 代码块包裹
