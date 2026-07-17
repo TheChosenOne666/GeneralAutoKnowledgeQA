@@ -55,7 +55,23 @@ export interface Document {
   modelConfigError: boolean | null
   /** 是否因模型额度不足 / 被限流（HTTP 429 / 5xx 过载 / 余额耗尽）导致失败（区别于配置错误，提示重试 / 检查额度）。*/
   quotaError: boolean | null
+  /**
+   * 文档处理阶段时间线（M5-4）：JSON 数组，记录 解析/分块/向量化/入库/增强 各阶段的状态、
+   * 起止时间、耗时与指标，供细粒度展示进度与失败定位。后端以 JSON 字符串返回，前端按需解析。
+   */
+  processStages?: ProcessStage[] | string | null
   createTime: string
+}
+
+/** 文档处理阶段（M5-4 阶段化 span 时间线追踪）。*/
+export interface ProcessStage {
+  stage: string
+  status: 'active' | 'done' | 'failed'
+  startedAt?: number
+  endedAt?: number
+  elapsedMs?: number
+  error?: string | null
+  metrics?: Record<string, unknown> | null
 }
 
 export interface Conversation {

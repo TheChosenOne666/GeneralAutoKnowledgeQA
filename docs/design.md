@@ -641,7 +641,9 @@ Java triggerDocumentProcessing：发请求后置 status=parsing；仅当 Python 
 
 > **M5-2 主流程重试机制（2026-07-17，已落地）**：在 M5-1 队列基础上叠加失败重试（对标 Asynq `MaxRetry(3)` + 退避）。任务新增 `retry` 字段；`run_process_worker` 每轮先 `promote_delayed()` 把到期的延迟重试任务搬回主队列。重试分流（`_run_process_task`）：`ModelConfigError`（密钥/模型名/维度）**不可重试**，直接回调 `failed` + `model_config_error=True`；其余瞬时异常（网络/`ModelQuotaError` 限流/DB 瞬时错误）按 `retry` 计数经 `requeue_delayed` 写入延迟 zset `xiongda:doc:delayed`（score = `next_attempt_at = now + backoff_delay(attempt)`，指数退避 30/60/120s 封顶 600s），到期后由 worker 重新执行；达 `MAX_RETRY=3` 上限回调 `failed`（error_msg 含「已重试 N 次」）。PG `store_chunks` 先删后插保证重试幂等、不重复分块；延迟任务持久化于 zset，服务重启后到期即恢复。详见 `docs/task-breakdown.md` M5-2。
 
-> **M5 规划（余下 5 项）**：M5-1 / M5-2 / M5-3 已完成；剩余 M5-4 阶段 span / M5-5 父子分块 / M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+> **M5 规划（余下 4 项）**：M5-1 / M5-2 / M5-3 / M5-4 已完成；剩余 M5-5 父子分块 / M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+
+> **M5-4 阶段化 span 时间线追踪（2026-07-17 已落地）**：文档处理全程拆成带时间线与指标的阶段——解析(parsing) → 分块(chunking) → 向量化(embedding) → 入库(indexing) → 增强(optimizing)。Python 经 `_StageTimer` 上下文管理器在每阶段边界回调 `notify_stage`（best-effort POST `/api/internal/document/stage`，携带 `startedAt/endedAt/elapsedMs/error/metrics`），Java `recordDocumentStage` 按 `stage` 幂等合并写入文档 `process_stages`（TEXT JSON 数组）；前端 `KnowledgeBasePage` 状态单元格下以 `StageTimeline` 展示阶段链（done 绿✓+耗时 / failed 红✕ / active 旋转符），便于细粒度进度观察与失败定位。详见 `docs/task-breakdown.md` M5-4。
 
 ### 9.3 RAG 问答全链路（含三层缓存）
 

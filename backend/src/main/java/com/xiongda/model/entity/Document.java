@@ -65,6 +65,13 @@ public class Document implements Serializable {
     @TableField(value = "quota_error", updateStrategy = FieldStrategy.ALWAYS)
     private Boolean quotaError;
 
+    /**
+     * 文档处理阶段时间线（M5-4）：JSON 数组，记录 解析/分块/向量化/入库/增强 各阶段的
+     * 状态(active/done/failed)、起止时间、耗时与指标，供前端细粒度展示进度与失败定位。
+     */
+    @TableField("process_stages")
+    private String processStages;
+
     private Long uploadedBy;
 
     @TableField(fill = FieldFill.INSERT)

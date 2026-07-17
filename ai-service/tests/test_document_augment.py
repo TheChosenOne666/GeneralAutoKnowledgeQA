@@ -69,6 +69,8 @@ def patched(monkeypatch):
     """一次性打桩 embed_batch / store_chunks / get_original_chunks / complete / notify / 队列。"""
     stored: dict = {}
     notifies: list = []
+    stages: list = []
+    stored["stages"] = stages
     fake_q = _FakeQueue()
 
     async def fake_embed_batch(texts, cfg=None, client=None):
@@ -86,6 +88,10 @@ def patched(monkeypatch):
         # 仅记录 (doc_id, status) 供既有断言使用；**kwargs 吸收新增的 content/chunk_count
         notifies.append((doc_id, status))
 
+    async def fake_notify_stage(doc_id, stage, status, **kwargs):
+        # M5-4：记录阶段事件（stage, status, metrics）供断言；**kwargs 吸收计时/错误字段
+        stages.append({"doc_id": doc_id, "stage": stage, "status": status, **kwargs})
+
     async def fake_get_original_chunks(doc_id):
         # 模拟从向量库读回原始块（process 已 store 原始块）
         return [{"content": ORIGINAL_CONTENT, "chunk_index": 0, "page": 1, "source": "x.txt"}]
@@ -97,6 +103,7 @@ def patched(monkeypatch):
     )
     monkeypatch.setattr(dp_module.llm_service, "complete", fake_complete)
     monkeypatch.setattr(dp_module, "notify_document_status", fake_notify)
+    monkeypatch.setattr(dp_module, "notify_stage", fake_notify_stage)
     monkeypatch.setattr(dp_module.augment_queue, "enqueue", fake_q.enqueue)
     monkeypatch.setattr(dp_module.augment_queue, "ack", fake_q.ack)
     monkeypatch.setattr(dp_module.augment_queue, "is_cancelled", fake_q.is_cancelled)
@@ -134,6 +141,32 @@ def test_process_stores_original_and_enqueues(patched):
     # 增强任务已入持久化队列
     assert len(fake_q.queue) == 1
     assert fake_q.queue[0]["doc_id"] == "doc1"
+
+
+def test_process_emits_stage_timeline(patched):
+    """M5-4：process() 应 emitting parsing/chunking/embedding/indexing 阶段 done；worker 再 emitting optimizing done。"""
+    stored, notifies, fake_q = patched
+    path = _write_tmp(".txt", ORIGINAL_CONTENT)
+    try:
+        result = _run(document_processor.process(path, "txt", "kb1", "docStage", "t1", None, None))
+    finally:
+        os.unlink(path)
+    assert result["status"] == "optimizing"
+
+    stages = stored["stages"]
+    done_stages = [s["stage"] for s in stages if s["status"] == "done"]
+    for expected in ("parsing", "chunking", "embedding", "indexing"):
+        assert expected in done_stages, f"缺少阶段 {expected}"
+
+    # embedding 阶段应携带耗时与指标（chunkCount）
+    embedding = next(s for s in stages if s["stage"] == "embedding" and s["status"] == "done")
+    assert embedding.get("elapsed_ms") is not None
+    assert embedding.get("metrics", {}).get("chunkCount") == result["chunk_count"]
+
+    # 消费增强任务 → optimizing 阶段 done（含 enhancedCount 指标）
+    _run(document_processor._run_augment_task(fake_q.queue[0]))
+    opt = next(s for s in stored["stages"] if s["stage"] == "optimizing" and s["status"] == "done")
+    assert opt.get("metrics", {}).get("enhancedCount", 0) >= 1
 
 
 def test_worker_augments_and_notifies_ready(patched):

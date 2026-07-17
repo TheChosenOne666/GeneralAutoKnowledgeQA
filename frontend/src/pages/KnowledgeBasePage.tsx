@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { knowledgeApi } from '@/api/knowledge'
 import { useAuth } from '@/hooks/useAuth'
-import type { Document, KnowledgeBase } from '@/types'
+import type { Document, KnowledgeBase, ProcessStage } from '@/types'
 
 const STATUS_CONFIG: Record<string, { text: string; cls: string; icon: string }> = {
   ready: { text: '已就绪', cls: 'bg-emerald-50 text-emerald-700', icon: 'M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z' },
@@ -17,6 +17,65 @@ const STATUS_CONFIG: Record<string, { text: string; cls: string; icon: string }>
   failed: { text: '处理失败', cls: 'bg-red-50 text-red-700', icon: 'M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z' },
   cancelled: { text: '已取消', cls: 'bg-slate-100 text-slate-400', icon: 'M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z' },
 }
+
+// M5-4 阶段化 span 时间线：固定展示顺序与中文标签（缺失阶段跳过）
+const STAGE_LABELS: Record<string, string> = {
+  parsing: '解析',
+  chunking: '分块',
+  embedding: '向量化',
+  indexing: '入库',
+  optimizing: '增强',
+}
+const STAGE_ORDER = ['parsing', 'chunking', 'embedding', 'indexing', 'optimizing']
+
+/** 解析后端返回的 processStages（可能是 JSON 字符串或数组）。*/
+function normalizeStages(raw: Document['processStages']): ProcessStage[] {
+  if (!raw) return []
+  try {
+    return typeof raw === 'string' ? (JSON.parse(raw) as ProcessStage[]) : raw
+  } catch {
+    return []
+  }
+}
+
+/** 文档处理阶段时间线（M5-4）：细粒度进度与失败定位。*/
+function StageTimeline({ doc }: { doc: Document }) {
+  const stages = normalizeStages(doc.processStages)
+  if (stages.length === 0) return null
+  const present = STAGE_ORDER.filter((s) => stages.some((x) => x.stage === s))
+  if (present.length === 0) return null
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      {present.map((s, i) => {
+        const st = stages.find((x) => x.stage === s)!
+        const label = STAGE_LABELS[s] ?? s
+        const isDone = st.status === 'done'
+        const isFailed = st.status === 'failed'
+        const isActive = st.status === 'active'
+        const cls = isDone
+          ? 'bg-emerald-50 text-emerald-600'
+          : isFailed
+            ? 'bg-red-50 text-red-600'
+            : 'bg-amber-50 text-amber-600'
+        const elapsed = st.elapsedMs != null ? `${(st.elapsedMs / 1000).toFixed(1)}s` : null
+        return (
+          <span key={s} className="flex items-center gap-1">
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}>
+              {isDone && <span>✓</span>}
+              {isFailed && <span title={st.error ?? '失败'}>✕</span>}
+              {isActive && <span className="animate-spin">◌</span>}
+              {label}
+              {isDone && elapsed && <span className="opacity-60">{elapsed}</span>}
+            </span>
+            {i < present.length - 1 && <span className="text-slate-300">›</span>}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+
 
 const FILE_ICONS: Record<string, string> = {
   pdf: 'text-red-500',
@@ -522,6 +581,9 @@ export default function KnowledgeBasePage() {
                           </span>
                           {doc.status === 'optimizing' && (
                             <div className="mt-0.5 text-[10px] text-violet-400">已可检索</div>
+                          )}
+                          {(doc.status === 'processing' || doc.status === 'parsing' || doc.status === 'retrieving' || doc.status === 'optimizing' || doc.status === 'failed') && (
+                            <StageTimeline doc={doc} />
                           )}
                         </td>
                         <td className="px-4 py-3.5 text-sm text-slate-500">{formatTime(doc.createTime)}</td>

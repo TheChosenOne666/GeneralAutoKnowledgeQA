@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 
 from loguru import logger
@@ -23,7 +24,7 @@ from services import vector_store as vector_store_module
 from services.embedding import embedding_service
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
-from services.status_callback import notify_document_status
+from services.status_callback import notify_document_status, notify_stage
 
 # DOCX/TXT/MD 无真实页码，按字符数估算每页（仅用于引用来源展示，非精确）
 CHARS_PER_PAGE = 1500
@@ -36,6 +37,42 @@ class DocumentChunk:
     content: str
     metadata: dict
     embedding: list[float] | None = None
+
+
+class _StageTimer:
+    """阶段计时器（M5-4）：进入阶段时回调 active，退出时回调 done/failed 并携带耗时与指标。
+
+    把 解析/分块/向量化/入库/增强 拆成带时间线的阶段，供前端细粒度展示进度与失败定位。
+    异常时自动标记为 failed 并回填错误（不吞异常，仍向上抛出由主流程统一处理）。
+    """
+
+    def __init__(self, doc_id: str, stage: str, metrics_provider=None):
+        self.doc_id = doc_id
+        self.stage = stage
+        self.metrics_provider = metrics_provider
+        self._started_ms = int(time.time() * 1000)
+        self._t0 = time.monotonic()
+
+    async def __aenter__(self):
+        await notify_stage(self.doc_id, self.stage, "active", started_at=self._started_ms)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        elapsed_ms = int((time.monotonic() - self._t0) * 1000)
+        metrics = self.metrics_provider() if self.metrics_provider else None
+        status = "failed" if exc_type is not None else "done"
+        error = str(exc)[:500] if exc is not None else None
+        await notify_stage(
+            self.doc_id,
+            self.stage,
+            status,
+            started_at=self._started_ms,
+            ended_at=int(time.time() * 1000),
+            elapsed_ms=elapsed_ms,
+            error=error,
+            metrics=metrics,
+        )
+        return False
 
 
 @dataclass
@@ -277,12 +314,14 @@ class DocumentProcessor:
         """
         # 1. 提取文本（按页）
         logger.info(f"[文档诊断] 开始提取文本 doc_id={doc_id} file_type={file_type} file_path={file_path}")
-        pages = await self.extract_pages(file_path, file_type)
+        async with _StageTimer(doc_id, "parsing"):
+            pages = await self.extract_pages(file_path, file_type)
         full_text = _clean_text("\n".join(p.text for p in pages))
         logger.info(f"[文档诊断] 提取完成 doc_id={doc_id} 文本长度={len(full_text)} 页数={len(pages)}")
 
         # 2. 分块（保留页码）
-        chunks = await self.chunk_text(pages)
+        async with _StageTimer(doc_id, "chunking"):
+            chunks = await self.chunk_text(pages)
         logger.info(f"[文档诊断] 分块完成 doc_id={doc_id} 块数={len(chunks)}")
 
         # 3. 检索阶段：向量化 + 构建原始块（使文档可被检索）
@@ -293,7 +332,8 @@ class DocumentProcessor:
             logger.info(f"[文档诊断] 处理中被取消（嵌入前），放弃 doc_id={doc_id}")
             await notify_document_status(doc_id, "cancelled")
             return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
-        chunks = await self.embed_chunks(chunks, cfg)
+        async with _StageTimer(doc_id, "embedding", metrics_provider=lambda: {"chunkCount": len(chunks)}):
+            chunks = await self.embed_chunks(chunks, cfg)
         source = os.path.basename(file_path)
         chunk_dicts = []
         for c in chunks:
@@ -322,19 +362,22 @@ class DocumentProcessor:
             return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
 
         # 4. 原始块先入库 —— 向量一旦入库，文档即可被检索（对齐 业界 finalizing（异步增强）=queryable）
-        await vector_store_module.vector_store_service.store_chunks(
-            chunk_dicts, kb_id, doc_id, tenant_id
-        )
-        logger.info(f"[文档诊断] 原始块入库完成 doc_id={doc_id} 块数={len(chunk_dicts)}（已可检索）")
+        async with _StageTimer(
+            doc_id, "indexing", metrics_provider=lambda: {"chunkCount": len(chunk_dicts), "vectorsWritten": len(chunk_dicts)}
+        ):
+            await vector_store_module.vector_store_service.store_chunks(
+                chunk_dicts, kb_id, doc_id, tenant_id
+            )
+            logger.info(f"[文档诊断] 原始块入库完成 doc_id={doc_id} 块数={len(chunk_dicts)}（已可检索）")
 
-        # M5-3 取消检查点④（标 completed / optimizing 之前）：入库后、回调 optimizing 之前
-        # 用户中途取消 → 清理已写向量 + 回调 cancelled，避免广播「已可检索」假提示
-        # （向量已入库可检索，必须清理避免残留「已取消却可检索」的孤立向量）
-        if await process_queue.is_cancelled(doc_id):
-            logger.info(f"[文档诊断] 处理中被取消（入库后），清理向量 doc_id={doc_id}")
-            await vector_store_module.vector_store_service.delete_by_doc(doc_id)
-            await notify_document_status(doc_id, "cancelled")
-            return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
+            # M5-3 取消检查点④（标 completed / optimizing 之前）：入库后、回调 optimizing 之前
+            # 用户中途取消 → 清理已写向量 + 回调 cancelled，避免广播「已可检索」假提示
+            # （向量已入库可检索，必须清理避免残留「已取消却可检索」的孤立向量）
+            if await process_queue.is_cancelled(doc_id):
+                logger.info(f"[文档诊断] 处理中被取消（入库后），清理向量 doc_id={doc_id}")
+                await vector_store_module.vector_store_service.delete_by_doc(doc_id)
+                await notify_document_status(doc_id, "cancelled")
+                return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
         # 进入 optimizing（已可检索），将增强任务入持久化队列，HTTP 立即返回
         # M5-1：全文经状态回调回填 Java（替代旧同步返回），供前端「查看内容」弹窗
         await notify_document_status(doc_id, "optimizing", content=full_text, chunk_count=len(chunks))
@@ -408,24 +451,27 @@ class DocumentProcessor:
                     )
                 )
             # 重 embed 原始块（命中 L2 缓存，近乎零成本），供最终全量 store
-            texts = [c["content"] for c in chunk_dicts]
-            vecs = await embedding_service.embed_batch(texts, cfg)
-            for c, vec in zip(chunk_dicts, vecs):
-                c["embedding"] = vec
-            for c, vec in zip(chunks, vecs):
-                c.embedding = vec
+            async with _StageTimer(
+                doc_id, "optimizing", metrics_provider=lambda: {"enhancedCount": len(augmented) if augmented else 0}
+            ):
+                texts = [c["content"] for c in chunk_dicts]
+                vecs = await embedding_service.embed_batch(texts, cfg)
+                for c, vec in zip(chunk_dicts, vecs):
+                    c["embedding"] = vec
+                for c, vec in zip(chunks, vecs):
+                    c.embedding = vec
 
-            augmented = await asyncio.wait_for(
-                self._generate_qa_augment(chunks, cfg),
-                timeout=settings.qa_background_timeout,
-            )
-            if augmented:
-                await vector_store_module.vector_store_service.store_chunks(
-                    chunk_dicts + augmented, kb_id, doc_id, tenant_id
+                augmented = await asyncio.wait_for(
+                    self._generate_qa_augment(chunks, cfg),
+                    timeout=settings.qa_background_timeout,
                 )
-                logger.info(f"[优化] 增强入库完成 doc_id={doc_id} 增强块={len(augmented)}")
-            else:
-                logger.info(f"[优化] 无增强块（LLM 不可用/配置错误），文档维持可检索 doc_id={doc_id}")
+                if augmented:
+                    await vector_store_module.vector_store_service.store_chunks(
+                        chunk_dicts + augmented, kb_id, doc_id, tenant_id
+                    )
+                    logger.info(f"[优化] 增强入库完成 doc_id={doc_id} 增强块={len(augmented)}")
+                else:
+                    logger.info(f"[优化] 无增强块（LLM 不可用/配置错误），文档维持可检索 doc_id={doc_id}")
         except asyncio.TimeoutError:
             logger.warning(f"[优化] 问答增强总超时，放弃剩余块，文档维持可检索 doc_id={doc_id}")
         except ModelConfigError as e:

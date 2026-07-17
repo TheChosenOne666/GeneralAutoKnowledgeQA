@@ -55,3 +55,57 @@ async def notify_document_status(
                     f"{' (含全文)' if content is not None else ''}")
     except Exception as e:
         logger.warning(f"[状态回调] 更新状态失败（不影响主流程）doc_id={doc_id} status={status}: {e}")
+
+
+async def notify_stage(
+    doc_id: str,
+    stage: str,
+    status: str,
+    *,
+    started_at: int | None = None,
+    ended_at: int | None = None,
+    elapsed_ms: int | None = None,
+    error: str | None = None,
+    metrics: dict | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """回调 Java 内部接口记录文档处理阶段（M5-4 阶段化 span 时间线追踪）。
+
+    对齐 业界 ``beginStage/endStage/failStage``：把 解析(parsing)/分块(chunking)/
+    向量化(embedding)/入库(indexing)/增强(optimizing) 拆成带时间线与指标的阶段，
+    供前端细粒度展示进度与失败定位。
+
+    Args:
+        doc_id: 文档 ID
+        stage: 阶段名（parsing/chunking/embedding/indexing/optimizing）
+        status: 阶段状态（active/done/failed）
+        started_at: 阶段开始时间（epoch 毫秒，可选）
+        ended_at: 阶段结束时间（epoch 毫秒，可选）
+        elapsed_ms: 阶段耗时（毫秒，可选）
+        error: 失败原因（status=failed 时回填，可选）
+        metrics: 阶段指标（如 vectors_written / chunk_count / elapsed_ms，可选）
+        client: 可选 httpx 客户端（测试注入 mock）
+    """
+    url = f"{settings.backend_base_url}/api/internal/document/stage"
+    body: dict = {"docId": doc_id, "stage": stage, "status": status}
+    if started_at is not None:
+        body["startedAt"] = started_at
+    if ended_at is not None:
+        body["endedAt"] = ended_at
+    if elapsed_ms is not None:
+        body["elapsedMs"] = elapsed_ms
+    if error is not None:
+        body["error"] = error
+    if metrics is not None:
+        body["metrics"] = metrics
+    try:
+        if client is None:
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                resp = await c.post(url, json=body)
+                resp.raise_for_status()
+        else:
+            resp = await client.post(url, json=body)
+            resp.raise_for_status()
+        logger.info(f"[阶段回调] 已记录 doc_id={doc_id} stage={stage} status={status}")
+    except Exception as e:
+        logger.warning(f"[阶段回调] 记录阶段失败（不影响主流程）doc_id={doc_id} stage={stage}: {e}")

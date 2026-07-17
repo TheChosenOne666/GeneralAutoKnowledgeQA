@@ -8,6 +8,7 @@ import com.xiongda.exception.BusinessException;
 import com.xiongda.client.AiServiceClient;
 import com.xiongda.mapper.DocumentMapper;
 import com.xiongda.mapper.TenantMapper;
+import com.xiongda.model.dto.document.InternalDocStageRequest;
 import com.xiongda.model.entity.Document;
 import com.xiongda.model.entity.Tenant;
 import com.xiongda.model.entity.KnowledgeBase;
@@ -15,6 +16,8 @@ import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
 import com.xiongda.service.AiConfigService;
 import com.xiongda.service.impl.DocumentServiceImpl;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -74,6 +77,7 @@ class DocumentServiceImplTest {
         ReflectionTestUtils.setField(documentService, "aiServiceClient", aiServiceClient);
         ReflectionTestUtils.setField(documentService, "tenantMapper", tenantMapper);
         ReflectionTestUtils.setField(documentService, "aiConfigService", aiConfigService);
+        ReflectionTestUtils.setField(documentService, "objectMapper", new ObjectMapper());
     }
 
     private User user(Long id, String role) {
@@ -343,6 +347,66 @@ class DocumentServiceImplTest {
         assertEquals("pdf", vo.getFileType());
         assertEquals("ready", vo.getStatus());
         assertEquals(10, vo.getChunkCount());
+    }
+
+    // ==================== M5-4 阶段化 span 时间线追踪 ====================
+
+    @Test
+    void recordDocumentStage_appendsAndMerges() throws Exception {
+        Document doc = buildDoc(1L, "test.pdf", "pdf", "parsing");
+        when(documentMapper.selectById(1L)).thenReturn(doc);
+        when(documentMapper.updateById(any(Document.class))).thenReturn(1);
+
+        // 第一次：新增 embedding 阶段（done，带指标）
+        InternalDocStageRequest req1 = new InternalDocStageRequest();
+        req1.setDocId(1L);
+        req1.setStage("embedding");
+        req1.setStatus("done");
+        req1.setElapsedMs(1234L);
+        req1.setMetrics("{\"chunkCount\":7,\"vectorsWritten\":7}");
+        assertTrue(documentService.recordDocumentStage(req1));
+
+        ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper).updateById(cap.capture());
+        String json = cap.getValue().getProcessStages();
+        JsonNode arr = new ObjectMapper().readTree(json);
+        assertEquals(1, arr.size());
+        assertEquals("embedding", arr.get(0).get("stage").asText());
+        assertEquals("done", arr.get(0).get("status").asText());
+        assertEquals(1234L, arr.get(0).get("elapsedMs").asLong());
+        assertEquals(7, arr.get(0).get("metrics").get("chunkCount").asInt());
+
+        // 第二次：同阶段再次回调（failed，重放幂等）→ 应合并替换而非追加
+        InternalDocStageRequest req2 = new InternalDocStageRequest();
+        req2.setDocId(1L);
+        req2.setStage("embedding");
+        req2.setStatus("failed");
+        req2.setError("timeout");
+        assertTrue(documentService.recordDocumentStage(req2));
+
+        cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper, org.mockito.Mockito.times(2)).updateById(cap.capture());
+        JsonNode arr2 = new ObjectMapper().readTree(cap.getValue().getProcessStages());
+        assertEquals(1, arr2.size());
+        assertEquals("failed", arr2.get(0).get("status").asText());
+        assertEquals("timeout", arr2.get(0).get("error").asText());
+    }
+
+    @Test
+    void recordDocumentStage_invalidOrMissingDoc_returnsFalse() {
+        // 非法请求（缺 stage/status）
+        InternalDocStageRequest bad = new InternalDocStageRequest();
+        bad.setDocId(1L);
+        bad.setStage("parsing");
+        assertFalse(documentService.recordDocumentStage(bad));
+
+        // 文档不存在
+        InternalDocStageRequest req = new InternalDocStageRequest();
+        req.setDocId(999L);
+        req.setStage("parsing");
+        req.setStatus("active");
+        when(documentMapper.selectById(999L)).thenReturn(null);
+        assertFalse(documentService.recordDocumentStage(req));
     }
 
     @Test

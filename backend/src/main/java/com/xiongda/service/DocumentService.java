@@ -1,6 +1,7 @@
 package com.xiongda.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.xiongda.model.dto.document.InternalDocStageRequest;
 import com.xiongda.model.entity.Document;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
@@ -76,6 +77,17 @@ public interface DocumentService extends IService<Document> {
      * 获取文档 VO。
      */
     DocumentVO getDocumentVO(Document doc);
+
+    /**
+     * 记录文档处理阶段（M5-4 阶段化 span 时间线追踪）。
+     *
+     * <p>Python 在各处理阶段边界回调，把阶段事件（状态/起止时间/耗时/指标）合并写入
+     * 文档的 {@code processStages} JSON 数组，供前端展示细粒度进度与失败定位。</p>
+     *
+     * @param request 阶段事件请求（docId / stage / status / 计时 / 指标）
+     * @return 是否成功写入
+     */
+    boolean recordDocumentStage(InternalDocStageRequest request);
 
     /**
      * 更新文档处理状态。

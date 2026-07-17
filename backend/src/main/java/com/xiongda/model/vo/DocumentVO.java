@@ -42,5 +42,10 @@ public class DocumentVO implements Serializable {
      */
     private Boolean quotaError;
 
+    /**
+     * 文档处理阶段时间线（M5-4）：JSON 数组字符串，前端解析后展示细粒度进度与失败定位。
+     */
+    private String processStages;
+
     private Date createTime;
 }

@@ -16,10 +16,15 @@ import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.DocumentVO;
 import com.xiongda.model.vo.PageContentVO;
+import com.xiongda.model.dto.document.InternalDocStageRequest;
 import com.xiongda.service.AiConfigService;
 import com.xiongda.service.DocumentService;
 import com.xiongda.service.KbPermission;
 import com.xiongda.service.KnowledgeBaseService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -59,6 +64,10 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
 
     @Resource
     private TenantMapper tenantMapper;
+
+    @Resource
+    private ObjectMapper objectMapper;
+
 
     @Override
     @AuditLog(action = "doc_upload", resourceType = "document")
@@ -251,8 +260,81 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         vo.setErrorMsg(doc.getErrorMsg());
         vo.setModelConfigError(doc.getModelConfigError());
         vo.setQuotaError(doc.getQuotaError());
+        vo.setProcessStages(doc.getProcessStages());
         vo.setCreateTime(doc.getCreateTime());
         return vo;
+    }
+
+    @Override
+    public boolean recordDocumentStage(InternalDocStageRequest request) {
+        if (request == null || request.getDocId() == null || request.getStage() == null
+                || request.getStatus() == null) {
+            return false;
+        }
+        Document doc = this.getById(request.getDocId());
+        if (doc == null) {
+            return false;
+        }
+        try {
+            ArrayNode stages = parseStages(doc.getProcessStages());
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("stage", request.getStage());
+            node.put("status", request.getStatus());
+            if (request.getStartedAt() != null) {
+                node.put("startedAt", request.getStartedAt());
+            }
+            if (request.getEndedAt() != null) {
+                node.put("endedAt", request.getEndedAt());
+            }
+            if (request.getElapsedMs() != null) {
+                node.put("elapsedMs", request.getElapsedMs());
+            }
+            if (request.getError() != null && !request.getError().isBlank()) {
+                node.put("error", request.getError());
+            }
+            if (request.getMetrics() != null && !request.getMetrics().isBlank()) {
+                try {
+                    node.set("metrics", objectMapper.readTree(request.getMetrics()));
+                } catch (Exception e) {
+                    log.warn("解析阶段指标失败 docId={} stage={}: {}", request.getDocId(), request.getStage(), e.getMessage());
+                }
+            }
+            // 同阶段合并：已存在则替换，否则追加，保证时间线幂等可重放
+            boolean merged = false;
+            for (int i = 0; i < stages.size(); i++) {
+                JsonNode item = stages.get(i);
+                if (item.has("stage") && request.getStage().equals(item.get("stage").asText())) {
+                    stages.set(i, node);
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                stages.add(node);
+            }
+            doc.setProcessStages(objectMapper.writeValueAsString(stages));
+            this.updateById(doc);
+            return true;
+        } catch (Exception e) {
+            log.warn("记录文档阶段失败 docId={} stage={}: {}", request.getDocId(), request.getStage(), e.getMessage());
+            return false;
+        }
+    }
+
+    /** 解析已有的阶段时间线 JSON；为空或非法时返回空数组。*/
+    private ArrayNode parseStages(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return objectMapper.createArrayNode();
+        }
+        try {
+            JsonNode node = objectMapper.readTree(raw);
+            if (node.isArray()) {
+                return (ArrayNode) node;
+            }
+        } catch (Exception e) {
+            log.warn("解析已有阶段时间线失败，重置为空：{}", e.getMessage());
+        }
+        return objectMapper.createArrayNode();
     }
 
     @Override

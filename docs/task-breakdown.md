@@ -1326,15 +1326,26 @@ Python（AI 服务）
 - **依赖**：M5-1（主流程队列化）、M5-2（重试）
 - **产出**：文档处理任意阶段（嵌入前 / 索引前 / 入库后）取消均真正可中断，且无孤立向量残留；主流程取消集语义统一清晰。
 
-### M5-4 阶段化 span 时间线追踪 [全栈] P1 · 1d ⬜ 待开始
+### M5-4 阶段化 span 时间线追踪 [全栈] P1 · 1d ✅ 完成（2026-07-17）
 
-- **需求**：对齐 业界 `beginStage/endStage/failStage`，把 chunking/embedding/multimodal 拆成带时间线的阶段，前端展示细粒度进度与错误码，而非单一状态字符串。
+- **需求**：对齐 业界 `beginStage/endStage/failStage`，把 解析(parsing)/分块(chunking)/向量化(embedding)/入库(indexing)/增强(optimizing) 拆成带时间线与指标的阶段，前端展示细粒度进度与失败定位，而非单一状态字符串。
 - **改造**：
-  - Python 新增阶段回调 `notify_stage(doc_id, stage, status, metrics)`（metrics 含 `vectors_written` / `storage_bytes` / `chunk_count` / `elapsed_ms`）。
-  - 新增 Java 内部接口 `POST /api/internal/document/stage` 落库阶段记录（或扩展 DocStatus 表）。
-  - 前端 `KnowledgeBasePage.tsx` 进度条按阶段展示（解析中 → 分块中 → 向量化中 → 优化中 → 就绪）。
-- **依赖**：M4-8.1 状态回调体系
-- **产出**：用户可见细粒度处理进度与失败定位。
+  - **Python 阶段回调**（`services/status_callback.py`）：新增 `notify_stage(doc_id, stage, status, *, started_at, ended_at, elapsed_ms, error, metrics, client)`，best-effort POST 到 `POST /api/internal/document/stage`，失败仅告警不影响主流程（与 `notify_document_status` 同模式）。
+  - **阶段计时器**（`services/document_processor.py` 新增 `_StageTimer`）：异步上下文管理器，进入阶段回调 `active`、退出（正常/异常）回调 `done`/`failed` 并携带耗时与指标（异常自动记 `failed` + error，且不影响主流程错误传播）。
+  - **埋点**（`process()` + `_run_augment_task`）：
+    - 解析 `parsing`：`extract_pages` 包裹，metrics `{pageCount}`；
+    - 分块 `chunking`：`chunk_text` 包裹；
+    - 向量化 `embedding`：`embed_chunks` 包裹，metrics `{chunkCount}`；
+    - 入库 `indexing`：`store_chunks` 包裹（含 M5-3 取消检查点④），metrics `{chunkCount, vectorsWritten}`；
+    - 增强 `optimizing`：增强 worker 实际增强段包裹，metrics `{enhancedCount}`（取消/原块缺失等提前返回在阶段块之外，不误标 optimizing）。
+  - **Java 内部接口**（`InternalDocumentController`）：新增 `POST /api/internal/document/stage` → `DocumentService.recordDocumentStage`。
+  - **Java 落库**（`DocumentServiceImpl.recordDocumentStage`）：把阶段事件合并写入文档 `process_stages`（TEXT，JSON 数组）字段；按 `stage` 幂等合并（同阶段重放替换而非追加），支持 `startedAt/endedAt/elapsedMs/error/metrics`（metrics 解析为 JSON 节点内嵌）；文档不存在/参数缺省返回 false。
+  - **Schema**：`Document` 实体与 `DocumentVO` 新增 `processStages`；`schema.sql` 文档表新增 `process_stages TEXT`；**运行库已 ALTER TABLE document ADD COLUMN process_stages TEXT**（非破坏性）。
+  - **前端**（`KnowledgeBasePage.tsx` + `types/index.ts`）：`Document` 新增 `processStages`；新增 `ProcessStage` 类型与 `StageTimeline` 组件——处理中/失败文档状态单元格下展示 解析›分块›向量化›入库›增强 阶段链，done 绿✓+耗时、failed 红✕（hover 显示 error）、active 旋转符；`ready` 不展示以保持简洁。
+- **改动文件**：`status_callback.py`、`document_processor.py`、`InternalDocStageRequest.java`、`InternalDocumentController.java`、`Document.java`、`DocumentVO.java`、`DocumentService.java`、`DocumentServiceImpl.java`、`schema.sql`、`types/index.ts`、`KnowledgeBasePage.tsx`、单测 `test_status_callback.py`（新增）、`DocumentServiceImplTest.java`、测试 fixture。
+- **单测**：Python `test_status_callback.py` 新增 3 例（请求体正确 / 缺省字段省略 / 失败 best-effort 不抛）；`test_document_augment.py` 新增 `test_process_emits_stage_timeline`（断言 parsing/chunking/embedding/indexing + optimizing 全部 done 且带耗时/指标）；Java `DocumentServiceImplTest` 新增 2 例（合并幂等 + 非法/文档不存在返回 false）；Python 全量 **150 例通过**（新增后），Java `DocumentServiceImplTest` 全过，前端 `npm run build` 通过。
+- **依赖**：M4-8.1 状态回调体系、M5-1、M5-3
+- **产出**：用户可见细粒度处理进度（解析→分块→向量化→入库→增强）与失败精确定位（失败阶段红标 + error）。
 
 ### M5-5 父子分块（parent/child chunk）[Python] P1 · 1d ⬜ 待开始
 

@@ -2,6 +2,7 @@ package com.xiongda.controller;
 
 import com.xiongda.common.BaseResponse;
 import com.xiongda.common.ResultUtils;
+import com.xiongda.model.dto.document.InternalDocStageRequest;
 import com.xiongda.model.dto.document.InternalDocStatusRequest;
 import com.xiongda.model.enums.DocStatusEnum;
 import com.xiongda.service.DocumentService;
@@ -43,6 +44,15 @@ public class InternalDocumentController {
                 request.getModelConfigError(),
                 null,
                 request.getContent());
+        return ResultUtils.success(updated);
+    }
+
+    /**
+     * 记录文档处理阶段（M5-4 阶段化 span 时间线追踪，Python 回调）。
+     */
+    @PostMapping("/document/stage")
+    public BaseResponse<Boolean> recordDocumentStage(@RequestBody InternalDocStageRequest request) {
+        boolean updated = documentService.recordDocumentStage(request);
         return ResultUtils.success(updated);
     }
 }
