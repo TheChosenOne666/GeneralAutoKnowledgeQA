@@ -302,6 +302,8 @@ LLM 生成回答（SSE 流式输出）
 > - 注意：rerank 阶段使用改写后的 `search_query` 评估相关性，更贴近实际检索意图。
 
 > **LLM 重排（2026-07-16，对标业界成熟方案 Rerank 跨领域判别意图，复用已配置 LLM）**：弱向量模型对短 query 领域判别力不足（如「后端规范」把前端块余弦分评得比后端块高），纯向量融合无法纠正错误排序。业界方案 依赖 Rerank 精排（cross-encoder + 阈值过滤）解决，但本项目 volcengine rerank 接口非 OpenAI 兼容、无法即插即用。故改用**已配置的 LLM 当重排器**（`services/rag.py` 的 `_rerank_with_llm`）：融合后把 query + 候选块发给 LLM，要求逐块给出 0~1 相关性分数，按分数重排并按 `retrieval_rerank_min_relevance`（默认 **0.40**，2026-07-16 由 0.30 上调，更激进剔除跨主题噪音，保留跨库召回）阈值过滤跨主题块（最优分仍 ≥ 0.15 时保留 top1 兜底）。该方式**不写死任何领域词、不新增服务**（复用 AI 配置页已填的 LLM），跨领域判别比弱向量强得多，且对任意新增领域（如「算法岗」文档）自动生效。调用失败 / 分数不可解析时安全回退到向量融合顺序（不静默吞错）。开关：`core/config.py` 的 `retrieval_rerank_method`（默认 `llm`，可选 `api` 走 OpenAI `/rerank`、`none` 关闭）。
+>
+> **重排过滤加严（2026-07-17 修复）**：原 `merged = kept[:top_n] if kept else merged[:top_n]` 在「无块过门槛」时会回退展示**全部未过滤结果**，门槛过滤形同虚设（实测问「校招面试重点」却把《后端新员工入职指南》《JavaWeb笔记》等主题无关文档当来源）。已改为 `merged = kept[:top_n]`——重排后只保留过门槛块；`_rerank_with_llm` 提示词同步加严：明确「仅含相同关键词但主题不符（如校招重点 vs 入职指南 / 常规 Java 笔记）的片段必须 ≤0.2」，使无关块被滤除。若加严后仍偏松，可上调 `retrieval_rerank_min_relevance`（0.45~0.55），代价是更难问题的召回可能变窄。
 
 > **重排候选池（2026-07-16 方案A）**：开启重排时，向量/BM25 融合不再直接取 `top_n`（默认 5）送重排，而是先取更大融合池 `retrieval_rerank_top_k`（默认 10），由 LLM 在整个池内精排后取 `top_n`。解决「模糊问句真正相关块未进前 `top_n`、LLM 只在这 `top_n` 内打分致全 0 漏召回」的回归；相关块落在第 6~10 位时能被救回，且不带回跨领域噪声（最终仍按阈值过滤取 `top_n`）。关闭重排（`method=none`）时该池不起作用，直接截断 `top_n`。L1 缓存 key 已纳入 `rerank_top_k` 与 `top_n`，切换后旧缓存自动失效。
 
@@ -583,26 +585,32 @@ Java DocumentServiceImpl.triggerDocumentProcessing
    → AiServiceClient.processDocument（HTTP POST → Python）
    │
    ▼
-Python POST /ai/document/process → DocumentProcessor.process()
-   1) extract_text：PDF(PyMuPDF，C 扩展不可用降级 pdfplumber) / DOCX(python-docx) / MD·TXT(直读)
-   2) chunk_text：RecursiveCharacterTextSplitter(512 / 50)
-   3) 检索阶段：回调 status=retrieving → embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
-   4) 原始块立即 store_chunks 入库（PG 按 doc_id 幂等覆盖）→ 文档【立即可被检索】
-   5) 优化阶段：回调 status=optimizing（已可检索）→ 将增强任务**入持久化队列**（Redis）
-      **立即返回** {status: optimizing, chunk_count, content}（HTTP 不阻塞）
+Python POST /ai/document/process → process_queue.enqueue（**仅入队，立即返回 {status: processing}**，HTTP 不阻塞）
    │
-   └─ 常驻 worker（FastAPI lifespan 启动）消费队列：从向量库读回原始块重建 → 并发生成问答对
-      （retrieval augmentation：限并发 qa_concurrency + 批量 Embedding + 单块超时跳过），
-      增强块连同原始块全量 store，完成后回调 Java status=ready（看门狗：总超时/异常兜底，
-      确保最终推进 ready，不永远卡 optimizing；LLM 配置错误则跳过增强，文档仍 ready；
-      任务被取消/文档已删则跳过，不回调 ready）
+   └─ 常驻主流程 worker（FastAPI lifespan 启动 run_process_worker）消费队列 → DocumentProcessor.process()
+      1) extract_text：PDF(PyMuPDF，C 扩展不可用降级 pdfplumber) / DOCX(python-docx) / MD·TXT(直读)
+      2) chunk_text：RecursiveCharacterTextSplitter(512 / 50)
+      3) 检索阶段：回调 status=retrieving → embed_chunks：Embedding（命中 L2 缓存跳过 API）→ 向量
+      4) 原始块立即 store_chunks 入库（PG 按 doc_id 幂等覆盖）→ 文档【立即可被检索】
+      5) 优化阶段：回调 status=optimizing（已可检索，并随回调携带全文 content + chunk_count）
+         → 将增强任务**入持久化队列**（Redis）
+         （注：process() 在 worker 内执行，无 HTTP 同步返回；HTTP 入队已先行返回 processing）
+      │
+      └─ 增强常驻 worker（run_augment_worker）消费队列：从向量库读回原始块重建 → 并发生成问答对
+         （retrieval augmentation：限并发 qa_concurrency + 批量 Embedding + 单块超时跳过），
+         增强块连同原始块全量 store，完成后回调 Java status=ready（看门狗：总超时/异常兜底，
+         确保最终推进 ready，不永远卡 optimizing；LLM 配置错误则跳过增强，文档仍 ready；
+         任务被取消/文档已删则跳过，不回调 ready）
    │
    ▼
-Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCount + 保存 content
-   → 调 AiServiceClient.invalidateCache(tenant) 清 L1 检索缓存（见 §9.5）
-   → 后台回调 ready 到达时（optimizing→ready）仅推进状态，不覆盖已回填的 content
-        │
-   └─ 失败分支：更新 status=failed + errorMsg（default 异常兜底）
+Java triggerDocumentProcessing：发请求后置 status=parsing；仅当 Python 返回**非 processing**（入队失败）
+   才落 failed（区分 MODEL_CONFIG_ERROR / MODEL_QUOTA_ERROR）；返回 processing 即视为成功并清该租户
+   L1 检索缓存（保证新文档立即可搜）
+   → 后续 retrieving/optimizing/ready/failed 全部由 Python worker 经 POST /api/internal/document/status
+     回调推进（M5-1 契约变更：状态 + 全文 content 改由回调驱动，不再依赖 HTTP 同步返回）：
+     · optimizing 回调携带 content + chunkCount → Java 更新 status + 保存 content（前端仍从 DB 读 content）
+     · ready 回调仅推进状态，不覆盖已回填的 content
+     · 失败回调：更新 status=failed + errorMsg（+ modelConfigError / quotaError 标记）
 
 > **对齐 业界 finalizing（异步增强）=queryable + 任务队列**：向量化完成即可检索，optimizing 仅表示问答增强
 > 后台进行中，不再阻塞用户检索（旧版串行等待增强，大文档会卡在「优化中」约 20 分钟）。增强任务改为
@@ -629,7 +637,9 @@ Java 收到 optimizing（或 ready）→ 视为成功：更新 status + chunkCou
 
 > **文档处理失败重试（2026-07-16）**：`failed`/`cancelled` 终态文档在操作列显示「重试」。`POST /api/knowledge/document/retry` → Java 校验权限 + 仅终态可重试 + 校验原文件仍存在 → 绕过终态守卫直接重置为 `processing` 并清空 `errorMsg`/`modelConfigError`/`chunkCount` → 复用原上传者 AI 配置重新触发处理。附带修复两处：① `AiServiceClient` 的 WebClient 响应缓冲上限从默认 256KB 放宽到 20MB（`maxInMemorySize`），修复大文档（如 394 页 PDF 全文随响应返回）触发 `DataBufferLimitException`；② `updateDocumentStatus` 成功终态（ready/optimizing）强制清空 `errorMsg`/`modelConfigError`，且因 MyBatis-Plus `updateById` 默认 `NOT_NULL` 策略忽略 null 字段，给 `Document.errorMsg`/`modelConfigError` 加 `@TableField(updateStrategy=ALWAYS)` 使置 null 能写库，避免重试成功后旧错误信息残留。详见 `docs/task-breakdown.md` 对应小节。
 
-> **M5 规划**：上述主流程（解析+向量化）当前仍跑在 Python 同步 handler 内，且缺重试 / 多检查点守卫 / 阶段 span / 父子分块 / 多模态 / GraphRAG / 复合检索。这 8 点将在 M5 阶段逐一对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+> **M5-1 主流程持久化队列化（2026-07-17，已落地）**：把「提取→分块→向量化→入库」整段主流程从 Python 同步 HTTP handler 搬进持久化任务队列 worker（对齐业界成熟方案 把 `ProcessDocument` 整体跑在 Asynq 持久化任务里）。`POST /ai/document/process` 仅 `process_queue.enqueue`（Redis list `xiongda:doc:queue`，queue→processing 两段式带 `started_at`，`xiongda:doc:cancelled` 取消集），立即返回 `{status: processing}`；常驻 `run_process_worker`（FastAPI lifespan 启动）消费队列执行 `process()`，摄取异常经回调推 `failed`（区分 `model_config_error`）。删除/取消接口同步 `process_queue.mark_cancelled`，worker 取任务前跳过。启动时 `sweep_stale`（`sweep_process_stale`）恢复卡死主流程任务，服务重启不丢。阶段状态（retrieving/optimizing/ready/failed）及全文 `content` 完全由 worker 经 `POST /api/internal/document/status` 回调推进（Java `updateDocumentStatus` 新增 7 参重载携带 content），HTTP 同步返回不再承载状态/全文。详见 `docs/task-breakdown.md` M5-1。
+
+> **M5 规划（余下 7 项）**：M5-1 已完成；剩余 M5-2 重试 / M5-3 多检查点守卫 / M5-4 阶段 span / M5-5 父子分块 / M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
 
 ### 9.3 RAG 问答全链路（含三层缓存）
 

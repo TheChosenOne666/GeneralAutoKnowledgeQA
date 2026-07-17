@@ -40,7 +40,9 @@ public class InternalDocumentController {
                 request.getStatus(),
                 request.getChunkCount(),
                 request.getErrorMsg(),
-                request.getModelConfigError());
+                request.getModelConfigError(),
+                null,
+                request.getContent());
         return ResultUtils.success(updated);
     }
 }

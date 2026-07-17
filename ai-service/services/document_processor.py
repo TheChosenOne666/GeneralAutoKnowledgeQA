@@ -18,6 +18,7 @@ from loguru import logger
 
 from core.config import settings
 from services import augment_queue
+from services import process_queue
 from services import vector_store as vector_store_module
 from services.embedding import embedding_service
 from services.llm import llm_service
@@ -45,15 +46,27 @@ class PageSegment:
     page: int
 
 
+# 需剔除的「不可见 / 非字符」Unicode 区间：
+# - C0 控制符（保留 \n \r \t）：U+0000–U+0008、U+000B、U+000C、U+000E–U+001F
+# - DEL 与 C1 控制符：U+007F–U+009F（中文 PDF 文本层常见，前端渲染成「�」/方框）
+# - 非字符码位：U+FDD0–U+FDEF、U+FFFE、U+FFFF
+# 这些字符不应进入分块 / 引用来源；仅保留 \n \r \t 与可见字符。
+_GARBAGE_RE = re.compile(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufdd0-\ufdef\ufffe\uffff]")
+
+
 def _clean_text(text: str) -> str:
-    """清洗提取文本：去 BOM、去控制字符（保留换行/制表）、去替换符 U+FFFD（解析乱码占位）。"""
+    """清洗提取文本：去 BOM、去控制/非字符码位、去替换符、去孤立代理对。
+
+    中文 PDF 文本层常含 C1 控制符或无法映射的字形（PyMuPDF 以 U+FFFD 占位），
+    若不过滤会进入分块与引用来源，前端渲染成「�」乱码。仅保留 \\n \\r \\t 与可见字符。
+    """
     if not text:
         return ""
-    text = text.replace("\ufeff", "")
-    # 去掉除 \n \r \t 之外的控制字符
-    text = "".join(ch for ch in text if ch in "\n\r\t" or ord(ch) >= 32)
-    # 去掉替换符（解析过程中产生的乱码占位）
-    text = text.replace("\ufffd", "")
+    text = text.replace("\ufeff", "")          # BOM
+    text = _GARBAGE_RE.sub("", text)            # C0/C1 控制符 + 非字符码位
+    text = text.replace("\ufffd", "")           # Unicode 替换符（解析乱码占位）
+    # 剔除孤立代理对（surrogate），避免存储 / 截断产生 U+FFFD 乱码
+    text = "".join(ch for ch in text if not (0xD800 <= ord(ch) <= 0xDFFF))
     return text
 
 
@@ -165,9 +178,10 @@ class DocumentProcessor:
             if not seg.text.strip():
                 continue
             for c in splitter.split_text(seg.text):
+                # 防御性再清洗：即便上游提取漏清，落库 chunk 也一定干净（避免 U+FFFD 进入引用来源）
                 chunks.append(
                     DocumentChunk(
-                        content=c,
+                        content=_clean_text(c),
                         metadata={"chunk_index": global_index, "page": seg.page},
                     )
                 )
@@ -176,7 +190,7 @@ class DocumentProcessor:
             for title in self._extract_outline_titles(seg.text):
                 chunks.append(
                     DocumentChunk(
-                        content=title,
+                        content=_clean_text(title),
                         metadata={
                             "chunk_index": global_index,
                             "page": seg.page,
@@ -264,7 +278,7 @@ class DocumentProcessor:
         # 1. 提取文本（按页）
         logger.info(f"[文档诊断] 开始提取文本 doc_id={doc_id} file_type={file_type} file_path={file_path}")
         pages = await self.extract_pages(file_path, file_type)
-        full_text = "\n".join(p.text for p in pages)
+        full_text = _clean_text("\n".join(p.text for p in pages))
         logger.info(f"[文档诊断] 提取完成 doc_id={doc_id} 文本长度={len(full_text)} 页数={len(pages)}")
 
         # 2. 分块（保留页码）
@@ -314,7 +328,8 @@ class DocumentProcessor:
             await notify_document_status(doc_id, "cancelled")
             return {"status": "cancelled", "chunk_count": len(chunks), "content": full_text}
         # 进入 optimizing（已可检索），将增强任务入持久化队列，HTTP 立即返回
-        await notify_document_status(doc_id, "optimizing")
+        # M5-1：全文经状态回调回填 Java（替代旧同步返回），供前端「查看内容」弹窗
+        await notify_document_status(doc_id, "optimizing", content=full_text, chunk_count=len(chunks))
         if settings.enable_qa_augment:
             # 任务入 Redis 队列（持久化，worker 常驻消费，服务重启可由 sweep 恢复）
             await augment_queue.enqueue(
@@ -439,6 +454,62 @@ class DocumentProcessor:
             except Exception as e:
                 logger.warning(f"[优化] worker 消费异常（继续下一轮）: {e}")
                 await asyncio.sleep(poll_interval)
+
+    async def run_process_worker(self, poll_interval: float = 2.0) -> None:
+        """常驻消费主流程队列（M5-1，在 FastAPI lifespan 中以 asyncio 任务启动）。
+
+        消费 ``process_queue`` 中的任务，执行 ``process()``（提取 → 分块 → 向量化 → 入库 →
+        入增强队）。状态完全经 ``notify_document_status`` 回调 Java 推进（retrieving /
+        optimizing / ready / failed），HTTP 上传仅 enqueue 不阻塞。
+
+        队列持久化于 Redis，进程重启后由 lifespan 的 ``process_queue.sweep_stale`` 恢复卡死任务。
+        """
+        logger.info("[主流程] 文档处理队列 worker 启动")
+        while True:
+            try:
+                task = await process_queue.dequeue()
+                if task is None:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                await self._run_process_task(task)
+            except Exception as e:
+                logger.warning(f"[主流程] worker 消费异常（继续下一轮）: {e}")
+                await asyncio.sleep(poll_interval)
+
+    async def _run_process_task(self, task: dict) -> None:
+        """执行单个主流程任务（M5-1），失败回调 Java failed。"""
+        doc_id = task.get("doc_id")
+        try:
+            if await process_queue.is_cancelled(doc_id):
+                logger.info(f"[主流程] 任务已取消，跳过 doc_id={doc_id}")
+                return
+            # 从用户级 ai_config 构建 cfg（与原同步 handler 一致，复用用户/租户模型配置），
+            # 而非走 env 兜底；ai_config_dict 一并透传供 process() 内部使用。
+            cfg = ModelConfig.from_dict(task.get("ai_config"))
+            # 复用现有 process()：提取→分块→向量化→入库→入增强队，
+            # 内部已含取消检查与 retrieving/optimizing 状态回调；返回值为历史兼容，忽略。
+            await self.process(
+                file_path=task["file_path"],
+                file_type=task["file_type"],
+                kb_id=task["kb_id"],
+                doc_id=doc_id,
+                tenant_id=task["tenant_id"],
+                cfg=cfg,
+                ai_config_dict=task.get("ai_config"),
+            )
+        except ModelConfigError as e:
+            logger.warning(f"[主流程] 模型配置错误 doc_id={doc_id}: {e}")
+            await notify_document_status(
+                doc_id, "failed", error_msg=str(e), model_config_error=True
+            )
+        except Exception as e:
+            logger.exception(f"[主流程] 文档处理失败 doc_id={doc_id}: {e}")
+            await notify_document_status(doc_id, "failed", error_msg=str(e)[:500])
+        finally:
+            try:
+                await process_queue.ack(task)
+            except Exception as e:
+                logger.warning(f"[主流程] ack 失败 doc_id={doc_id}: {e}")
 
     async def _generate_qa_augment(
         self, chunks: list[DocumentChunk], cfg: ModelConfig | None = None, client=None

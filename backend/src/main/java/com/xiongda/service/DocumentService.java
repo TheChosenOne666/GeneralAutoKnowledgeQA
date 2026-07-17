@@ -116,6 +116,23 @@ public interface DocumentService extends IService<Document> {
             Boolean modelConfigError, Boolean quotaError);
 
     /**
+     * 更新文档处理状态（M5-1 增强版：额外携带文档全文 content）。
+     *
+     * <p>content 非空时（optimizing 阶段回调）一并保存提取全文，供前端「查看内容」弹窗展示，
+     * 替代旧版依赖 ``/ai/document/process`` 同步返回落库全文的方式。</p>
+     *
+     * @param docId           文档 ID
+     * @param status          新状态
+     * @param chunkCount      分块数量（可空）
+     * @param errorMsg        错误信息（可空）
+     * @param modelConfigError 是否因模型配置错误导致失败（引导重配）
+     * @param quotaError       是否因模型额度不足 / 被限流导致失败（引导重试 / 检查额度）
+     * @param content         文档提取全文（可空，M5-1 经回调回填）
+     */
+    boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError, Boolean quotaError, String content);
+
+    /**
      * 保存文档提取全文（Python 解析后回填，供前端「查看内容」弹窗展示）。
      */
     void saveDocumentContent(Long docId, String content);

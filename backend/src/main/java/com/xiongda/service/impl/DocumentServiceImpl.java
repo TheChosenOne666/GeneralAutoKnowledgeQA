@@ -264,12 +264,19 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
             Boolean modelConfigError) {
         // 兼容旧调用方（如内部状态回调中间态）：额度标记默认 null（不更新）
-        return updateDocumentStatus(docId, status, chunkCount, errorMsg, modelConfigError, null);
+        return updateDocumentStatus(docId, status, chunkCount, errorMsg, modelConfigError, null, null);
     }
 
     @Override
     public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
             Boolean modelConfigError, Boolean quotaError) {
+        // 兼容旧调用方：content 默认 null（不更新全文）
+        return updateDocumentStatus(docId, status, chunkCount, errorMsg, modelConfigError, quotaError, null);
+    }
+
+    @Override
+    public boolean updateDocumentStatus(Long docId, String status, Integer chunkCount, String errorMsg,
+            Boolean modelConfigError, Boolean quotaError, String content) {
         Document doc = this.getById(docId);
         if (doc == null) {
             return false;
@@ -304,7 +311,20 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         if (quotaError != null) {
             doc.setQuotaError(quotaError);
         }
+        // M5-1：回调携带的全文（optimizing 阶段）一并保存，替代旧同步返回落库
+        if (content != null) {
+            // 兜底剥离 U+FFFD 替换符与 C1 控制符，避免任何来源（含历史脏数据重存）的脏字符污染全文
+            doc.setContent(stripGarbage(content));
+        }
         return this.updateById(doc);
+    }
+
+    /** 去除 U+FFFD 替换符与 C1 控制符（U+007F–U+009F），避免脏字符进入文档全文。 */
+    private static String stripGarbage(String s) {
+        if (s == null) {
+            return null;
+        }
+        return s.replace("\uFFFD", "").replaceAll("[\\u007F-\\u009F]", "");
     }
 
     @Override
@@ -379,14 +399,17 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             return List.of();
         }
         List<PageContentVO> fallback = new ArrayList<>();
-        int n = content.length();
+        // 按「码点」而非 UTF-16 码元切分：避免切断代理对（emoji / 生僻 CJK Ext-B）产生 U+FFFD 乱码
+        int n = content.codePointCount(0, content.length());
         int idx = 0;
         int pageNo = 1;
         while (idx < n) {
             int end = Math.min(n, idx + CHARS_PER_PAGE);
+            int startIdx = content.offsetByCodePoints(0, idx);
+            int endIdx = content.offsetByCodePoints(0, end);
             PageContentVO vo = new PageContentVO();
             vo.setPageNo(pageNo++);
-            vo.setText(content.substring(idx, end));
+            vo.setText(content.substring(startIdx, endIdx));
             fallback.add(vo);
             idx = end;
         }
@@ -434,62 +457,39 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 aiConfig == null ? "NULL" : aiConfig.keySet());
         CompletableFuture.runAsync(() -> {
             try {
-                // 1. 更新状态为解析中
+                // 1. 更新状态为解析中（M5-1 起，后续状态完全由 Python worker 经状态回调推进）
                 this.updateDocumentStatus(docId, "parsing", null, null);
-                log.info("[文档诊断] 已置parsing，开始调用Python处理 docId={}", docId);
+                log.info("[文档诊断] 已置parsing，开始调用Python入队 docId={}", docId);
 
-                // 2. 调用 Python AI 服务处理文档
+                // 2. 调用 Python AI 服务：仅将主流程任务 enqueue，立即返回 processing（M5-1 异步化）。
+                //    真正的提取→分块→向量化→存储由 Python 常驻 worker 异步执行、崩溃可恢复；
+                //    状态经 /api/internal/document/status 回调推进（retrieving/optimizing/ready/failed），
+                //    全文 content 也在 optimizing 回调中回填，Java 不再依赖本接口同步返回。
                 long t0 = System.currentTimeMillis();
                 Map<String, Object> result = aiServiceClient.processDocument(
                         docId, filePath, fileType, kbId, tenantId, aiConfig);
-                log.info("[文档诊断] Python处理返回 docId={} 耗时={}ms result={}",
+                log.info("[文档诊断] Python入队返回 docId={} 耗时={}ms result={}",
                         docId, System.currentTimeMillis() - t0, result);
 
-                // 3. 根据结果更新状态
+                // 3. 仅处理「入队失败」：Python 入队异常时返回 failed，直接落库失败态；
+                //    返回 processing 表示已入队，后续状态由回调驱动，此处无需再处理。
                 String status = result.get("status") != null ? result.get("status").toString() : "failed";
-                // M5 取消：Python 主流程内检测到取消（已清向量），Java 侧保持一致为 cancelled（终态）
-                if ("cancelled".equals(status)) {
-                    this.updateDocumentStatus(docId, "cancelled", null, null);
-                    aiServiceClient.invalidateCache(tenantId);
-                    log.info("文档处理被取消(主流程内): docId={}", docId);
-                    return;
-                }
-                // 对齐 业界 finalizing（异步增强）=queryable：optimizing 表示向量已入库、文档已可检索，
-                // 仅问答增强在后台进行中，同样视为成功落库（不阻塞用户检索）。
-                if ("ready".equals(status) || "optimizing".equals(status)) {
-                    // 竞态守卫：用户中途取消，Python 仍跑完返回 ready/optimizing
-                    // （cancelDocument 已将状态置 cancelled 终态，终态守卫会拒绝本次回退），
-                    // 此处主动清理已入库向量，避免残留可检索但已「取消」的文档。
-                    Document cur = this.getById(docId);
-                    if (cur != null && "cancelled".equals(cur.getStatus())) {
-                        log.info("文档已被取消，清理已入库向量 docId={}", docId);
-                        aiServiceClient.deleteDocument(docId);
-                        aiServiceClient.invalidateCache(tenantId);
-                        return;
-                    }
-                    Object chunkCountObj = result.get("chunk_count");
-                    Integer chunkCount = chunkCountObj instanceof Number ? ((Number) chunkCountObj).intValue() : 0;
-                    this.updateDocumentStatus(docId, status, chunkCount, null);
-                    // 保存提取全文，供前端「查看内容」弹窗展示（optimizing 阶段亦可查看）
-                    Object contentObj = result.get("content");
-                    if (contentObj != null) {
-                        this.saveDocumentContent(docId, contentObj.toString());
-                    }
-                    // 文档内容已变更，清该租户 L1 检索缓存，下次提问回源重新检索
-                    aiServiceClient.invalidateCache(tenantId);
-                    log.info("文档处理完成(可检索): docId={}, status={}, chunks={}", docId, status, chunkCount);
-                } else {
+                if (!"processing".equals(status)) {
                     String errorType = result.get("error_type") != null ? result.get("error_type").toString() : null;
                     String error = result.get("error") != null ? result.get("error").toString() : "未知错误";
-                    // M3-3：模型配置错误（无 Key / Key 错 / 模型名错 / 维度不匹配）标记，前端引导重配；
-                    // 额度 / 限流（HTTP 429 / 5xx 过载 / 余额耗尽）标记，前端引导重试 / 检查额度（而非重配）
+                    // M3-3：模型配置错误（无 Key / Key 错 / 维度不匹配）标记，前端引导重配；
+                    // 额度 / 限流标记，前端引导重试 / 检查额度（而非重配）
                     boolean modelConfigError = "MODEL_CONFIG_ERROR".equals(errorType);
                     boolean quotaError = "MODEL_QUOTA_ERROR".equals(errorType);
                     this.updateDocumentStatus(docId, "failed", null, error, modelConfigError, quotaError);
-                    log.warn("文档处理失败: docId={}, errorType={}, error={}", docId, errorType, error);
+                    log.warn("文档入队失败: docId={}, errorType={}, error={}", docId, errorType, error);
+                } else {
+                    // 入队成功：文档即将可检索，清除该租户可能残留的检索缓存，
+                    // 保证新文档（及其增强块）立即可被搜到，不被旧缓存误命中。
+                    aiServiceClient.invalidateCache(tenantId);
                 }
             } catch (Exception e) {
-                log.error("文档处理异常: docId={}", docId, e);
+                log.error("文档处理触发异常: docId={}", docId, e);
                 this.updateDocumentStatus(docId, "failed", null, e.getMessage());
             }
         }, DOC_PROCESS_EXECUTOR);

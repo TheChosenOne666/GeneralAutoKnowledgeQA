@@ -82,7 +82,8 @@ def patched(monkeypatch):
     async def fake_complete(messages, model=None, cfg=None, client=None):
         return '{"question": "什么是熊答？", "answer": "熊答是企业知识问答助手。"}'
 
-    async def fake_notify(doc_id, status, client=None):
+    async def fake_notify(doc_id, status, client=None, **kwargs):
+        # 仅记录 (doc_id, status) 供既有断言使用；**kwargs 吸收新增的 content/chunk_count
         notifies.append((doc_id, status))
 
     async def fake_get_original_chunks(doc_id):

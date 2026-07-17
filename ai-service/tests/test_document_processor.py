@@ -11,7 +11,7 @@ import tempfile
 
 import pytest
 
-from services.document_processor import document_processor, CHARS_PER_PAGE, PageSegment
+from services.document_processor import document_processor, CHARS_PER_PAGE, PageSegment, _clean_text
 
 
 def _write_tmp(suffix: str, content: str) -> str:
@@ -112,4 +112,23 @@ def test_extract_pdf_falls_back_to_pdfplumber(monkeypatch):
 
     pages = asyncio.run(document_processor._extract_pdf("dummy.pdf"))
     assert pages == [PageSegment("降级提取文本", 1)]
+
+
+def test_clean_text_strips_garbage():
+    """_clean_text 应剔除中文 PDF 文本层常见的乱码码位，避免引用来源出现「�」。"""
+    # C1 控制符（U+0085 下一行 / U+0096 等）应被剔除，保留可见文字与换行
+    assert _clean_text("正文\u0085内容\n第二行") == "正文内容\n第二行"
+    # Unicode 替换符 U+FFFD
+    assert _clean_text("知识\uFFFD库内容") == "知识库内容"
+    # 非字符码位 U+FFFE / U+FDEF
+    assert _clean_text("a\ufffeb") == "ab"
+    assert _clean_text("x\ufdefy") == "xy"
+    # 孤立代理对（单个代理单元）应剔除，不污染后续字符
+    assert _clean_text("前\ud83d后") == "前后"
+    # 合法 emoji（完整代理对）应保留
+    assert _clean_text("点赞\U0001f44d") == "点赞\U0001f44d"
+    # BOM 与制表/换行保留
+    assert _clean_text("\ufeff\t\t标题\r\n正文") == "\t\t标题\r\n正文"
+    # 空输入
+    assert _clean_text("") == ""
 

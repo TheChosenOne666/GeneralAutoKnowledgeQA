@@ -29,7 +29,12 @@ class ModelConfigErrorTest(unittest.TestCase):
         self.client = TestClient(app)
 
     def test_document_process_model_config_error(self):
-        """无 Embedding API Key → 文档处理返回可识别的模型配置错误。"""
+        """无 Embedding API Key → 主流程入队成功、接口立即返回 processing（M5-1 异步化契约）。
+
+        模型配置错误的分类（MODEL_CONFIG_ERROR）发生在常驻 worker 内，由
+        tests/test_process_queue.py::test_worker_notifies_failed_on_model_config_error 覆盖；
+        此处仅校验 HTTP 入口只负责入队、不阻塞、立即返回 processing。
+        """
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as f:
@@ -51,12 +56,16 @@ class ModelConfigErrorTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-        self.assertEqual(data["status"], "failed")
-        self.assertEqual(data["error_type"], "MODEL_CONFIG_ERROR")
-        self.assertIn("Embedding", data["error"])
+        self.assertEqual(data["status"], "processing")
+        self.assertEqual(data["doc_id"], "d1")
 
     def test_document_process_quota_error(self):
-        """Embedding 被限流 / 额度不足（ModelQuotaError）→ 文档处理返回 MODEL_QUOTA_ERROR。"""
+        """Embedding 被限流（ModelQuotaError）→ 主流程入队成功、接口立即返回 processing（M5-1 异步化契约）。
+
+        限流 / 额度错误的分类（MODEL_QUOTA_ERROR）发生在常驻 worker 内，由
+        tests/test_process_queue.py 的 worker 失败回调覆盖；此处仅校验 HTTP 入口
+        只负责入队、不阻塞、立即返回 processing。
+        """
         from unittest.mock import patch
 
         with tempfile.NamedTemporaryFile(
@@ -89,9 +98,8 @@ class ModelConfigErrorTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-        self.assertEqual(data["status"], "failed")
-        self.assertEqual(data["error_type"], "MODEL_QUOTA_ERROR")
-        self.assertIn("限流", data["error"])
+        self.assertEqual(data["status"], "processing")
+        self.assertEqual(data["doc_id"], "d2")
 
     def test_chat_stream_model_config_error(self):
         """无 LLM API Key（search 模式跳过检索）→ SSE 推送 event: error。"""

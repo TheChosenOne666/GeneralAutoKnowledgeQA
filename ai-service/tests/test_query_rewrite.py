@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from core.redis_client import get_redis
 import services.document_processor as dp_mod
 import services.vector_store as vs_mod
 from services.document_processor import document_processor
@@ -19,6 +20,22 @@ from services.rag import rag_service
 from services.vector_store import InMemoryVectorStore
 
 VEC = [0.1, 0.2, 0.3, 0.4]
+
+
+def _flush_retrieval_cache() -> None:
+    """清空 L1 检索缓存，避免共享 Redis 中残留的历史结果使 rewrite / expansion 被跳过（非确定性）。"""
+    try:
+
+        async def _f():
+            r = await get_redis()
+            keys = await r.keys("retrieval:*")
+            if keys:
+                await r.delete(*keys)
+
+        asyncio.run(_f())
+    except Exception:
+        # 缓存不可用不影响检索逻辑本身，忽略
+        pass
 
 
 async def _fake_embed_text(text, cfg=None, client=None):
@@ -82,6 +99,8 @@ class RetrieveEnhanceTest(unittest.TestCase):
         self.store = InMemoryVectorStore()
         vs_mod.vector_store_service = self.store
         dp_mod.vector_store_service = self.store
+        # 清空 L1 检索缓存，保证每次运行都真实走 rewrite / 主检索，而非命中历史缓存跳过改写
+        _flush_retrieval_cache()
 
     def _seed(self, text):
         with tempfile.NamedTemporaryFile(

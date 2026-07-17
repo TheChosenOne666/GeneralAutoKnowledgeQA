@@ -5,6 +5,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from services.augment_queue import mark_cancelled
+from services import process_queue
 from services.document_processor import document_processor
 from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError
 from services.vector_store import vector_store_service
@@ -32,65 +33,31 @@ class ExtractPagesRequest(BaseModel):
 
 @router.post("/document/process")
 async def process_document(body: ProcessRequest):
-    """文档处理流水线：提取 → 分块 → 向量化 → 存储。
+    """文档处理流水线入口（M5-1 异步化）。
 
-    Java 后端上传文件后调用此接口触发异步处理。
-    M3-3：模型配置错误（无 Key / Key 错 / 模型名错 / 维度不匹配）返回
-    error_type=MODEL_CONFIG_ERROR，供前端识别并引导重新配置。
+    仅将任务 enqueue 到持久化主流程队列并立即返回 ``{status: processing}``，
+    真正的提取 → 分块 → 向量化 → 存储由常驻 worker 异步执行、崩溃可恢复
+    （对齐业界成熟方案 Asynq 整流程异步）。状态完全由 worker 经
+    ``/api/internal/document/status`` 回调推进（retrieving/optimizing/ready/failed），
+    Java 侧不再依赖本接口的同步返回落库。
     """
     try:
-        logger.info(f"[文档诊断] 收到process doc_id={body.doc_id} file_type={body.file_type} "
+        logger.info(f"[文档诊断] 收到process(入队) doc_id={body.doc_id} file_type={body.file_type} "
                     f"file_path={body.file_path} ai_config是否为空={body.ai_config is None}")
-        if body.ai_config:
-            logger.info(f"[文档诊断] ai_config字段={list(body.ai_config.keys())} "
-                        f"embedding_model={body.ai_config.get('embedding_model')} "
-                        f"has_emb_key={bool(body.ai_config.get('embedding_api_key'))}")
-        else:
-            logger.warning("[文档诊断] ai_config为空，将走env兜底（易触发模型配置错误）")
-        cfg = ModelConfig.from_dict(body.ai_config)
-        if cfg is None:
-            logger.warning("[文档诊断] ModelConfig为None，使用env兜底")
-        else:
-            logger.info(f"[文档诊断] ModelConfig已构建 emb={cfg.embedding_provider}/{cfg.embedding_model} "
-                        f"has_emb_key={cfg.has_embedding()}")
-        result = await document_processor.process(
-            file_path=body.file_path,
-            file_type=body.file_type,
-            kb_id=body.kb_id,
-            doc_id=body.doc_id,
-            tenant_id=body.tenant_id,
-            cfg=cfg,
-            ai_config_dict=body.ai_config,
+        await process_queue.enqueue(
+            {
+                "doc_id": body.doc_id,
+                "kb_id": body.kb_id,
+                "tenant_id": body.tenant_id,
+                "file_path": body.file_path,
+                "file_type": body.file_type,
+                "ai_config": body.ai_config,
+            }
         )
-        # process() 返回 optimizing（向量已入库可检索，增强后台进行中）；Java 据此立即可检索
-        return {
-            "doc_id": body.doc_id,
-            "status": result.get("status", "optimizing"),
-            "chunk_count": result.get("chunk_count", 0),
-            "content": result.get("content", ""),
-        }
-    except ModelQuotaError as e:
-        logger.warning(f"模型额度/限流错误（文档处理）：{e}")
-        return {
-            "doc_id": body.doc_id,
-            "status": "failed",
-            "error_type": "MODEL_QUOTA_ERROR",
-            "error": str(e),
-        }
-    except ModelConfigError as e:
-        logger.warning(f"模型配置错误（文档处理）：{e}")
-        return {
-            "doc_id": body.doc_id,
-            "status": "failed",
-            "error_type": "MODEL_CONFIG_ERROR",
-            "error": str(e),
-        }
+        return {"doc_id": body.doc_id, "status": "processing"}
     except Exception as e:
-        return {
-            "doc_id": body.doc_id,
-            "status": "failed",
-            "error": str(e),
-        }
+        logger.warning(f"主流程入队失败 doc_id={body.doc_id}: {e}")
+        return {"doc_id": body.doc_id, "status": "failed", "error": str(e)}
 
 
 @router.post("/document/extract-pages")
@@ -143,6 +110,8 @@ async def delete_document(doc_id: str):
         await vector_store_service.delete_by_doc(doc_id)
         # 标记增强任务取消（队列中待增强任务将被 worker 跳过，对标业界成熟方案 任务取消）
         await mark_cancelled(doc_id)
+        # M5-1：同步标记主流程取消集，worker 取任务前跳过、避免已删文档继续处理
+        await process_queue.mark_cancelled(doc_id)
         return {"doc_id": doc_id, "status": "deleted"}
     except Exception as e:
         logger.warning(f"删除文档向量失败 doc_id={doc_id}: {e}")
@@ -160,6 +129,8 @@ async def cancel_document(doc_id: str):
     try:
         await vector_store_service.delete_by_doc(doc_id)
         await mark_cancelled(doc_id)
+        # M5-1：同步标记主流程取消集，worker 取任务前跳过、避免已取消文档继续处理
+        await process_queue.mark_cancelled(doc_id)
         return {"doc_id": doc_id, "status": "cancelled"}
     except Exception as e:
         logger.warning(f"取消文档处理失败 doc_id={doc_id}: {e}")

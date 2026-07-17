@@ -1,6 +1,7 @@
 package com.xiongda.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.constant.CommonConstant;
 import com.xiongda.constant.UserConstant;
@@ -36,6 +37,7 @@ import org.springframework.util.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -465,6 +467,36 @@ class UserServiceImplTest {
         ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
         verify(userMapper).updateById(captor.capture());
         assertEquals(0, captor.getValue().getIsActive());
+    }
+
+    @Test
+    void updateUser_cannotPromoteToSuperAdmin() {
+        UserUpdateRequest req = new UserUpdateRequest();
+        req.setId(200L);
+        req.setRole(UserConstant.SUPER_ADMIN_ROLE);
+
+        User target = buildUser(200L, 1L, "x@e.com", "member", 1);
+        when(userMapper.selectById(200L)).thenReturn(target);
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> userService.updateUser(1L, 100L, req));
+        assertEquals(ErrorCode.PARAMS_ERROR.getCode(), ex.getCode());
+    }
+
+    @Test
+    void listUsersByTenant_success() {
+        Page<User> mockPage = new Page<>(1L, 10L, 2L);
+        mockPage.setRecords(List.of(
+                buildUser(200L, 1L, "a@e.com", "member", 1),
+                buildUser(201L, 1L, "b@e.com", UserConstant.TENANT_ADMIN_ROLE, 1)));
+        when(userMapper.selectPage(any(Page.class), any(QueryWrapper.class))).thenReturn(mockPage);
+
+        Page<UserVO> result = userService.listUsersByTenant(1L, new QueryWrapper<>(), 1L, 10L);
+        assertEquals(2L, result.getTotal());
+        assertEquals(2, result.getRecords().size());
+        assertEquals("member", result.getRecords().get(0).getRole());
+        assertEquals(UserConstant.TENANT_ADMIN_ROLE, result.getRecords().get(1).getRole());
+        verify(userMapper).selectPage(any(Page.class), any(QueryWrapper.class));
     }
 
     @Test

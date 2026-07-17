@@ -27,4 +27,7 @@ public class InternalDocStatusRequest implements Serializable {
 
     /** 是否模型配置错误（可选）。 */
     private Boolean modelConfigError;
+
+    /** 文档提取全文（可选，M5-1：optimizing 阶段经回调回填，替代旧同步返回）。 */
+    private String content;
 }

@@ -361,23 +361,26 @@ class DocumentServiceImplTest {
 
     @Test
     void triggerDocumentProcessing_optimizingTreatedAsSuccess() {
-        // 模拟 Python 返回 optimizing（向量已入库、可检索，增强后台进行中）
+        // M5-1 异步化：Python 仅入队即返回 processing，Java 视为成功（不阻塞），
+        // 后续 retrieving/optimizing/ready 由 worker 经状态回调推进；此处校验
+        // ① Java 不被误判为 failed、② 入队成功分支清 L1 缓存（保证新文档立即可搜）。
         Document doc = buildDoc(1L, "t.pdf", "pdf", "processing");
         when(documentMapper.selectById(1L)).thenReturn(doc);
         when(documentMapper.updateById(any(Document.class))).thenReturn(1);
         when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
         when(aiServiceClient.processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any()))
-                .thenReturn(Map.of("status", "optimizing", "chunk_count", 7, "content", "全文内容"));
+                .thenReturn(Map.of("status", "processing"));
 
         documentService.triggerDocumentProcessing(1L, "/p", "txt", 1L, 10L, 100L);
 
-        // 异步 lambda：等待至少两次状态更新（parsing → optimizing），取最后一次校验
+        // 异步 lambda：至少置过一次 parsing（入队前置），且最终不应出现 failed
         ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
-        verify(documentMapper, timeout(3000).atLeast(2)).updateById(cap.capture());
+        verify(documentMapper, timeout(3000).atLeast(1)).updateById(cap.capture());
         List<Document> all = cap.getAllValues();
-        assertEquals("optimizing", all.get(all.size() - 1).getStatus());
-        assertEquals(7, all.get(all.size() - 1).getChunkCount());
-        // 成功分支才清 L1 缓存（failed 分支不会调用）
+        assertEquals("parsing", all.get(0).getStatus());
+        assertTrue(all.stream().noneMatch(d -> "failed".equals(d.getStatus())),
+                "返回 processing 不应被标记为 failed");
+        // 入队成功分支清 L1 缓存（failed 分支不会调用）
         verify(aiServiceClient, timeout(3000)).invalidateCache(10L);
     }
 
@@ -467,21 +470,26 @@ class DocumentServiceImplTest {
 
     @Test
     void triggerDocumentProcessing_raceCancelledCleanupVectors() {
-        // 竞态：用户中途取消（DB 已 cancelled），Python 仍跑完返回 optimizing
-        // 应在落库前清理已入库向量，保持 cancelled（不残留可检索但已取消的文档）
+        // M5-1 异步化：向量清理竞态（用户中途取消）已由 Python worker 的取消检查点处理
+        // （process() 在入库后、notify optimizing 前检测到 cancelled 即清理向量并回调 cancelled），
+        // Java 侧 triggerDocumentProcessing 仅负责入队、不再承担向量清理；
+        // 此处校验：Python 返回 processing（已入队）时，Java 不误判 failed、也不重复调删除。
         when(documentMapper.selectById(1L))
-                .thenReturn(buildDoc(1L, "t.pdf", "pdf", "processing"))
-                .thenReturn(buildDoc(1L, "t.pdf", "pdf", "cancelled"));
+                .thenReturn(buildDoc(1L, "t.pdf", "pdf", "processing"));
         when(documentMapper.updateById(any(Document.class))).thenReturn(1);
         when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
         when(aiServiceClient.processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any()))
-                .thenReturn(Map.of("status", "optimizing", "chunk_count", 7, "content", "全文内容"));
+                .thenReturn(Map.of("status", "processing"));
 
         documentService.triggerDocumentProcessing(1L, "/p", "txt", 1L, 10L, 100L);
 
-        // 竞态分支：清理已入库向量 + 清 L1 缓存（不把状态回退为 optimizing）
-        verify(aiServiceClient, timeout(3000)).deleteDocument(1L);
+        // 返回 processing：不调 Python deleteDocument（清理已移交 worker），也不把状态置为 failed
+        verify(aiServiceClient, never()).deleteDocument(1L);
         verify(aiServiceClient, timeout(3000)).invalidateCache(10L);
+        ArgumentCaptor<Document> cap = ArgumentCaptor.forClass(Document.class);
+        verify(documentMapper, timeout(3000).atLeast(1)).updateById(cap.capture());
+        assertTrue(cap.getAllValues().stream().noneMatch(d -> "failed".equals(d.getStatus())),
+                "返回 processing 不应被标记为 failed");
     }
 
     @Test
@@ -492,7 +500,7 @@ class DocumentServiceImplTest {
         when(aiConfigService.getRawConfig(10L, 100L)).thenReturn(null);
         doAnswer(invocation -> {
             execThread[0] = Thread.currentThread().getName();
-            return Map.of("status", "ready", "chunk_count", 3, "content", "c");
+            return Map.of("status", "processing");
         }).when(aiServiceClient).processDocument(eq(1L), any(), any(), eq(1L), eq(10L), any());
         when(documentMapper.selectById(1L)).thenReturn(buildDoc(1L, "t.pdf", "pdf", "processing"));
         when(documentMapper.updateById(any(Document.class))).thenReturn(1);

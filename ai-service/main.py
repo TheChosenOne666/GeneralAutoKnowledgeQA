@@ -18,6 +18,7 @@ from core.pg_client import close_pg_pool, get_pg_pool
 from routers import chat, document, cache
 from services.augment_queue import sweep_stale
 from services.document_processor import document_processor
+from services.process_queue import sweep_stale as sweep_process_stale
 from services.vector_store import PgVectorStore, ensure_embeddings_table, vector_store_service
 
 
@@ -41,12 +42,26 @@ async def lifespan(app: FastAPI):
             logger.info(f"♻️ 增强队列恢复：{moved} 个卡死任务重新入队")
     except Exception as e:
         logger.warning(f"⚠️ 增强队列 sweep 失败（不影响启动）: {e}")
+    # M5-1：主流程队列同样持久化、重启可恢复
+    try:
+        moved = await sweep_process_stale()
+        if moved:
+            logger.info(f"♻️ 主流程队列恢复：{moved} 个卡死任务重新入队")
+    except Exception as e:
+        logger.warning(f"⚠️ 主流程队列 sweep 失败（不影响启动）: {e}")
     augment_worker_task = asyncio.create_task(document_processor.run_augment_worker())
     logger.info("🚀 问答增强队列 worker 已启动")
+    process_worker_task = asyncio.create_task(document_processor.run_process_worker())
+    logger.info("🚀 文档主流程队列 worker 已启动")
     yield
     augment_worker_task.cancel()
     try:
         await augment_worker_task
+    except asyncio.CancelledError:
+        pass
+    process_worker_task.cancel()
+    try:
+        await process_worker_task
     except asyncio.CancelledError:
         pass
     await close_pg_pool()
