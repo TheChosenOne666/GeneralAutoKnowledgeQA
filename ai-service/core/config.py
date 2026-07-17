@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # 问答增强后台任务总超时（秒）：超时放弃剩余问答对，文档仍维持可检索并推进 ready
     qa_background_timeout: float = 600.0
 
+    # M5-7 增强内容丰富度扩展：在问答对(qa)增强基础上扩展 summary/question/wiki/entity
+    # 四类增强块，提升检索召回与知识覆盖度（对标业界 postprocess: 摘要+问题+实体关系+Auto-Wiki）。
+    enable_augment_extensions: bool = True   # 总开关：是否生成扩展增强块
+    augment_ext_summary: bool = True         # 文档级摘要块（chunk_type=summary）
+    augment_ext_question: bool = True        # 推测用户问题块（chunk_type=question）
+    augment_ext_wiki: bool = True            # Auto-Wiki 条目块（chunk_type=wiki）
+    augment_ext_entity: bool = True          # 实体关系(GraphRAG)块（chunk_type=entity，三元组存 metadata）
+    augment_ext_summary_max_chars: int = 6000   # 喂 LLM 做摘要/实体/wiki 的文档拼接字符上限
+    augment_ext_question_max: int = 12       # 推测问题块数量上限
+    augment_ext_wiki_max: int = 5            # Auto-Wiki 条目上限
+    augment_ext_entity_max: int = 20         # 实体关系三元组上限
+    augment_ext_per_call_timeout: float = 120.0  # 单类扩展增强 LLM 调用超时（秒）
+
     # LLM
     llm_provider: str = "volcengine"
     llm_model: str = "doubao-pro"
@@ -84,6 +97,9 @@ class Settings(BaseSettings):
     retrieval_relative_ratio: float = 0.80        # 相对相关性阈值：剔除与最优分差距超过此比例的跨主题噪声
     retrieval_max_chunks_per_doc: int = 5         # 单文档最多进入 top-N 的块数（避免单文档刷屏；设为 top_n 即不限制）
     retrieval_exclude_qa_blocks: bool = True      # 排除 QA 增强块（source 通常为空，不作为引用来源，与 get_original_chunks 一致）
+    # M5-7：增强块（qa/question/summary/wiki/entity）由 LLM 生成、source 通常空/非原文，仅用于
+    # 提升检索召回的语义桥接，不作为引用来源（与 retrieval_exclude_qa_blocks 同语义，现已并入此开关）。
+    retrieval_exclude_augment_blocks: bool = True
     # 语义平手时由词法重合度决胜：向量分与最优分差距 <= retrieval_bm25_tie_epsilon 视为平手，
     # 若块内容与查询的 bigram 重合度 >= retrieval_bm25_tie_overlap_min，则按重合度 * boost 加权
     # 抬升，让「后端规范」类关键词相关块优先于向量模型略偏的前端/JavaWeb 块。差距明显

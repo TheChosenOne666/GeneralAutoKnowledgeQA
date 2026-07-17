@@ -321,6 +321,12 @@ LLM 生成回答（SSE 流式输出）
 > - **增强透传**：`_run_augment_task` 读回父块与子块+qa 增强块一并全量 store（幂等覆盖），避免增强入库时父块丢失。
 > - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成 parent 块；新上传文档自动带父子两层。
 
+> **M5-7 增强内容丰富度扩展（GraphRAG/Auto-Wiki/摘要/推测问题，2026-07-17 已落地）**：在既有问答对(qa)增强基础上，扩展 summary/question/wiki/entity 四类增强块（最小侵入、无新基础设施）：
+> - **生成**：新增 `_generate_extended_augment`，以文档拼接文本（截断 `augment_ext_summary_max_chars`）并发生成——`summary` 文档级摘要（覆盖「总结/概述」类问题）、`question` 推测用户检索式问题（桥接口语化问句与文档术语）、`wiki` Auto-Wiki 条目（归纳性知识点）、`entity` 实体关系三元组（GraphRAG，三元组额外存入 `metadata` JSONB 列，不引入独立图数据库，后续可图检索/可视化）。各类 LLM 调用容错解析，配置错误整体放弃扩展增强。
+> - **入库**：`_run_augment_task` 在 qa 之后调用扩展生成，四类块与 qa 合并后全量幂等 store；`get_original_chunks` 排除全部增强块，杜绝重建膨胀。
+> - **检索行为**：增强块参与向量/BM25 召回提升语义桥接，但默认排除为引用来源（`retrieval_exclude_augment_blocks`，与 qa 同语义）；`get_document_pages`/BM25 warmup 同样排除，避免预览/关键词噪声。
+> - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成扩展增强块；新上传文档自动带 qa + 扩展增强。
+
 
 
 > **Embedding 并发化（2026-07-16 修复）**：多模态 Embedding 端点（`doubao-embedding-vision` 的 `/embeddings/multimodal`）单次仅支持单条 input，原实现逐条串行，大文档（分块数千）整段向量化可达 10 分钟、且取消无法中断。改为 `asyncio.Semaphore(embedding_concurrency=16)` 限流并发 + 429/5xx 退避重试（详见 task-breakdown M4）。纯文本文档建议用标准 `doubao-embedding`（批量、秒级）。
@@ -651,7 +657,7 @@ Java triggerDocumentProcessing：发请求后置 status=parsing；仅当 Python 
 
 > **M5-2 主流程重试机制（2026-07-17，已落地）**：在 M5-1 队列基础上叠加失败重试（对标 Asynq `MaxRetry(3)` + 退避）。任务新增 `retry` 字段；`run_process_worker` 每轮先 `promote_delayed()` 把到期的延迟重试任务搬回主队列。重试分流（`_run_process_task`）：`ModelConfigError`（密钥/模型名/维度）**不可重试**，直接回调 `failed` + `model_config_error=True`；其余瞬时异常（网络/`ModelQuotaError` 限流/DB 瞬时错误）按 `retry` 计数经 `requeue_delayed` 写入延迟 zset `xiongda:doc:delayed`（score = `next_attempt_at = now + backoff_delay(attempt)`，指数退避 30/60/120s 封顶 600s），到期后由 worker 重新执行；达 `MAX_RETRY=3` 上限回调 `failed`（error_msg 含「已重试 N 次」）。PG `store_chunks` 先删后插保证重试幂等、不重复分块；延迟任务持久化于 zset，服务重启后到期即恢复。详见 `docs/task-breakdown.md` M5-2。
 
-> **M5 规划**：M5-1 / M5-2 / M5-3 / M5-4 / M5-5 已完成；剩余 M5-6 多模态 / M5-7 GraphRAG / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+> **M5 规划**：M5-1 / M5-2 / M5-3 / M5-4 / M5-5 / M5-7 已完成；剩余 M5-6 多模态 / M5-8 复合检索将在后续逐个对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
 
 > **M5-4 阶段化 span 时间线追踪（2026-07-17 已落地）**：文档处理全程拆成带时间线与指标的阶段——解析(parsing) → 分块(chunking) → 向量化(embedding) → 入库(indexing) → 增强(optimizing)。Python 经 `_StageTimer` 上下文管理器在每阶段边界回调 `notify_stage`（best-effort POST `/api/internal/document/stage`，携带 `startedAt/endedAt/elapsedMs/error/metrics`），Java `recordDocumentStage` 按 `stage` 幂等合并写入文档 `process_stages`（TEXT JSON 数组）；前端 `KnowledgeBasePage` 状态单元格下以 `StageTimeline` 展示阶段链（done 绿✓+耗时 / failed 红✕ / active 旋转符），便于细粒度进度观察与失败定位。详见 `docs/task-breakdown.md` M5-4。
 

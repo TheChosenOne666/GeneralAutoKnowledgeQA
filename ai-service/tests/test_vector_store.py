@@ -188,6 +188,46 @@ class InMemoryVectorStoreTest(unittest.TestCase):
         self.assertNotIn("父块完整上下文内容", joined)
         self.assertIn("子块内容", joined)
 
+    def test_get_original_chunks_excludes_all_augment_types(self):
+        """M5-7：get_original_chunks 排除全部增强块(qa/question/summary/wiki/entity)与 parent。"""
+        blocks = [
+            {"content": "原文块1", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 0, "chunk_type": "child"}},
+            {"content": "Q: x A: y", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 1, "chunk_type": "qa"}},
+            {"content": "推测问题?", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 2, "chunk_type": "question"}},
+            {"content": "文档摘要", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 3, "chunk_type": "summary"}},
+            {"content": "wiki 条目", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 4, "chunk_type": "wiki"}},
+            {"content": "X 属于 Y", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 5, "chunk_type": "entity"}},
+            {"content": "父块", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 6, "chunk_type": "parent", "is_parent": True}},
+        ]
+        self._run(self.store.store_chunks(
+            [{"content": b["content"], "metadata": b["metadata"], "embedding": None} for b in blocks],
+            "kb1", "doc1", "t1",
+        ))
+        res = self._run(self.store.get_original_chunks("doc1"))
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["content"], "原文块1")
+
+    def test_get_document_pages_excludes_augment_and_parent(self):
+        """M5-7：get_document_pages 排除增强块与 parent（避免预览重复/噪声）。"""
+        blocks = [
+            {"content": "原文块1", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 0, "chunk_type": "child"}},
+            {"content": "Q: x A: y", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 1, "chunk_type": "qa"}},
+            {"content": "推测问题?", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 2, "chunk_type": "question"}},
+            {"content": "文档摘要", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 3, "chunk_type": "summary"}},
+            {"content": "wiki 条目", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 4, "chunk_type": "wiki"}},
+            {"content": "X 属于 Y", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 5, "chunk_type": "entity"}},
+            {"content": "父块", "metadata": {"source": "a.txt", "page": 1, "chunk_index": 6, "chunk_type": "parent", "is_parent": True}},
+        ]
+        self._run(self.store.store_chunks(
+            [{"content": b["content"], "metadata": b["metadata"], "embedding": None} for b in blocks],
+            "kb1", "doc1", "t1",
+        ))
+        pages = self._run(self.store.get_document_pages("doc1"))
+        joined = "".join(p["text"] for p in pages)
+        self.assertIn("原文块1", joined)
+        for noise in ("Q: x A: y", "推测问题?", "文档摘要", "wiki 条目", "X 属于 Y", "父块"):
+            self.assertNotIn(noise, joined)
+
 
 if __name__ == "__main__":
     unittest.main()

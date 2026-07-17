@@ -1373,15 +1373,22 @@ Python（AI 服务）
 - **依赖**：M5-1、M3-3 模型配置（多模态端点）
 - **产出**：图片内容可被检索问答。
 
-### M5-7 GraphRAG + Auto-Wiki + 摘要/问题（增强内容丰富度扩展）[Python] P2 · 2d ⬜ 待开始
+### M5-7 GraphRAG + Auto-Wiki + 摘要/问题（增强内容丰富度扩展）[Python] P2 · 2d ✅ 完成（2026-07-17）
 
 - **需求**：对标业界成熟方案 postprocess 含摘要 + 问题 + 实体关系(GraphRAG) + Auto-Wiki，扩展现有仅问答对增强。
-- **改造**：
-  - 在 `_generate_qa_augment` 基础上增加：文档级摘要块、推测用户问题块、实体关系抽取（存入图/JSONB）。
-  - 可选 Auto-Wiki：从多文档抽取知识条目。
-  - 各类增强块带 `chunk_type` 区分（summary / question / entity / wiki）。
+- **实现**（在现有 qa 增强队列与 `chunk_type` 体系上扩展，最小侵入、无新基础设施）：
+  - **config**：新增总开关 `enable_augment_extensions`（默认开）与四类独立开关 `augment_ext_summary/question/wiki/entity`、上限 `augment_ext_summary_max_chars/augment_ext_question_max/augment_ext_wiki_max/augment_ext_entity_max`、单类超时 `augment_ext_per_call_timeout`；检索侧新增 `retrieval_exclude_augment_blocks`（默认开，排除增强块作为引用来源，并入旧 `retrieval_exclude_qa_blocks`）。
+  - **生成（document_processor.py）**：新增 `_generate_extended_augment`，以文档拼接文本（截断 `augment_ext_summary_max_chars`）并发生成四类增强块——
+    - `summary`：文档级摘要，覆盖「总结/概述」类问题；
+    - `question`：推测用户检索式问题，桥接口语化问句与文档术语；
+    - `wiki`：Auto-Wiki 条目（归纳性知识点）；
+    - `entity`：实体关系三元组（GraphRAG），三元组额外存入 `metadata` JSONB 列（不引入独立图数据库，后续可图检索/可视化）。
+    - 各类 LLM 调用容错解析（复用 `_parse_json_list`）；`safe()` 统一捕获 `ModelConfigError`（整体放弃扩展增强，与 qa 一致）与单类异常（跳过该类）。
+  - **入库**：`_run_augment_task` 在 qa 之后调用扩展生成，四类块与 qa 合并后**全量幂等 store**（store_chunks 先 DELETE 同 doc 再插，配合 `get_original_chunks` 排除增强块，杜绝重建膨胀）。
+  - **检索排除（vector_store.py / rag.py）**：`AUGMENT_CHUNK_TYPES = ("qa","question","summary","wiki","entity")`；`get_original_chunks`/`get_document_pages`（memory + PG，含 BM25 warmup SQL 用 `IS DISTINCT FROM` 兼容 NULL 原文块）均排除全部增强块 + parent 父块；`rag.retrieve` 在融合后排除增强块作为引用来源（仅参与向量/BM25 召回的语义桥接，不污染引用）。
+- **测试**：`test_document_processor.py` 新增 3 例（四类块生成+entity 三元组/总开关关闭/配置错误跳过）；`test_vector_store.py` 新增 2 例（get_original_chunks 排除全部增强块+parent / get_document_pages 排除增强块+parent）；`test_document_augment.py` 的 `test_worker_augments_and_notifies_ready` 升级断言扩展块入库（含 entity 三元组）。相关用例全过。
 - **依赖**：M4-8.1 增强队列、M5-1
-- **产出**：检索增强从「问答对」扩展到多形态知识块。
+- **产出**：检索增强从「问答对」扩展到多形态知识块（摘要/推测问题/Auto-Wiki/实体关系），提升模糊问句与「总结/关系」类问题的召回；增强块不进引用来源、不污染预览，且重建不膨胀。
 
 ### M5-8 复合检索引擎（pgvector + ES/Qdrant）[Python] P2 · 2d ⬜ 待开始
 

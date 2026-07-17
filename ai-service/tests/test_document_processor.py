@@ -192,4 +192,85 @@ def test_embed_chunks_skips_parent():
     assert out[1].embedding is not None
 
 
+def test_generate_extended_augment_four_types():
+    """M5-7：_generate_extended_augment 生成 summary/question/wiki/entity 四类块，entity 带三元组。"""
+    from services.document_processor import DocumentChunk
+
+    chunks = [
+        DocumentChunk(
+            content="熊答是企业知识问答助手，支持 RAG 检索与智能问答。",
+            metadata={"chunk_index": 0, "page": 1},
+        )
+    ]
+
+    async def fake_complete(messages, model=None, cfg=None, client=None):
+        system = messages[0]["content"]
+        if "摘要" in system:
+            return "熊答是企业知识问答助手。"
+        if "Auto-Wiki" in system:
+            return '["条目A：熊答定义", "条目B：RAG 检索"]'
+        if "实体关系" in system:
+            return '[{"subject":"熊答","predicate":"属于","object":"企业知识库"}]'
+        if "检索式问题" in system:
+            return '["什么是熊答？", "熊答支持什么能力？"]'
+        return "{}"
+
+    async def fake_embed_batch(texts, cfg=None, client=None):
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.llm_service, "complete", fake_complete)
+        mp.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
+        out = asyncio.run(document_processor._generate_extended_augment(chunks, None))
+
+    types = {d["metadata"]["chunk_type"] for d in out}
+    assert types == {"summary", "question", "wiki", "entity"}, types
+    # 每块都被向量化
+    assert all(d["embedding"] is not None for d in out)
+    # entity 块携带结构化三元组（存 metadata，供图检索/可视化）
+    entity = [d for d in out if d["metadata"]["chunk_type"] == "entity"][0]
+    assert entity["metadata"]["triple"] == {
+        "subject": "熊答",
+        "predicate": "属于",
+        "object": "企业知识库",
+    }
+    assert "企业知识库" in entity["content"]
+
+
+def test_generate_extended_augment_disabled():
+    """M5-7：总开关 enable_augment_extensions 关闭时返回空列表。"""
+    from services.document_processor import DocumentChunk
+
+    chunks = [DocumentChunk(content="内容", metadata={"chunk_index": 0, "page": 1})]
+
+    async def fake_embed_batch(texts, cfg=None, client=None):
+        return [[0.1] for _ in texts]
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.settings, "enable_augment_extensions", False)
+        mp.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
+        out = asyncio.run(document_processor._generate_extended_augment(chunks, None))
+    assert out == []
+
+
+def test_generate_extended_augment_model_config_error():
+    """M5-7：LLM 配置错误时整体跳过扩展增强（返回空列表）。"""
+    from services.document_processor import DocumentChunk
+    from services.model_config import ModelConfigError
+
+    chunks = [DocumentChunk(content="内容", metadata={"chunk_index": 0, "page": 1})]
+
+    async def fake_complete_err(messages, model=None, cfg=None, client=None):
+        raise ModelConfigError("bad key")
+
+    async def fake_embed_batch(texts, cfg=None, client=None):
+        return [[0.1] for _ in texts]
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(dp_module.llm_service, "complete", fake_complete_err)
+        mp.setattr(dp_module.embedding_service, "embed_batch", fake_embed_batch)
+        out = asyncio.run(document_processor._generate_extended_augment(chunks, None))
+    assert out == []
+
+
 

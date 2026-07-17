@@ -24,7 +24,7 @@ from services.embedding import embedding_service
 from services.llm import llm_service
 from services.model_config import ModelConfig, ModelConfigError
 from services.query_rewrite import expand_query, rewrite_query
-from services.vector_store import RetrievalResult, _bigrams
+from services.vector_store import AUGMENT_CHUNK_TYPES, RetrievalResult, _bigrams
 
 # 大纲意图关键词（触发 outline 块优先召回，方案C）：问「知识架构/大纲/目录/考点」类问题
 OUTLINE_KEYWORDS = (
@@ -159,13 +159,14 @@ class RagService:
         else:
             merged = bm25_results[:rerank_pool]
 
-        # 5.5 排除 QA 增强块：chunk_type == "qa" 的块由问答对生成、source 通常为空，
-        # 语义与原文高度重合却不应作为引用来源；排除后再做领域聚焦 / rerank / 阈值判定。
-        # 仅当排除后仍非空才替换，避免「候选全是 QA 块」时误判为无相关文档。
-        if settings.retrieval_exclude_qa_blocks:
-            non_qa = [r for r in merged if r.chunk_type != "qa"]
-            if non_qa:
-                merged = non_qa
+        # 5.5 排除增强块作为引用来源：chunk_type ∈ AUGMENT_CHUNK_TYPES（qa/question/
+        # summary/wiki/entity）由 LLM 生成、source 通常为空/非原文，仅用于提升检索召回
+        # 的语义桥接，不应作为引用来源（见 :data:`core.config.retrieval_exclude_augment_blocks`）。
+        # 仅当排除后仍非空才替换，避免「候选全是增强块」时误判为无相关文档。
+        if settings.retrieval_exclude_augment_blocks or settings.retrieval_exclude_qa_blocks:
+            non_aug = [r for r in merged if r.chunk_type not in AUGMENT_CHUNK_TYPES]
+            if non_aug:
+                merged = non_aug
 
         # 5.6 LLM 重排精排（领域无关：用已配置 LLM 对候选块按相关性打分排序，
         # 抑制弱向量模型对短 query 的跨领域串味，如问「后端」却返回「前端」块）。

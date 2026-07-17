@@ -528,13 +528,25 @@ class DocumentProcessor:
                     self._generate_qa_augment(chunks, cfg),
                     timeout=settings.qa_background_timeout,
                 )
-                if augmented:
+                # M5-7：扩展增强块（summary/question/wiki/entity），与 qa 合并后一并入库
+                extended: list[dict] = []
+                if settings.enable_augment_extensions:
+                    try:
+                        extended = await asyncio.wait_for(
+                            self._generate_extended_augment(chunks, cfg),
+                            timeout=settings.qa_background_timeout,
+                        )
+                    except Exception as e:  # noqa: BLE001 - 扩展增强失败不应影响文档就绪
+                        logger.warning(f"[优化-M5-7] 扩展增强异常（忽略）doc_id={doc_id}: {e}")
+                        extended = []
+                all_augmented = augmented + extended
+                if all_augmented:
                     # M5-5：连同父块一并全量 store（幂等覆盖），保留父块供回溯
                     await vector_store_module.vector_store_service.store_chunks(
-                        chunk_dicts + parent_dicts + augmented, kb_id, doc_id, tenant_id
+                        chunk_dicts + parent_dicts + all_augmented, kb_id, doc_id, tenant_id
                     )
                     logger.info(
-                        f"[优化] 增强入库完成 doc_id={doc_id} 增强块={len(augmented)} 父块={len(parent_dicts)}"
+                        f"[优化] 增强入库完成 doc_id={doc_id} qa={len(augmented)} 扩展={len(extended)} 父块={len(parent_dicts)}"
                     )
                 else:
                     logger.info(f"[优化] 无增强块（LLM 不可用/配置错误），文档维持可检索 doc_id={doc_id}")
@@ -728,6 +740,202 @@ class DocumentProcessor:
             )
         return augmented
 
+    async def _generate_extended_augment(
+        self, chunks: list[DocumentChunk], cfg: ModelConfig | None = None, client=None
+    ) -> list[dict]:
+        """M5-7：在问答对(qa)增强基础上扩展 summary/question/wiki/entity 四类增强块。
+
+        - ``summary``：文档级摘要，覆盖「总结/概述」类问题；
+        - ``question``：推测用户可能提问，桥接口语化问句与文档术语；
+        - ``wiki``：Auto-Wiki 条目，归纳性知识点；
+        - ``entity``：实体关系三元组(GraphRAG)，三元组额外存入 ``metadata``（JSONB），
+          供后续图检索/可视化，不引入独立图数据库。
+
+        各类块均参与向量检索提升召回，但默认排除为引用来源（见
+        :data:`core.config.Settings.retrieval_exclude_augment_blocks`）。
+        best-effort：LLM 不可用 / 配置错误 / 单类失败则跳过该类（文档仍就绪可用）。
+        """
+        if not settings.enable_augment_extensions:
+            return []
+        # 文档级视角：拼接原文（截断），供 summary/wiki/entity 使用
+        full_text = "\n".join(c.content for c in chunks)[: settings.augment_ext_summary_max_chars]
+        if not full_text.strip():
+            return []
+
+        model_err = False
+
+        async def safe(fn):
+            nonlocal model_err
+            try:
+                return await asyncio.wait_for(fn(), timeout=settings.augment_ext_per_call_timeout)
+            except ModelConfigError:
+                model_err = True
+                return None
+            except Exception as e:
+                logger.warning(f"[优化-M5-7] 扩展增强单类生成失败，跳过: {e}")
+                return None
+
+        summary_t, wiki_t, entity_t, questions_t = await asyncio.gather(
+            safe(lambda: self._gen_summary(full_text, cfg, client))
+            if settings.augment_ext_summary
+            else _await_none(),
+            safe(lambda: self._gen_wiki(full_text, cfg, client, settings.augment_ext_wiki_max))
+            if settings.augment_ext_wiki
+            else _await_none(),
+            safe(lambda: self._gen_entities(full_text, cfg, client, settings.augment_ext_entity_max))
+            if settings.augment_ext_entity
+            else _await_none(),
+            safe(lambda: self._gen_questions(full_text, cfg, client, settings.augment_ext_question_max))
+            if settings.augment_ext_question
+            else _await_none(),
+        )
+
+        # LLM 配置错误时整体放弃扩展增强（与 _generate_qa_augment 语义一致）
+        if model_err:
+            logger.warning("[优化-M5-7] 检测到模型配置错误，跳过整篇扩展增强")
+            return []
+
+        items: list[tuple[str, str, dict]] = []  # (chunk_type, content, extra_meta)
+        if summary_t:
+            items.append(("summary", summary_t.strip(), {}))
+        for w in wiki_t or []:
+            items.append(("wiki", w.strip(), {}))
+        for q in questions_t or []:
+            items.append(("question", q.strip(), {}))
+        for e in entity_t or []:
+            subject = str(e.get("subject", "")).strip()
+            predicate = str(e.get("predicate", "")).strip()
+            obj = str(e.get("object", "")).strip()
+            if not (subject and obj):
+                continue
+            items.append(
+                (
+                    "entity",
+                    f"{subject} {predicate} {obj}".strip(),
+                    {"triple": {"subject": subject, "predicate": predicate, "object": obj}},
+                )
+            )
+        if not items:
+            return []
+
+        contents = [c for _, c, _ in items]
+        try:
+            vecs = await embedding_service.embed_batch(contents, cfg, client)
+        except ModelConfigError as e:
+            logger.warning(f"[优化-M5-7] Embedding 配置错误，跳过扩展增强: {e}")
+            return []
+
+        augmented: list[dict] = []
+        for i, ((ct, content, extra), vec) in enumerate(zip(items, vecs)):
+            meta = {
+                "chunk_index": 100000 + i,  # 与原文/qa 块错开，避免检索去重键冲突
+                "page": 0,
+                "chunk_type": ct,
+            }
+            meta.update(extra)
+            augmented.append({"content": content, "metadata": meta, "embedding": vec})
+        return augmented
+
+    @staticmethod
+    async def _gen_summary(text: str, cfg: ModelConfig | None, client=None) -> str | None:
+        """用 LLM 生成文档级摘要（200 字内）。"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是知识库摘要助手。阅读给定文档，生成一段简洁准确的整体摘要"
+                    "（200字以内），概括文档主题与核心要点。只输出摘要正文，"
+                    "不要包含任何额外文字、标题或代码块标记。"
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw = await llm_service.complete(messages, cfg=cfg, client=client)
+        except ModelConfigError:
+            raise
+        except Exception as e:
+            logger.warning(f"[优化-M5-7] 摘要生成异常: {e}")
+            return None
+        return (raw or "").strip() or None
+
+    @staticmethod
+    async def _gen_wiki(text: str, cfg: ModelConfig | None, client=None, max_n: int = 5) -> list[str] | None:
+        """用 LLM 生成 Auto-Wiki 条目（JSON 字符串数组）。"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你是知识库 Auto-Wiki 助手。基于给定文档，生成最多 {max_n} 条百科式条目，"
+                    "每条概括一个独立知识点（含要点）。只输出一个 JSON 数组字符串，"
+                    '如 ["条目1正文", "条目2正文"]，不要包含任何额外文字或代码块标记。'
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw = await llm_service.complete(messages, cfg=cfg, client=client)
+        except ModelConfigError:
+            raise
+        except Exception as e:
+            logger.warning(f"[优化-M5-7] Wiki 生成异常: {e}")
+            return None
+        return _parse_json_list(raw, expect_str=True)
+
+    @staticmethod
+    async def _gen_questions(text: str, cfg: ModelConfig | None, client=None, max_n: int = 12) -> list[str] | None:
+        """用 LLM 推测用户最可能提出的检索式问题（JSON 字符串数组）。"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你是知识库检索优化助手。基于给定文本，推测用户最可能提出的 {max_n} 个"
+                    "检索式问题（口语化、覆盖文档关键知识点）。只输出一个 JSON 数组字符串，"
+                    '如 ["问题1", "问题2"]，不要包含任何额外文字或代码块标记。'
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw = await llm_service.complete(messages, cfg=cfg, client=client)
+        except ModelConfigError:
+            raise
+        except Exception as e:
+            logger.warning(f"[优化-M5-7] 问题推测异常: {e}")
+            return None
+        return _parse_json_list(raw, expect_str=True)
+
+    @staticmethod
+    async def _gen_entities(text: str, cfg: ModelConfig | None, client=None, max_n: int = 20) -> list[dict] | None:
+        """用 LLM 抽取实体关系三元组（JSON 对象数组：{subject, predicate, object}）。"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"你是知识图谱抽取助手。从文档中抽取最多 {max_n} 个实体关系三元组，描述实体间关系。"
+                    '只输出一个 JSON 数组，如 [{"subject":"A","predicate":"属于","object":"B"}]，'
+                    "不要包含任何额外文字或代码块标记。"
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw = await llm_service.complete(messages, cfg=cfg, client=client)
+        except ModelConfigError:
+            raise
+        except Exception as e:
+            logger.warning(f"[优化-M5-7] 实体抽取异常: {e}")
+            return None
+        data = _parse_json_list(raw, expect_str=False)
+        if not data:
+            return None
+        valid = [
+            d
+            for d in data
+            if isinstance(d, dict) and d.get("subject") and d.get("object")
+        ]
+        return valid or None
+
     @staticmethod
     async def _gen_one_qa(text: str, cfg: ModelConfig | None, client=None) -> dict | None:
         """用 LLM 从文本生成一对问答，返回 ``{"question", "answer"}`` 或 ``None``。"""
@@ -782,6 +990,54 @@ def _parse_qa_json(raw: str) -> dict | None:
                 }
         except (json.JSONDecodeError, TypeError):
             pass
+    return None
+
+
+def _parse_json_list(raw: str, expect_str: bool = True) -> list | None:
+    """容错解析 LLM 输出的 JSON 数组，返回 ``list`` 或 ``None``。
+
+    - ``expect_str=True``：元素为字符串（summary/wiki/question 类增强），过滤空串；
+    - ``expect_str=False``：元素为对象（entity 三元组类增强），仅保留 dict。
+    兼容 ```json 包裹与多段文本中截取首个 ``[...]``。
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+
+    def _coerce(data: list) -> list:
+        out = []
+        for item in data:
+            if expect_str:
+                if isinstance(item, str) and item.strip():
+                    out.append(item.strip())
+            elif isinstance(item, dict):
+                out.append(item)
+        return out
+
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return _coerce(data)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            if isinstance(data, list):
+                return _coerce(data)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
+
+async def _await_none():
+    """条件跳过的占位协程（供 ``asyncio.gather`` 中未启用的扩展增强类返回 None）。"""
     return None
 
 

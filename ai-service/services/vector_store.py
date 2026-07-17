@@ -18,6 +18,19 @@ from core.config import settings
 from core.pg_client import get_pg_pool
 
 
+# 增强块类型（由 LLM 生成，非原文）：重建原始块/预览时必须排除，否则增强 worker
+# 重建时把上一轮增强块当原文再生成，导致无限膨胀。含 qa（M4-8）与 M5-7 的
+# question/summary/wiki/entity。parent 父块单独排除（内容与子块重合）。
+AUGMENT_CHUNK_TYPES = ("qa", "question", "summary", "wiki", "entity")
+
+
+def _exclude_chunk_types_sql(types: tuple[str, ...]) -> str:
+    """生成 PG SQL 片段，排除指定 chunk_type（用 IS DISTINCT FROM 兼容 NULL 原文块）。"""
+    return "\n                     ".join(
+        f"AND (metadata->>'chunk_type' IS DISTINCT FROM '{t}')" for t in types
+    )
+
+
 @dataclass
 class RetrievalResult:
     """单条检索结果。
@@ -261,7 +274,7 @@ class InMemoryVectorStore:
             }
             for r in self._records
             if r.metadata.get("doc_id") == doc_id
-            and r.metadata.get("chunk_type") not in ("qa", "parent")
+            and r.metadata.get("chunk_type") not in AUGMENT_CHUNK_TYPES + ("parent",)
         ]
 
     async def get_parents_by_doc(self, doc_id: str) -> list[dict]:
@@ -286,14 +299,15 @@ class InMemoryVectorStore:
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从内存分块按页重建文档文本（预览兜底，不依赖原文件是否存在）。
 
-        排除 qa 增强块与 parent 父块（父块内容与子块重合，纳入会导致预览重复）。
-        按 page 升序聚合，返回 ``[{"page_no": int, "text": str}, ...]``。
+        排除增强块（qa/question/summary/wiki/entity）与 parent 父块（父块内容与子块
+        重合，纳入会导致预览重复）。按 page 升序聚合，返回
+        ``[{"page_no": int, "text": str}, ...]``。
         """
         chunks = [
             r
             for r in self._records
             if str(r.metadata.get("doc_id", "")) == str(doc_id)
-            and r.metadata.get("chunk_type") not in ("qa", "parent")
+            and r.metadata.get("chunk_type") not in AUGMENT_CHUNK_TYPES + ("parent",)
         ]
         chunks.sort(
             key=lambda r: (r.metadata.get("page", 0) or 0, r.metadata.get("chunk_index", 0) or 0)
@@ -487,7 +501,7 @@ class PgVectorStore:
         logger.info(f"[PgVectorStore] 删除向量 doc_id={doc_id}")
 
     async def get_original_chunks(self, doc_id: str) -> list[dict]:
-        """读回文档的原始子块（排除 qa 增强块与 parent 父块），供增强 worker 重建（不依赖上传文件是否仍在）。
+        """读回文档的原始子块（排除增强块 qa/question/summary/wiki/entity 与 parent 父块），供增强 worker 重建（不依赖上传文件是否仍在）。
 
         Returns:
             [{"content", "chunk_index", "page", "source"}]；文档已删则返回空列表。
@@ -495,11 +509,10 @@ class PgVectorStore:
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT content, chunk_index, page, source
+                f"""SELECT content, chunk_index, page, source
                    FROM embeddings
                    WHERE doc_id = $1
-                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'qa')
-                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'parent')
+                     {_exclude_chunk_types_sql(AUGMENT_CHUNK_TYPES + ("parent",))}
                    ORDER BY chunk_index""",
                 doc_id,
             )
@@ -546,18 +559,17 @@ class PgVectorStore:
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从 PG 向量库按页重建文档文本（预览兜底，不依赖原文件是否存在）。
 
-        排除 qa 增强块与 parent 父块（与 :meth:`get_original_chunks` 一致；父块内容与
-        子块重合，纳入会导致预览重复）。按 page、chunk_index 升序聚合，返回
-        ``[{"page_no": int, "text": str}, ...]``。
+        排除增强块（qa/question/summary/wiki/entity）与 parent 父块（与
+        :meth:`get_original_chunks` 一致；父块内容与子块重合，纳入会导致预览重复）。
+        按 page、chunk_index 升序聚合，返回 ``[{"page_no": int, "text": str}, ...]``。
         """
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT page, content, chunk_index
+                f"""SELECT page, content, chunk_index
                    FROM embeddings
                    WHERE doc_id = $1
-                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'qa')
-                     AND (metadata->>'chunk_type' IS DISTINCT FROM 'parent')
+                     {_exclude_chunk_types_sql(AUGMENT_CHUNK_TYPES + ("parent",))}
                    ORDER BY page, chunk_index""",
                 str(doc_id),
             )

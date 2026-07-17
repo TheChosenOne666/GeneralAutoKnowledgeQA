@@ -82,6 +82,16 @@ def patched(monkeypatch):
         stored["last"] = (chunks, kb_id, doc_id, tenant_id)
 
     async def fake_complete(messages, model=None, cfg=None, client=None):
+        # 按 system prompt 关键字返回对应 JSON（M5-7 四类扩展增强各自期望不同结构）
+        system = messages[0]["content"]
+        if "摘要" in system:
+            return "熊答是企业知识问答助手。"
+        if "Auto-Wiki" in system:
+            return '["条目A：熊答定义", "条目B：RAG 检索"]'
+        if "实体关系" in system:
+            return '[{"subject":"熊答","predicate":"属于","object":"企业知识库"}]'
+        if "检索式问题" in system:
+            return '["什么是熊答？", "熊答支持什么能力？"]'
         return '{"question": "什么是熊答？", "answer": "熊答是企业知识问答助手。"}'
 
     async def fake_notify(doc_id, status, client=None, **kwargs):
@@ -182,11 +192,18 @@ def test_worker_augments_and_notifies_ready(patched):
             "file_path": "x", "file_type": "txt", "ai_config": None}
     _run(document_processor._run_augment_task(task))
 
-    # worker store 一次（原始重建 + qa 全量），含 qa 块
+    # worker store 一次（原始重建 + qa 全量 + M5-7 扩展增强），含 qa 块
     assert stored["calls"] == 1
     qa_chunks = [c for c in stored["last"][0] if c["metadata"].get("chunk_type") == "qa"]
     assert len(qa_chunks) >= 1
     assert qa_chunks[0]["content"].startswith("Q: ")
+    # M5-7：扩展增强块（summary/question/wiki/entity）一并入库
+    ext_types = {c["metadata"].get("chunk_type") for c in stored["last"][0]}
+    assert {"summary", "question", "wiki", "entity"} <= ext_types, ext_types
+    entity = [c for c in stored["last"][0] if c["metadata"].get("chunk_type") == "entity"][0]
+    assert entity["metadata"].get("triple") == {
+        "subject": "熊答", "predicate": "属于", "object": "企业知识库"
+    }
     # 回调 ready（文档已可检索 → 增强完成）
     assert "ready" in [s for _, s in notifies]
     # 任务从 processing 移除
