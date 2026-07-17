@@ -1,7 +1,7 @@
 /** AI 模型配置页 — 按 04-ai-config.html 设计稿，接通后端读取/保存。 */
 
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { aiConfigApi } from '@/api/aiConfig'
 import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/components/Toast'
@@ -178,6 +178,7 @@ export default function AIConfigPage() {
   const { user } = useAuth()
   const { success } = useToast()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const isSuperAdmin = user?.role === 'super_admin'
   /** 配置作用域：超管可在「我的配置」与「平台默认配置」间切换。*/
   const [scope, setScope] = useState<'user' | 'platform'>('user')
@@ -278,9 +279,12 @@ export default function AIConfigPage() {
       setForm(toForm(updated))
       setDimensionError(null)
       success(scope === 'platform' ? '平台默认配置已保存' : '配置保存成功')
-      // 普通用户保存成功后，顶部绿色提示并自动跳转到对话页
+      // 普通用户保存成功后，顶部绿色提示并按来源跳回：
+      // 从知识库页去配置 → 回知识库页；从对话页去配置 → 回对话页；
+      // 直接在菜单进入（无 from）→ 默认回对话页。
       if (scope !== 'platform') {
-        window.setTimeout(() => navigate('/chat'), 1200)
+        const backTo = searchParams.get('from') || '/chat'
+        window.setTimeout(() => navigate(backTo), 1200)
       }
     } catch (err) {
       setFeedback({ type: 'error', msg: `保存失败：${err instanceof Error ? err.message : '请稍后重试'}` })

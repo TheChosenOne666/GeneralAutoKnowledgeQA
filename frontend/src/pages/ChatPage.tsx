@@ -669,7 +669,7 @@ export default function ChatPage() {
               <span className="font-semibold">模型配置不正确</span>，AI 调用失败，请检查 API Key、模型名或向量维度后重新配置。
             </div>
             <button
-              onClick={() => navigate('/ai-config')}
+              onClick={() => navigate('/ai-config?from=/chat')}
               className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-semibold hover:bg-red-600 transition"
             >
               去配置
@@ -710,7 +710,7 @@ export default function ChatPage() {
               ，AI 问答将无法调用对应能力，请先完成配置。
             </div>
             <button
-              onClick={() => navigate('/ai-config')}
+              onClick={() => navigate('/ai-config?from=/chat')}
               className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition"
             >
               去配置

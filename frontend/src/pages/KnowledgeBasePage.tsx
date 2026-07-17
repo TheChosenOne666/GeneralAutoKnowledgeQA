@@ -363,7 +363,7 @@ export default function KnowledgeBasePage() {
               <span className="font-semibold">模型配置不正确</span>，部分文档向量化失败，请检查 Embedding 的 API Key、模型名或向量维度后重新配置，并重新上传。
             </div>
             <button
-              onClick={() => navigate('/ai-config')}
+              onClick={() => navigate('/ai-config?from=/knowledge')}
               className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-semibold hover:bg-red-600 transition"
             >
               去配置

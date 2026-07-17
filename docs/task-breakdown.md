@@ -777,6 +777,29 @@ Python（AI 服务）
 - 注：发现并修复了遗留的重复测试文件 `com/xiongda/service/AiConfigServiceImplTest.java`（旧包名位置、未适配 `documentService` 依赖注入），补 `@Mock DocumentService` + `setUp` 显式 `setField` 后通过，未删除以保留其独特覆盖。
 - 待用户联调：重新保存配置后，知识库页红色「去配置」横幅应自动消失（旧失败文档标记已清），文档仍显示「失败」状态，点「重试」按新配置重新向量化。
 
+**M3-3 调整（2026-07-17）：AI 配置保存成功后按来源跳回对应页面**
+
+需求（用户提出）：从知识库页（上传文档 / 检索过程出现模型配置错误）点「去配置」进入 AI 模型配置页，保存成功后应跳回**知识库页**；从对话页（LLM 调用失败提示）点「去配置」进入，保存成功后应跳回**对话页**。原逻辑无条件 `navigate('/chat')`，从知识库页去配置后会被带离知识库、体验割裂。
+
+改动（纯前端，无后端）：
+- `KnowledgeBasePage.tsx` 文档向量化失败红横幅「去配置」入口：`navigate('/ai-config?from=/knowledge')`
+- `ChatPage.tsx` 两处「去配置」入口（运行时模型配置错误红横幅 + 未配置常驻琥珀横幅）：均 `navigate('/ai-config?from=/chat')`
+- `AIConfigPage.tsx`：引入 `useSearchParams`；保存成功分支（`scope !== 'platform'`）读取 `searchParams.get('from')`，有则跳回来源、无（如从侧边栏菜单直接进入）则默认跳 `/chat`。
+
+验证：
+- 前端 `npx tsc --noEmit` 0 错误、`npm run build`（tsc -b && vite build）EXIT=0 ✅
+- 待用户联调：① 知识库页点「去配置」→ 保存 → 应回知识库页；② 对话页点「去配置」→ 保存 → 应回对话页。
+
+**M3-3 启动回归修复（2026-07-17）：`AiConfigServiceImpl` ↔ `DocumentServiceImpl` 循环依赖致后端启动失败**
+
+现象：运行 `mvn spring-boot:run` 报 `APPLICATION FAILED TO START`，Spring 检测到 bean 循环依赖 `aiConfigController → aiConfigServiceImpl → documentServiceImpl → aiConfigServiceImpl`，BUILD FAILURE（exit code 1），8080 不监听。
+
+根因：上一版 M3-3 修复（commit `69e6432`）为在配置保存后清除失败文档归因标记，于 `AiConfigServiceImpl` 注入了 `DocumentService`；而 `DocumentServiceImpl` 本就注入 `AiConfigService`（文档向量化时读取用户级/租户级配置）。两者直接互依成最小环。单元测试用 Mockito 未触发 Spring 上下文循环检测，故此前 `mvn clean test` 仍 SUCCESS，未暴露。
+
+修复（最小侵入，未提交）：`AiConfigServiceImpl.documentService` 字段加 `@Lazy`（新增 `import org.springframework.context.annotation.Lazy`），延迟到首次调用时注入；调用点（`clearFailedConfigErrorFlags`）均在配置保存运行时，非启动关键路径，无副作用。不动 `DocumentServiceImpl` 与公开接口。
+
+验证：重新 `mvn spring-boot:run` 启动成功（`Tomcat started on port 8080`、`Started MainApplication in 9.4s`）；前端 5173、Python AI 8001 保持在线，三服务齐备可用于联调。
+
 - **依赖**: M1-2
 - **产出**: 可在前端配置 AI 模型；配置填错（API Key/模型名/维度）时，对话失败与文档向量化失败均能被识别并引导到 /ai-config 重配
 

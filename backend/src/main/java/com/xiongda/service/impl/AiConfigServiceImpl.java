@@ -13,6 +13,7 @@ import com.xiongda.service.AiConfigService;
 import com.xiongda.service.DocumentService;
 import jakarta.annotation.Resource;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -33,6 +34,7 @@ public class AiConfigServiceImpl extends ServiceImpl<AiConfigMapper, AiConfig> i
     private static final Long PLATFORM_TENANT_ID = 0L;
 
     @Resource
+    @Lazy
     private DocumentService documentService;
 
     @Override

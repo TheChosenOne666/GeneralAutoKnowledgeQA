@@ -688,6 +688,10 @@ Python event_generator（routers/chat.py）
 
 > **重新配置保存后清除旧归因标记（2026-07-17 修复）**：知识库页红色「模型配置不正确」横幅由 `documents.some(d => d.modelConfigError)` 驱动。历史失败文档的 `model_config_error` 标记仅在成功终态、`retryDocument`、或命中 `MODEL_QUOTA_ERROR` 时清位，用户重新保存一份（可能）正确的配置后该标记仍残留，横幅持续误导"配置仍错"。修复：`AiConfigServiceImpl.updateConfig` 保存成功后调 `documentService.clearFailedConfigErrorFlags(tenantId)`，平台级 `updatePlatformDefault` 成功后代 `null` 清全库；`DocumentServiceImpl.clearFailedConfigErrorFlags` 用 `UpdateWrapper` 仅对 `status='failed'` 且 `model_config_error/quota_error` 为 true 的记录清零（文档保持 `failed` 终态，需用户手动重试按新配置重新归因）。前端逻辑无需改动——后端清位后下次刷新即消失。
 
+> **AI 配置保存成功后按来源跳回（2026-07-17 调整）**：原 `AIConfigPage` 保存成功后无条件 `navigate('/chat')`，导致从知识库页（文档向量化失败提示）点「去配置」改完配置、保存后却被带离知识库。调整：各「去配置」入口带 `from` 参数——`KnowledgeBasePage` 传 `?from=/knowledge`、`ChatPage` 两处（运行时错误红横幅 / 未配置常驻琥珀横幅）传 `?from=/chat`；`AIConfigPage` 用 `useSearchParams` 读取 `from`，保存成功后跳回该来源（无 `from` 默认 `/chat`）。纯前端改动，后端无需变。
+
+> **循环依赖致后端启动失败（2026-07-17 回归修复）**：M3-3 清除旧归因标记改动在 `AiConfigServiceImpl` 注入 `DocumentService`，与 `DocumentServiceImpl` 注入的 `AiConfigService` 形成互依环，使 `mvn spring-boot:run` 报 bean 循环依赖、BUILD FAILURE、8080 不监听。修复：对 `AiConfigServiceImpl.documentService` 加 `@Lazy` 延迟注入（调用点均在配置保存运行时，非启动路径），不动公开接口。单测因 Mockito 未能暴露该回归。
+
 ### 9.4 SSE 事件流协议
 
 实际事件类型（见 `routers/chat.py` `_sse`）：`thinking` → `sources`（可选）→ `token`（多个）→ `done`。
