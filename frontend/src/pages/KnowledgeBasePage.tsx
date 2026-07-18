@@ -180,13 +180,33 @@ export default function KnowledgeBasePage() {
     }
   }, [])
 
-  // 文档处于处理中（待处理/解析中/向量化中）时自动轮询刷新状态，避免界面“一动不动”
+  // 失败态首次出现的时间戳：用于限制可恢复 failed 的轮询窗口，避免永久失败文档空转
+  const transientFailedSinceRef = useRef<number | null>(null)
+  // 后端可能把 failed 改写成 ready（如重试成功 / 自动恢复），故对“可自动恢复的失败”也轮询刷新；
+  // 模型配置错 / 额度错导致的失败是终态、必须人工干预，无需轮询。
+  const FAILED_POLL_MAX_MS = 5 * 60 * 1000
+
+  // 文档处于处理中（parsing/retrieving/optimizing/processing）或可自动恢复的 failed 时自动轮询，
+  // 确保后端把失败改写为就绪后前端能及时感知，无需手动刷新。
   useEffect(() => {
     if (!selectedKb) return
-    const processing = documents.some(
+    const hasProcessing = documents.some(
       (d) => d.status === 'processing' || d.status === 'parsing' || d.status === 'retrieving' || d.status === 'optimizing'
     )
-    if (!processing) return
+    const hasTransientFailed = documents.some(
+      (d) => d.status === 'failed' && !d.modelConfigError && !d.quotaError
+    )
+    if (!hasProcessing && !hasTransientFailed) {
+      transientFailedSinceRef.current = null
+      return
+    }
+    if (hasTransientFailed) {
+      if (transientFailedSinceRef.current == null) transientFailedSinceRef.current = Date.now()
+      // 超出轮询窗口（默认 5 分钟）则停止，避免卡死的失败文档持续发起请求
+      if (Date.now() - transientFailedSinceRef.current > FAILED_POLL_MAX_MS) return
+    } else {
+      transientFailedSinceRef.current = null
+    }
     const timer = setInterval(() => loadDocuments(selectedKb.id), 3000)
     return () => clearInterval(timer)
   }, [documents, selectedKb, loadDocuments])
