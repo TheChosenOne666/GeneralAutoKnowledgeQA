@@ -1140,6 +1140,16 @@ Python（AI 服务）
 
 ---
 
+### 前端轮询修复：failed 可恢复态自动刷新（2026-07-18）[前端] P3 · 0.25d ✅ 完成
+
+- **现象（用户反馈）**：上传 `Git工作中需要的操作.docx`(514.7KB) 一度显示「处理失败」，但后端实际已处理成功（DB 最终 `ready`、PG 入库 49 块 + ES 双写 48 块，且 `/api/internal/document/status` 回调 `ready` 返回 200）。根因：前端轮询仅在 `processing/parsing/retrieving/optimizing` 时每 3 秒刷新；一旦状态被判定为终态 `failed` 即**停止轮询**，导致后端把 `failed` 改写成 `ready`（重试成功 / 自动恢复）时前端无法自动感知，必须手动刷新页面才更新。
+- **改造（`frontend/src/pages/KnowledgeBasePage.tsx`）**：重写状态轮询 `useEffect` 的触发条件——除处理中四态外，对**可自动恢复的 `failed` 文档**（即 `status=failed` 且非 `modelConfigError` 且非 `quotaError`）也持续轮询；模型配置错 / 额度错导致的失败为终态、须人工干预，不纳入轮询。为避免永久失败文档空转，对可恢复 `failed` 的轮询加 **5 分钟窗口上限**（`FAILED_POLL_MAX_MS`），超出即停。恢复为 `ready` 或转为处理中后清空计时标记。
+- **改动文件**：`frontend/src/pages/KnowledgeBasePage.tsx`（仅轮询逻辑；`tsc --noEmit` 通过、组件 lint 0 错误）。
+- **依赖**：M4-8 状态机 + M4-8.1 异步增强（后端可能将 failed 改写为 ready）。
+- **产出**：后端把失败文档自动恢复为就绪时，前端无需手动刷新即可及时显示「已就绪」并可查看/问答；配置错/额度错等真正终态仍提示用户去配置或重试，不浪费轮询。
+
+---
+
 ### 文档处理取消按钮（软取消 + 可中断，M5-3 前置，2026-07-15）[全栈] P1 · 1d ✅ 完成
 
 - **背景**：用户希望在文档「上传 → 就绪」过程中可主动停止处理。当前架构主流程（解析+向量化）在 Python 同步 handler 执行、无中途取消点；仅增强阶段（optimizing）有 `is_cancelled` 守卫。本次实现「软取消」：保留文档记录、标 `cancelled` 终态、清理已写向量、停止增强，并在主流程加最小取消检查点使其真正可中断（即提前落地 M5-3 的多检查点取消守卫核心）。
@@ -1394,15 +1404,61 @@ Python（AI 服务）
 - **依赖**：M4-8.1 增强队列、M5-1
 - **产出**：检索增强从「问答对」扩展到多形态知识块（摘要/推测问题/Auto-Wiki/实体关系），提升模糊问句与「总结/关系」类问题的召回；增强块不进引用来源、不污染预览，且重建不膨胀。
 
-### M5-8 复合检索引擎（pgvector + ES/Qdrant）[Python] P2 · 2d ⬜ 待开始
+### M5-8 复合检索引擎（pgvector 向量 + Elasticsearch BM25）[Python] P2 · 2d ✅ 已完成（2026-07-17）
 
-- **需求**：对齐 业界 `composite`（pgvector + Elasticsearch/Qdrant），双层检索提升召回与规模。
-- **改造**：
-  - `vector_store` 抽象出 `composite` 引擎：向量走 pgvector，关键词/全文走 ES；或双向量库。
-  - 检索 `search` 改为 hybrid 合并（向量 + 关键词）再 Rerank。
-  - 配置化选择引擎（默认 pgvector 单库，可切 composite）。
+- **需求**：对齐业界 `composite`（向量 + 关键词双路召回），提升大规模语料下的召回质量与吞吐；同时为后续"搜索功能"打下统一 ES 索引基础（复用同一索引，不新增基础设施）。对标腾讯 WeKnora：ES 一个引擎同时做 kNN + BM25，RAG 检索只做召回+RRF，Rerank 由现有 `rag.py` 阶段负责，PG 保留为分块权威存储。
+- **已确认方案决策**：
+  - **向量路 = A（推荐，零维度风险）**：向量召回仍走 **pgvector**（本项目 embedding 是"变维度"，pgvector 原生支持；ES `dense_vector` 维度需固定，故向量不迁 ES）。**ES 只负责 BM25 关键词召回 + 未来搜索**。
+  - 复合检索 = `pgvector 向量` + `ES BM25` → 现有 RRF 融合 → Rerank 精排。
+  - 同意**新增 `elasticsearch` 官方客户端依赖**（锁 8.x 以兼容 Python 3.13）；ES 服务端采用**本地 Elasticsearch 7.17**（用户机已装 `D:\Elasticsearch\elasticsearch-7.17.23` 含 IK 中文分词），通过 8.x 客户端「兼容模式」header（`elasticsearch_compat_7=True`）连接，无需降级客户端。`docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.x）已注释保留，可切回。
+- **基础设施**：
+  - ES 服务端用**本地 7.17**（`D:\Elasticsearch\elasticsearch-7.17.23`，含 `analysis-ik` 中文分词），不在 Docker 拉取（docker.elastic.co 走代理 `http.docker.internal:3128` 限速约 0.06 MB/s，1GB 镜像需数小时）；`docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.x）已注释，切回 8.x 时取消注释并设 `elasticsearch_compat_7=false`。
+  - 依赖：`requirements.txt` 加 `elasticsearch==8.17.0`（8.x 客户端以兼容模式连 7.x 服务器）。
+- **配置项**（`core/config.py`，全部走环境变量，不硬编码）：`elasticsearch_enabled`(默认 False，关则完全走旧链路零风险回退) / `elasticsearch_hosts`(env:ES_HOSTS) / `elasticsearch_user`、`elasticsearch_password`(或 `elasticsearch_api_key`) / `elasticsearch_index_prefix`(默认 `xiongda`) / `elasticsearch_request_timeout`(10.0) / `retrieval_es_keyword_topk`(20) / `retrieval_rrf_k`(60) / `retrieval_vector_weight`(0.7) / `retrieval_keyword_weight`(0.3)（RRF 参数复用现有）。
+- **ES 索引设计**：
+  - **每租户一个索引** `{prefix}_{tenant_id}`，首次为该租户存块时惰性创建（理由：ES `dense_vector` 维度须固定，且天然租户隔离，与现有 L1 缓存按 tenant 一致）。
+  - **Mapping 字段**：`content`(text, BM25+高亮) / `embedding`(dense_vector，本期不用于召回，仅随块存储备用) / `doc_id` `kb_id` `tenant_id` `chunk_index` `chunk_type` `page` `source`(keyword) / `metadata`(flattened)。
+  - 检索时 `must_not: terms(chunk_type ∈ AUGMENT_CHUNK_TYPES)` 排除增强块（沿用"增强块不进引用"语义）。
+  - 维度变更兜底：租户切换 embedding 模型导致维度变化时，提供重建/再索引入口（见迁移节）。
+- **`vector_store` 改造**：
+  - 新增 `ElasticsearchStore`（挂在 `vector_store_service`）：
+    - **`store_chunks` 双写**：先写 PG（现有逻辑不变），再 bulk 写 ES（同一 `doc_id` 先 delete-by-query 再插入，幂等，杜绝重复/膨胀）。
+    - **`keyword_search` → ES BM25**：替换自研 BM25（旧逻辑保留为 ES 不可用时的 fallback）。
+    - **`delete_by_doc(doc_id)`**：按 doc_id 清 ES（删除/重建时调用）。
+    - **`search_documents`（为未来搜索铺垫）**：文档级聚合查询（`doc_id` top-hit + `highlight(content)`），本期只实现方法、不接 UI。
+- **`rag.py` 检索改造**：
+  - `elasticsearch_enabled=True` 时，**关键词路改为 ES BM25 召回**；向量路保持 pgvector（方案 A）。
+  - 两路结果送入**现有 RRF 融合 + Rerank**（逻辑不变，仅数据源替换）。
+  - **优雅降级**：ES 调用异常/超时 → 自动回退旧 `pgvector + 自研 BM25`，日志告警，不影响问答。
+  - `enable_multimodal` 等增强块排除、父子块回溯（`attach_parent_contents`）不受影响。
+- **一致性（删除/重建/失效）**：
+  - 文档删除（`DocumentServiceImpl` 调 Python 失效）：新增调 ES `delete_by_doc`。
+  - 增强 worker 重建（`store_chunks` 幂等覆盖）：已含 delete-then-insert，ES 同步覆盖，不膨胀。
+  - 现有 Redis 三层缓存（L1/L2/L3）与 Java 失效逻辑**不动**。
+- **存量迁移**：提供一次性脚本/端点 `POST /ai/admin/reindex-es`：从 PG 读全量 chunk（排除增强块/parent），按租户批量 bulk 写入 ES；启动可配 `elasticsearch_auto_reindex_on_empty=True`（该租户索引为空且 PG 有数据时自动补迁，小数据量场景）。
+- **未来"搜索功能"铺垫（本期只留接口，不接 UI）**：同一 ES 索引直接支持——按文件名/标题搜（`doc_id` 聚合 + `highlight`，对齐 WeKnora `SearchKnowledge`）与内容搜（chunk 级 BM25+向量，对齐 `hybrid-search`）；后续仅需 Java 转发 Controller + 前端搜索页 + Python `/ai/search` 路由，无需再动索引/存储。
+- **测试策略**：
+  - 单元测试（mock ES 客户端）：验证 mapping 创建、bulk 请求体（delete-then-insert 幂等）、BM25 查询构造、`must_not` 增强块过滤、delete-by-doc、降级分支；**旧 pgvector/BM25 测试须全过（无回归）**。
+  - 可选集成测试：加 `ES_TEST_URL` 环境变量守卫，存在真实 ES 时跑端到端（store→search→delete），否则跳过（CI 无 ES 也能绿）。
+- **Java / 前端影响**：M5-8 本身 Java 零改动（检索全在 Python）、前端零改动；未来搜索功能另行立项（Java 转发 + 前端页）。
+- **实施步骤**：① compose 加 ES + config 配置项 + requirements 加 elasticsearch → ② `es_client.py`（连接池 + 每租户索引管理/创建/mapping/dims 解析）→ ③ `ElasticsearchStore`（双写 `store_chunks` + `keyword_search`(BM25) + `delete_by_doc` + `search_documents` 预留）→ ④ `rag.py`（ES 启用时关键词路切 ES + 降级）→ ⑤ 一致性 hook（删除/重建调 ES）+ 存量迁移脚本 → ⑥ 单测(mock)+可选集成(env 守卫) → ⑦ 跑全量 pytest 无回归 → 更新 docs → 提交推送。
 - **依赖**：M5-1、现有 Rerank
-- **产出**：大规模语料下检索质量与吞吐提升。
+- **产出**：大规模语料下检索质量与吞吐提升；统一 ES 索引为后续搜索功能铺路。
+
+- **实现完成（2026-07-17）**：
+  - 代码：新增 `ai-service/services/elasticsearch_store.py`（连接管理 + 双写 `index_chunks` / BM25 `keyword_search` / `delete_by_doc` / 文档级 `search_documents` 预留 / 存量迁移 `reindex_from_pg`·`auto_reindex_missing`，单模块实现，懒加载）；`routers/admin.py` 新增 `POST /ai/admin/reindex-es`；`main.py` 接通启动初始化 + `elasticsearch_auto_reindex_on_empty` 补迁 + 关停关闭 ES。
+  - `vector_store.PgVectorStore` 挂接（仅 `elasticsearch_enabled=True` 时生效）：`store_chunks` 双写、`keyword_search` 切 ES BM25、`delete_by_doc` 同步删；全部 try/except 优雅降级，ES 异常自动回退旧 pgvector+自研 BM25，问答不受影响。
+  - 配置：`core/config.py` 新增 `elasticsearch_enabled`（默认 False，关则零风险回退）、`elasticsearch_compat_7`（默认 True，8.x 客户端连 7.x 兼容模式）等配置项；`docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.17）已注释（改用本地 7.17）；`requirements.txt` 加 `elasticsearch==8.17.0`。
+  - 实现注记：索引名 `{prefix}_{tenant_id}`，`dense_vector` 维度由 `embedding_dimension` 配置驱动（本期 `index:false` 仅存储备用，不用于 kNN，规避变维度报错）；ES BM25 `_score` 经「除以批次 max 再乘 `elasticsearch_bm25_scale`」归一化，量级对齐自研 BM25，保证融合补充门槛行为一致；`get_es_store()` 在关闭时零导入 `elasticsearch` 包，未安装依赖亦不影响旧链路。
+  - 测试：`tests/test_elasticsearch_store.py`（22 例，mock ES 客户端，覆盖索引创建 / bulk 幂等 / BM25 构造与增强块过滤 / 分数归一化 / delete-by-doc / 搜索预留 / 迁移编排 / 降级分支）+ `tests/test_elasticsearch_integration.py`（`ES_TEST_URL` 守卫的可选端到端）；`tests/test_vector_store.py` 11 例无回归。
+  - **2026-07-18 部署修正（本地 ES 7.17 + 兼容模式）**：
+    - ES 服务端由「docker-compose 拉取 ES 8.17」改为**本地 Elasticsearch 7.17**（`D:\Elasticsearch\elasticsearch-7.17.23`，已装 `analysis-ik` 中文分词）。动因：docker.elastic.co 经 Docker 代理 `http.docker.internal:3128` 限速（约 0.06 MB/s，1GB 镜像需数小时）；本地 7.17 + IK 中文 BM25 召回更优且即开即用。
+    - **客户端不降级**（保持 `elasticsearch==8.17.0`）：8.x 客户端经「兼容模式」header（`accept: application/vnd.elasticsearch+json;compatible-with=7`）连 7.x 服务器，规避 `UnsupportedProductError`；新增 `elasticsearch_compat_7` 开关（默认 True，连 8.x 原生时设 False）。
+    - `docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.x）已注释，仅切回 8.x 时取消注释并设 `elasticsearch_compat_7=false`。
+    - **启动要点**：`main.py` 无 `if __name__=="__main__"` 入口，须以 `uvicorn main:app --host 0.0.0.0 --port 8001` 启动（非 `python main.py`，后者仅 import 静默退出）；启用 ES 经环境变量注入 `ELASTICSEARCH_ENABLED=true` / `ELASTICSEARCH_HOSTS=http://localhost:9200` / `ELASTICSEARCH_COMPAT_7=true` / `ELASTICSEARCH_TEXT_ANALYZER=ik_max_word` / `ELASTICSEARCH_AUTO_REINDEX_ON_EMPTY=true`。
+    - **删除一致性修复**：`delete_by_doc` 的 `delete_by_query` 改 `refresh=True`（ES 7.x 仅支持 `true/false`、不支持 `wait_for`），删除后立即可见，避免已删文档短暂仍被 ES 召回；集成测试修复持久 event loop（`setUpClass` 复用同一 loop，规避 `Event loop is closed`）。
+    - **实测验证**：本地 ES 7.17.23——启动连接成功、惰性建索引 `xiongda_{tenant_id}`（dims=1536，7.x mapping 兼容）、`auto_reindex_on_empty` 将 3401 个 PG 块迁移入 ES；单测 22 例全过、集成测试（index→BM25 search→delete 不可见）全过。
+    - **本地开发环境已启用（2026-07-18）**：新建 `ai-service/.env`（仅含 ES 段，`ELASTICSEARCH_ENABLED=true` / `ELASTICSEARCH_HOSTS=http://localhost:9200` / `ELASTICSEARCH_COMPAT_7=true` / `ELASTICSEARCH_TEXT_ANALYZER=ik_max_word`），重启 Python 服务后启动日志出现 `✅ Elasticsearch 检索引擎已就绪`；调 `POST /ai/admin/reindex-es` 从 PG 全量重建索引（返回 `migrated_chunks=3406`）。验证：Python 直连 ES 对真实索引 `xiongda_2075873177644326913` 查"入职指南"返回 62 命中、`ik_max_word` 中文 BM25 召回正常，Top3 为三份"新员工入职指南"文档。自此网页问答关键词路走 ES BM25 与 pgvector 向量 RRF 融合；其余 LLM 等配置仍走系统环境变量，`.env` 不覆盖。
 
 **M5 合计: ~11.5 天**
 
@@ -1762,6 +1818,27 @@ M3 全部 ──→ M4-9 部署
 - ai-service 单测 `pytest tests/test_document_processor.py` → 5 passed（含新增降级测试），无回归。
 - Python 8001 干净重启（PID 25400），`GET /docs` 返回 200，新代码已加载。
 - 注意：该失败文档记录仍停留 `failed`，需在 UI 重新上传 / 重试触发新处理（根因=PDF 提取已修复，后续上传 PDF 不再因此失败）。
+
+### 23. 排查记录：文档「处理失败」实为后端陈旧构建误判（2026-07-18）
+
+**现象**：上传 `Git工作中需要的操作.docx`（514.7KB）后知识库列表显示「处理失败」。
+
+**两次失败的不同根因**：
+- 第一次（13:38）：前端轮询缺陷——后端把 `failed` 改写为 `ready`（重试成功 / 自动恢复）时前端不刷新（见上方「前端状态轮询修复」小节），已于 7/18 修复。
+- 第二次（14:01:47）：本机运行的 Java 后端是 **M5-1 落地前的陈旧构建**。后端进程 PID 23004 启动于 7/17 12:51:36，早于 `DocumentServiceImpl.java` 源码最后修改时间 7/17 21:36:21（M5-4 提交）。旧 jar 的 `triggerDocumentProcessing` 把 Python 入队返回的 `status=processing`（入队成功）误判进失败分支，置 `failed` + `error=未知错误`；随后 Python worker 经回调推 `retrieving/optimizing/ready`，但 Java `updateDocumentStatus` 的终态守卫拒绝「failed → 中间态」，日志报「尝试回推状态被拒（当前终态）」，文档卡在 `failed`。
+
+**决定性日志证据**（后端日志）：
+- `14:01:47.544 [doc-process-5] [文档诊断] Python入队返回 docId=2078359558363791362 耗时=20ms result={doc_id=..., status=processing}`
+- `14:01:47.565 WARN 文档入队失败: ... errorType=null, error=未知错误`（置 failed）
+- `14:01:53.343 WARN 尝试回推状态被拒（当前终态）docId=... current=failed, next=retrieving`
+
+矛盾点：源码（7/17 21:36）收到 `processing` 绝不走失败分支，但运行 jar 走了 → 运行的是 M5-1 之前的陈旧构建。实测 `POST /ai/document/process` 返回 `{"status":"processing"}` 正确，进一步佐证运行实例与源码不一致。
+
+**修复**：`taskkill /F /PID 1532 /PID 23004`（maven 父进程 + 后端）终止陈旧进程，再用 `Start-Process mvn.cmd -ArgumentList "spring-boot:run" -WorkingDirectory backend` 干净重启加载 7/17 21:36 的 M5-4 源码（新 PID 37668，14:20:06 启动，Tomcat 8080 正常监听、HikariPool 正常）。重启后查询 PostgreSQL，新文档 `2078359558363791362` 已由 Python worker 回调 `ready` 自动修复（`error_msg` 空、`model_config_error=f`、`quota_error=f`）。
+
+**结论**：本次失败**非代码 bug**，是开发过程中「源码已改但运行实例未重启」导致的陈旧构建误判。重启后端加载新代码后，文档状态由 Python worker 回调 `ready` 自动修复，刷新前端即可查看 / 问答。
+
+**关联**：M5-1（processing 成功判定）、上方「前端状态轮询修复」（7/18）、M5-4。
 
 
 

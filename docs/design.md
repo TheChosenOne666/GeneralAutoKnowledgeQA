@@ -332,7 +332,16 @@ LLM 生成回答（SSE 流式输出）
 > - **检索行为**：增强块参与向量/BM25 召回提升语义桥接，但默认排除为引用来源（`retrieval_exclude_augment_blocks`，与 qa 同语义）；`get_document_pages`/BM25 warmup 同样排除，避免预览/关键词噪声。
 > - **生效条件**：已有文档需重新向量化（重新上传/处理）才会生成扩展增强块；新上传文档自动带 qa + 扩展增强。
 
-
+> **M5-8 复合检索引擎（pgvector 向量 + Elasticsearch BM25，2026-07-17 方案确认，待实现）**：（ES 一个引擎同时做 kNN + BM25，RAG 检索只做召回+RRF，Rerank 由现有 `rag.py` 阶段负责，PG 保留为分块权威存储），引入 ES 提供工业级 BM25 关键词召回，与向量路做 RRF 融合，并为后续"搜索功能"打下统一 ES 索引基础（复用同一索引，不新增基础设施）：
+> - **已确认决策**：① 向量路 = A（零维度风险）——向量召回仍走 **pgvector**（本项目 embedding 变维度，pgvector 原生支持；ES `dense_vector` 维度须固定，故向量不迁 ES），**ES 只负责 BM25 关键词召回 + 未来搜索**；复合检索 = `pgvector 向量` + `ES BM25` → 现有 RRF → Rerank。② 同意新增 `elasticsearch` 官方客户端依赖 + `docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.x，已注释改用本地 7.17 + 8.x 客户端兼容模式）。
+> - **索引设计**：每租户一个索引 `{prefix}_{tenant_id}`（惰性创建，固定 `dense_vector` 维度 + 天然租户隔离）；字段 `content`(text,BM25+高亮) / `embedding`(dense_vector,本期不召回仅备用) / `doc_id` `kb_id` `tenant_id` `chunk_index` `chunk_type` `page` `source`(keyword) / `metadata`(flattened)；检索时 `must_not` 排除 `AUGMENT_CHUNK_TYPES` 增强块。
+> - **存储与检索改造**：新增 `ElasticsearchStore`——`store_chunks` 双写 PG+ES（同 doc_id delete-then-insert 幂等）；`keyword_search` 改走 ES BM25（旧自研 BM25 保留为 fallback）；`delete_by_doc` 清 ES；预留 `search_documents`（文档级聚合+高亮，供未来搜索）。`rag.py` 在 `elasticsearch_enabled=True` 时关键词路切 ES，两路送现有 RRF+Rerank；**ES 异常自动降级回旧链路**，不影响问答。
+> - **一致性与迁移**：文档删除/增强重建同步调 ES（幂等覆盖，不膨胀）；现有 Redis 三层缓存与 Java 失效逻辑不动；提供 `POST /ai/admin/reindex-es` 存量迁移 + `elasticsearch_auto_reindex_on_empty` 启动补迁。
+> - **未来搜索铺垫**：同一 ES 索引直接支撑——按文件名/标题搜（`doc_id` 聚合+highlight，对齐 WeKnora `SearchKnowledge`）与内容搜（chunk 级 BM25+向量，对齐 `hybrid-search`）；后续仅需 Java 转发 + 前端页 + Python `/ai/search` 路由，无需再动索引/存储。
+> - **测试**：mock ES 客户端单测（mapping/bulk 幂等/BM25 构造/增强块过滤/delete-by-doc/降级）+ `ES_TEST_URL` 守卫的可选集成测试；旧 pgvector/BM25 测试须全过（无回归）。M5-8 本身 Java、前端零改动。
+> - **实现（2026-07-17）**：代码落地于 `ai-service/services/elasticsearch_store.py`（单模块、懒加载；`get_es_store()` 在 `elasticsearch_enabled=False` 时零导入 `elasticsearch` 包，未装依赖不影响旧链路）；`vector_store.PgVectorStore` 在开关开启时双写 / 切 BM25 / 同步删并优雅降级；`routers/admin.py` 加 `POST /ai/admin/reindex-es`；索引 `{prefix}_{tenant_id}`，`dense_vector` 维度由 `embedding_dimension` 驱动（本期 `index:false` 不用于 kNN），BM25 `_score` 归一化（除以批次 max 再乘 `elasticsearch_bm25_scale`）对齐自研 BM25 量级；`docker-compose.yml` 的 `xiongda-elasticsearch`（ES 8.17，已注释改用本地 7.17），`requirements.txt` 加 `elasticsearch==8.17.0`（8.x 客户端兼容模式连 7.x 服务器）。
+> - **2026-07-18 部署修正（本地 ES 7.17 + 兼容模式）**：服务端由 docker 拉取 8.17 改为**本地 7.17**（含 IK 中文分词，docker.elastic.co 走代理限速数小时）；客户端保持 8.x 经「兼容模式」header（`elasticsearch_compat_7=True`）连 7.x，规避 `UnsupportedProductError`；`delete_by_doc` 的 `delete_by_query` 改 `refresh=True`（ES 7.x 不支持 `wait_for`）保证删除立即可见；`main.py` 须以 `uvicorn main:app` 启动（无 `__main__` 入口）；实测连接/建索引/3401 块迁移/单测 22 例 + 集成全过。
+> - **2026-07-18 本地开发环境启用**：新建 `ai-service/.env`（仅 ES 段：`ELASTICSEARCH_ENABLED=true` / `ELASTICSEARCH_HOSTS=http://localhost:9200` / `ELASTICSEARCH_COMPAT_7=true` / `ELASTICSEARCH_TEXT_ANALYZER=ik_max_word`），重启 Python 服务加载后启动日志出现 `✅ Elasticsearch 检索引擎已就绪`；调 `POST /ai/admin/reindex-es` 全量重建索引（`migrated_chunks=3406`）。自此问答关键词路走 ES BM25 + pgvector 向量 RRF 融合，旧自研 BM25 作为 ES 异常时的降级链路保留。详见 `docs/task-breakdown.md` M5-8。
 
 > **Embedding 并发化（2026-07-16 修复）**：多模态 Embedding 端点（`doubao-embedding-vision` 的 `/embeddings/multimodal`）单次仅支持单条 input，原实现逐条串行，大文档（分块数千）整段向量化可达 10 分钟、且取消无法中断。改为 `asyncio.Semaphore(embedding_concurrency=16)` 限流并发 + 429/5xx 退避重试（详见 task-breakdown M4）。纯文本文档建议用标准 `doubao-embedding`（批量、秒级）。
 
@@ -388,7 +397,7 @@ Final Answer: 年假...病假...区别...
 > 5. M5-5 父子分块（parent/child chunk）✅
 > 6. M5-6 多模态增强（图片 OCR + VLM caption）✅
 > 7. M5-7 GraphRAG + Auto-Wiki + 摘要/问题 ✅
-> 8. M5-8 复合检索引擎（pgvector + ES/Qdrant）⬜
+> 8. M5-8 复合检索引擎（pgvector + 本地 Elasticsearch 7.17 BM25）✅
 >
 > 实现顺序：M5-1 → M5-2 → M5-3 → M5-4 → M5-5 → M5-6 → M5-7 → M5-8（先主流程健壮性，后可观测性与功能广度，逐个实现）。
 
@@ -662,9 +671,13 @@ Java triggerDocumentProcessing：发请求后置 status=parsing；仅当 Python 
 
 > **M5-2 主流程重试机制（2026-07-17，已落地）**：在 M5-1 队列基础上叠加失败重试（对标 Asynq `MaxRetry(3)` + 退避）。任务新增 `retry` 字段；`run_process_worker` 每轮先 `promote_delayed()` 把到期的延迟重试任务搬回主队列。重试分流（`_run_process_task`）：`ModelConfigError`（密钥/模型名/维度）**不可重试**，直接回调 `failed` + `model_config_error=True`；其余瞬时异常（网络/`ModelQuotaError` 限流/DB 瞬时错误）按 `retry` 计数经 `requeue_delayed` 写入延迟 zset `xiongda:doc:delayed`（score = `next_attempt_at = now + backoff_delay(attempt)`，指数退避 30/60/120s 封顶 600s），到期后由 worker 重新执行；达 `MAX_RETRY=3` 上限回调 `failed`（error_msg 含「已重试 N 次」）。PG `store_chunks` 先删后插保证重试幂等、不重复分块；延迟任务持久化于 zset，服务重启后到期即恢复。详见 `docs/task-breakdown.md` M5-2。
 
-> **M5 规划**：M5-1 / M5-2 / M5-3 / M5-4 / M5-5 / M5-6 / M5-7 已完成；剩余 M5-8 复合检索将在后续对标业界成熟方案（见 `docs/task-breakdown.md` M5）。
+> **M5 规划**：M5-1 ~ M5-7 已完成；M5-8 复合检索引擎（本地 Elasticsearch 7.17 BM25 + pgvector 向量 RRF 融合）**已完成（2026-07-17 实现，2026-07-18 切本地 7.17 兼容模式）**（见 `docs/task-breakdown.md` M5-8）。
 
 > **M5-4 阶段化 span 时间线追踪（2026-07-17 已落地）**：文档处理全程拆成带时间线与指标的阶段——解析(parsing) → 分块(chunking) → 向量化(embedding) → 入库(indexing) → 增强(optimizing)。Python 经 `_StageTimer` 上下文管理器在每阶段边界回调 `notify_stage`（best-effort POST `/api/internal/document/stage`，携带 `startedAt/endedAt/elapsedMs/error/metrics`），Java `recordDocumentStage` 按 `stage` 幂等合并写入文档 `process_stages`（TEXT JSON 数组）；前端 `KnowledgeBasePage` 状态单元格下以 `StageTimeline` 展示阶段链（done 绿✓+耗时 / failed 红✕ / active 旋转符），便于细粒度进度观察与失败定位。详见 `docs/task-breakdown.md` M5-4。
+
+> **前端状态轮询修复（2026-07-18）**：`KnowledgeBasePage` 列表状态轮询原仅在 `processing/parsing/retrieving/optimizing` 时每 3 秒刷新；一旦状态变为终态 `failed` 即停止轮询，导致后端把 `failed` 改写成 `ready`（重试成功 / 自动恢复）时前端无法自动感知，需手动刷新。修复后轮询条件扩展为「处理中四态 **或** 可自动恢复的 `failed`」——即 `status=failed` 且非 `modelConfigError` 且非 `quotaError`（这两类为须人工干预的终态，不轮询）。对可恢复 `failed` 的轮询加 5 分钟窗口上限（`FAILED_POLL_MAX_MS`），避免永久失败文档空转；恢复为 `ready` 或转回处理中后清空计时标记。详见 `docs/task-breakdown.md` 对应小节。
+
+> **排查闭环（2026-07-18）：文档「处理失败」= 后端陈旧构建误判**：当天 `Git工作中需要的操作.docx` 两次显示「处理失败」。第一次（13:38）为上述前端轮询缺陷（已修）；第二次（14:01:47）根因是**运行中的 Java 后端为 M5-1 之前的陈旧 jar**（PID 23004 启动 7/17 12:51，早于 `DocumentServiceImpl.java` 源码 7/17 21:36 修改）——旧逻辑把 Python 入队返回的 `status=processing` 误判进失败分支置 `failed` + `未知错误`，其后的 `retrieving/optimizing/ready` 回调被终态守卫拒绝。重启后端（PID 37668，加载 7/17 21:36 源码）后，该文档已由 Python worker 回调 `ready` 自动修复。结论：本次非代码 bug，而是「源码改了但运行实例未重启」导致的陈旧构建问题，重启即恢复。详见 `docs/task-breakdown.md` §23。
 
 ### 9.3 RAG 问答全链路（含三层缓存）
 

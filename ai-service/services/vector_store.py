@@ -31,6 +31,34 @@ def _exclude_chunk_types_sql(types: tuple[str, ...]) -> str:
     )
 
 
+async def _es_sync_chunks(chunks: list[dict], kb_id: str, doc_id: str, tenant_id: str) -> None:
+    """M5-8：双写分块到 ES（幂等）。ES 未启用或调用失败均静默降级，不影响 PG 主路径。"""
+    if not settings.elasticsearch_enabled:
+        return
+    try:
+        from services.elasticsearch_store import get_es_store
+
+        es = get_es_store()
+        if es:
+            await es.index_chunks(chunks, kb_id, doc_id, tenant_id)
+    except Exception as e:  # noqa: BLE001 - ES 为增强索引，失败不应中断检索
+        logger.warning(f"[ES] 双写分块失败 doc_id={doc_id}，降级仅 PG: {e}")
+
+
+async def _es_delete_doc(doc_id: str) -> None:
+    """M5-8：从 ES 删除文档分块。未启用或失败静默降级。"""
+    if not settings.elasticsearch_enabled:
+        return
+    try:
+        from services.elasticsearch_store import get_es_store
+
+        es = get_es_store()
+        if es:
+            await es.delete_by_doc(doc_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ES] 删除分块失败 doc_id={doc_id}: {e}")
+
+
 @dataclass
 class RetrievalResult:
     """单条检索结果。
@@ -385,6 +413,8 @@ class PgVectorStore:
         ]
         self._bm25_records.extend(new_records)
         logger.info(f"[PgVectorStore] 落库 doc_id={doc_id} 分块数={len(rows)}")
+        # M5-8：双写 ES 可搜索索引（幂等；失败降级仅 PG）
+        await _es_sync_chunks(chunks, kb_id, doc_id, tenant_id)
 
     async def search(
         self,
@@ -474,6 +504,16 @@ class PgVectorStore:
         Args:
             chunk_types: 仅返回该列表内的 ``chunk_type``；为 None 不限制。
         """
+        # M5-8：ES 启用时改用 ES 工业级 BM25 召回；失败自动降级自研 BM25（下方兜底逻辑）
+        if settings.elasticsearch_enabled:
+            try:
+                from services.elasticsearch_store import get_es_store
+
+                es = get_es_store()
+                if es:
+                    return await es.keyword_search(query, kb_ids, tenant_id, top_k, chunk_types)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[ES] BM25 检索失败，降级自研 BM25: {e}")
         # 常规检索默认排除 outline 与 parent 块（chunk_types=None），大纲意图显式传 ["outline"]；
         # parent 父块仅供回溯上下文，任何情况都不进关键词检索。
         def _type_ok(meta):
@@ -499,6 +539,8 @@ class PgVectorStore:
             r for r in self._bm25_records if r.metadata.get("doc_id") != doc_id
         ]
         logger.info(f"[PgVectorStore] 删除向量 doc_id={doc_id}")
+        # M5-8：同步删除 ES 分块
+        await _es_delete_doc(doc_id)
 
     async def get_original_chunks(self, doc_id: str) -> list[dict]:
         """读回文档的原始子块（排除增强块 qa/question/summary/wiki/entity 与 parent 父块），供增强 worker 重建（不依赖上传文件是否仍在）。

@@ -15,10 +15,11 @@ from loguru import logger
 
 from core.config import settings
 from core.pg_client import close_pg_pool, get_pg_pool
-from routers import chat, document, cache
+from routers import admin, cache, chat, document
 from services.augment_queue import sweep_stale
 from services.document_processor import document_processor
 from services.process_queue import sweep_stale as sweep_process_stale
+from services.elasticsearch_store import close_es, get_es_store
 from services.vector_store import PgVectorStore, ensure_embeddings_table, vector_store_service
 
 
@@ -34,6 +35,15 @@ async def lifespan(app: FastAPI):
         logger.info("✅ 向量持久化（pgvector）初始化完成")
     except Exception as e:
         logger.error(f"❌ 向量持久化初始化失败（检索将不可用）: {e}")
+    # M5-8：Elasticsearch 检索引擎（若启用）。构造即建立连接；启动补迁「PG 有数据但 ES 缺失」的租户
+    if settings.elasticsearch_enabled:
+        try:
+            es = get_es_store()
+            if es and settings.elasticsearch_auto_reindex_on_empty:
+                await es.auto_reindex_missing()
+            logger.info("✅ Elasticsearch 检索引擎已就绪" if es else "⚠️ ES 未初始化")
+        except Exception as e:
+            logger.error(f"❌ Elasticsearch 初始化失败（检索回退 pgvector+BM25）: {e}")
     # 问答增强队列：恢复上次崩溃残留的 processing 任务，并启动常驻 worker
     # （对齐 业界 finalizing（异步增强） 任务队列：持久化、重启可恢复、不丢任务）
     try:
@@ -64,6 +74,7 @@ async def lifespan(app: FastAPI):
         await process_worker_task
     except asyncio.CancelledError:
         pass
+    await close_es()
     await close_pg_pool()
     logger.info("👋 熊答 AI 服务已关闭")
 
@@ -85,6 +96,7 @@ app.add_middleware(
 app.include_router(chat.router, prefix="/ai")
 app.include_router(document.router, prefix="/ai")
 app.include_router(cache.router, prefix="/ai")
+app.include_router(admin.router, prefix="/ai")
 
 
 @app.get("/health")

@@ -1,5 +1,7 @@
 """熊答 AI 服务 — 配置。"""
 
+from pydantic import AliasChoices, Field
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,6 +79,32 @@ class Settings(BaseSettings):
     vector_store_type: str = "pgvector"
     milvus_host: str = "localhost"
     milvus_port: int = 19530
+
+    # Elasticsearch（M5-8 复合检索 + 未来搜索索引）：ES 负责工业级 BM25 关键词召回，
+    # 与 pgvector 向量路做 RRF 融合；PG 仍是分块权威存储。向量召回仍走 pgvector（方案 A：
+    # ES dense_vector 维度需固定、本项目 embedding 变维度，故向量不迁 ES）。
+    # ES 启用需 docker-compose 启动 xiongda-elasticsearch 服务，并安装 elasticsearch 依赖。
+    elasticsearch_enabled: bool = False  # M5-8 总开关；关则完全走旧 pgvector+自研 BM25，零风险回退
+    elasticsearch_hosts: str = Field(
+        default="http://localhost:9200",
+        validation_alias=AliasChoices("ES_HOSTS", "ELASTICSEARCH_HOSTS"),
+    )  # ES 地址（逗号分隔多节点）
+    elasticsearch_user: str = Field(default="", validation_alias=AliasChoices("ES_USER", "ELASTICSEARCH_USER"))
+    elasticsearch_password: str = Field(default="", validation_alias=AliasChoices("ES_PASSWORD", "ELASTICSEARCH_PASSWORD"))
+    elasticsearch_api_key: str = Field(default="", validation_alias=AliasChoices("ES_API_KEY", "ELASTICSEARCH_API_KEY"))
+    elasticsearch_index_prefix: str = "xiongda"  # ES 索引名前缀（每租户一索引 {prefix}_{tenant_id}）
+    elasticsearch_request_timeout: float = 10.0
+    # 兼容模式：True 时 8.x 客户端以「compatible-with=7」header 连接 7.x 服务器
+    # （当前本地方案为 Elasticsearch 7.17，故默认 True）。若改连 8.x 服务器则设 False。
+    elasticsearch_compat_7: bool = True
+    elasticsearch_auto_reindex_on_empty: bool = False  # 启动时为「PG 有数据但 ES 索引缺失」的租户自动补迁
+    retrieval_es_keyword_topk: int = 20  # ES BM25 召回数
+    # content 字段分词器：默认 standard（中英文可用）；服务器装 IK 插件后可设 "ik_max_word"
+    # 以按中文词粒度分词，显著提升中文 BM25 召回质量。未装 IK 时切勿设 ik_max_word，否则建索引报错。
+    elasticsearch_text_analyzer: str = "standard"
+    # ES BM25 _score 归一化基准：ES _score 与自研 BM25 量纲不同，除以批次内 max 再乘此值，
+    # 使其最佳命中≈自研 BM25 量级，保证 _merge_vector_dominant 的 BM25 补充门槛行为一致。
+    elasticsearch_bm25_scale: float = 5.0
 
     # Postgres（向量持久化存储，默认与 Java 后端同源；可用 .env 覆盖）
     pg_host: str = "localhost"

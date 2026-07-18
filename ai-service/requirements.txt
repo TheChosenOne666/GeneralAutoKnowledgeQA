@@ -33,3 +33,10 @@ numpy==2.2.1
 
 # Redis（与 Java 后端共用同一实例，实现 L1 检索结果 / L2 嵌入向量 / L3 会话缓存）
 redis==5.2.1
+
+# Elasticsearch（M5-8 复合检索 + 未来搜索索引）：工业级 BM25 关键词召回。
+# 客户端锁 8.x（兼容 Python 3.13），当前连接本地 Elasticsearch 7.17
+# （D:\Elasticsearch\elasticsearch-7.17.23，含 IK 中文分词），通过「兼容模式」header
+# （config.elasticsearch_compat_7=True）与之通信，无需降级客户端。若改连 8.x 服务器，
+# 将 elasticsearch_compat_7 设为 false 即可走原生协议。
+elasticsearch==8.17.0
