@@ -5,12 +5,15 @@ import com.xiongda.common.BaseResponse;
 import com.xiongda.common.ResultUtils;
 import com.xiongda.model.dto.chat.ChatRequest;
 import com.xiongda.model.dto.chat.RenameConversationRequest;
+import com.xiongda.model.entity.ChatAttachment;
 import com.xiongda.model.entity.User;
 import com.xiongda.model.vo.ConversationVO;
 import com.xiongda.model.vo.MessageVO;
 import com.xiongda.service.AiConfigService;
+import com.xiongda.service.ChatAttachmentService;
 import com.xiongda.service.ChatService;
 import com.xiongda.service.UserService;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.Resource;
@@ -56,6 +59,9 @@ public class ChatController {
 
     @Resource
     private AiConfigService aiConfigService;
+
+    @Resource
+    private ChatAttachmentService chatAttachmentService;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -143,6 +149,11 @@ public class ChatController {
         Map<String, Object> aiConfig = AiServiceClient.toAiConfigMap(rawConfig);
         log.info("[M3-3诊断] 透传给Python的ai_config={}",
                 aiConfig == null ? "NULL(走env兜底)" : aiConfig.keySet());
+
+        // M5-9 多模态问答：把 imageIds / attachmentIds 解析为文件绝对路径透传给 Python
+        List<String> imagePaths = resolveAttachmentPaths(req.getImageIds(), loginUser.getTenantId(), "image");
+        List<String> attachmentPaths = resolveAttachmentPaths(req.getAttachmentIds(), loginUser.getTenantId(), "attachment");
+
         Flux<DataBuffer> upstream = aiServiceClient.chatStream(
                 req.getContent(),
                 convId,
@@ -151,7 +162,9 @@ public class ChatController {
                 req.getMode(),
                 loginUser.getTenantId(),
                 req.getHistory(),
-                aiConfig
+                aiConfig,
+                imagePaths,
+                attachmentPaths
         );
 
         StringBuilder rawBuf = new StringBuilder();
@@ -305,5 +318,30 @@ public class ChatController {
             return null;
         }
         return "event: " + eventType + "\ndata: " + data + "\n\n";
+    }
+
+    /**
+     * 解析问答请求中携带的附件 ID 列表为文件绝对路径列表（带租户隔离 + 分类校验）。
+     *
+     * <p>M5-9 多模态问答：前端传 imageIds / attachmentIds，Java 解析为路径透传给 Python。
+     * 不存在的 ID 或跨租户的记录会被静默跳过（不抛错，避免阻塞主问答流程）。</p>
+     *
+     * @param ids       附件 ID 列表（可能为 null 或空）
+     * @param tenantId  当前租户 ID
+     * @param category  限定分类（image / attachment），与请求字段对应，防止前端把 attachment 当 image 传
+     * @return 文件绝对路径列表（保持 ids 顺序，过滤掉无效项）
+     */
+    private List<String> resolveAttachmentPaths(List<Long> ids, Long tenantId, String category) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        List<ChatAttachment> attachments = chatAttachmentService.listByIdsAndTenant(ids, tenantId, category);
+        List<String> paths = new ArrayList<>();
+        for (ChatAttachment a : attachments) {
+            if (a.getFilePath() != null && !a.getFilePath().isBlank()) {
+                paths.add(a.getFilePath());
+            }
+        }
+        return paths;
     }
 }

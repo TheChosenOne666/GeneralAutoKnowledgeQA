@@ -8,6 +8,8 @@ import 'highlight.js/styles/github.css'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { chatApi } from '@/api/chat'
+import { api } from '@/api/client'
+import type { ChatAttachmentVO } from '@/api/chat'
 import { aiConfigApi } from '@/api/aiConfig'
 import { knowledgeApi } from '@/api/knowledge'
 import type { FileStatus, DocumentPage } from '@/api/knowledge'
@@ -389,6 +391,12 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   // 问答模式（知识库 / 联网搜索 / 智能推理 Agent），默认知识库
   const [mode, setMode] = useState<'rag' | 'web' | 'agent'>('rag')
+  // 问答模式切换下拉的开关状态（M4-3 优化：三个独立按钮改为单下拉框）
+  const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const modeMenuRef = useRef<HTMLDivElement>(null)
+  // 对话模型下拉（提前声明以供 effect 使用）
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const modelMenuRef = useRef<HTMLDivElement>(null)
   const loadToken = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -397,6 +405,44 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const followRef = useRef(false)
+
+  // M5-9 问答时携带的图片 / 附件（临时上下文，发送后清空）
+  const [images, setImages] = useState<ChatAttachmentVO[]>([])
+  const [attachments, setAttachments] = useState<ChatAttachmentVO[]>([])
+  // 图片缩略图 blob URL 映射（<img src> 无法带 JWT header，用 blob URL 替代）
+  const [imageBlobUrls, setImageBlobUrls] = useState<Record<string, string>>({})
+
+  // images 变化时，用带认证的 axios 下载图片转 blob URL
+  useEffect(() => {
+    const newImages = images.filter((img) => !imageBlobUrls[img.id])
+    if (newImages.length === 0) return
+    const fetchBlobs = async () => {
+      const entries = await Promise.all(
+        newImages.map(async (img) => {
+          try {
+            // img.url 已含 /api 前缀，api baseURL 也是 /api，需去掉避免双重
+            const res = await api.get(img.url.replace(/^\/api/, ''), { responseType: 'blob' })
+            return [img.id, URL.createObjectURL(res.data)] as const
+          } catch {
+            return [img.id, ''] as const
+          }
+        }),
+      )
+      setImageBlobUrls((prev) => {
+        const next = { ...prev }
+        for (const [id, url] of entries) {
+          if (url) next[id] = url
+        }
+        return next
+      })
+    }
+    fetchBlobs()
+    // eslint-disable-line react-hooks/exhaustive-deps
+  }, [images])
+  // 上传中状态：'image' | 'attachment' | null
+  const [uploading, setUploading] = useState<'image' | 'attachment' | null>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
 
   const handleScroll = () => {
     const el = scrollRef.current
@@ -408,6 +454,72 @@ export default function ChatPage() {
     const el = scrollRef.current
     if (el) el.scrollTo({ top: el.scrollHeight, behavior })
   }
+
+  // 问答模式下拉：点击组件外侧时自动关闭
+  useEffect(() => {
+    if (!modeMenuOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) {
+        setModeMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [modeMenuOpen])
+
+  // 模型下拉：点击组件外侧时自动关闭
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setModelMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [modelMenuOpen])
+
+  /** 选择图片文件 → 上传 → 加入图片列表（M5-9 多模态问答）。*/
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      setUploading('image')
+      const vo = await chatApi.uploadAttachment('image', file)
+      setImages((prev) => [...prev, vo])
+    } catch (err) {
+      console.error('图片上传失败:', err)
+      alert(err instanceof Error ? `图片上传失败：${err.message}` : '图片上传失败')
+    } finally {
+      setUploading(null)
+      e.target.value = '' // 清空 input，允许重复选同一文件
+    }
+  }
+
+  /** 选择附件文件 → 上传 → 加入附件列表（M5-9 一次性文档问答）。*/
+  const handleAttachmentSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      setUploading('attachment')
+      const vo = await chatApi.uploadAttachment('attachment', file)
+      setAttachments((prev) => [...prev, vo])
+    } catch (err) {
+      console.error('附件上传失败:', err)
+      alert(err instanceof Error ? `附件上传失败：${err.message}` : '附件上传失败')
+    } finally {
+      setUploading(null)
+      e.target.value = ''
+    }
+  }
+
+  /** 移除已上传图片（M5-9）。*/
+  const removeImage = (id: string) => setImages((prev) => prev.filter((img) => img.id !== id))
+
+  /** 移除已上传附件（M5-9）。*/
+  const removeAttachment = (id: string) =>
+    setAttachments((prev) => prev.filter((att) => att.id !== id))
+
   const [missingModels, setMissingModels] = useState<('llm' | 'embedding')[]>([])
   // 模型配置「填了但填错」（API Key/模型名等运行时错误），由 Python 的 error 事件触发
   const [modelConfigError, setModelConfigError] = useState(false)
@@ -417,7 +529,6 @@ export default function ChatPage() {
   // 对话模型下拉：从 AI 配置读取可选模型并支持切换
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
 
   /** 配置中可用的 LLM 模型（去重：默认模型 + 多模型列表）。*/
   const availableModels = useMemo(() => {
@@ -544,6 +655,10 @@ export default function ChatPage() {
         controller.signal,
         selectedModel || undefined,
         mode,
+        // M5-9：携带图片 / 附件（知识库不再从输入框选，传空数组走租户全库）
+        [],
+        images.map((img) => img.id),
+        attachments.map((att) => att.id),
       )
       const decoder = new TextDecoder()
       let buffer = ''
@@ -646,6 +761,14 @@ export default function ChatPage() {
     } finally {
       setStreaming(false)
       followRef.current = false
+      // M5-9：发送完成后清空已上传的图片 / 附件（临时上下文，不跨会话）
+      setImages([])
+      setAttachments([])
+      // 回收 blob URL
+      setImageBlobUrls((prev) => {
+        Object.values(prev).forEach((url) => url && URL.revokeObjectURL(url))
+        return {}
+      })
     }
   }
 
@@ -796,23 +919,72 @@ export default function ChatPage() {
       {/* 底部输入区（固定底部） */}
       <div className="flex-shrink-0 px-6 py-5 bg-white border-t border-emerald-100">
         <div className="max-w-3xl mx-auto">
-          {/* 知识库标签 */}
-          <div className="flex gap-2 mb-2">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-brand-700 text-xs font-medium border border-emerald-200">
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
-              </svg>
-              测试
-              <button className="ml-1 hover:text-brand-900">
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-          </div>
+          {/* 已上传图片/附件预览（M5-9） */}
+          {(images.length > 0 || attachments.length > 0) && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {/* 已上传图片缩略图 */}
+              {images.map((img) => (
+                <span
+                  key={img.id}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-50 text-brand-700 text-xs font-medium border border-emerald-200"
+                >
+                  <img src={imageBlobUrls[img.id] || ''} alt={img.filename} className="w-6 h-6 rounded object-cover" />
+                  <span className="max-w-[80px] truncate">{img.filename}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeImage(img.id)}
+                    className="ml-1 hover:text-brand-900"
+                    title="移除图片"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </span>
+              ))}
+              {/* 已上传附件文件名 */}
+              {attachments.map((att) => (
+                <span
+                  key={att.id}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-50 text-slate-600 text-xs font-medium border border-slate-200"
+                >
+                  <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.667 7.667" />
+                  </svg>
+                  <span className="max-w-[120px] truncate">{att.filename}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(att.id)}
+                    className="ml-1 hover:text-slate-900"
+                    title="移除附件"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
 
-          {/* 输入框 */}
-          <div className="bg-white border border-emerald-200 rounded-2xl shadow-lg shadow-emerald-100/50 overflow-hidden focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-500/20 transition-all">
+          {/* 隐藏的文件选择 input（M5-9） */}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+            className="hidden"
+            onChange={handleImageSelect}
+          />
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            accept=".pdf,.docx,.txt,.md"
+            className="hidden"
+            onChange={handleAttachmentSelect}
+          />
+
+          {/* 输入框 — 注意不能用 overflow-hidden，否则上弹的问答模式下拉会被裁掉（M4-3 UI 优化） */}
+          <div className="bg-white border border-emerald-200 rounded-2xl shadow-lg shadow-emerald-100/50 focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-500/20 transition-all">
             <textarea
               ref={textareaRef}
               value={input}
@@ -834,38 +1006,110 @@ export default function ChatPage() {
             />
             <div className="px-3 pb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {/* 问答模式切换（知识库 / 联网搜索 / 智能推理 Agent，M4-3） */}
-                <div className="flex items-center gap-0.5 bg-emerald-50 border border-emerald-200 rounded-lg p-0.5">
+                {/* 问答模式切换下拉（知识库 / 联网搜索 / 智能推理 Agent，M4-3） */}
+                <div className="relative" ref={modeMenuRef}>
                   <button
-                    onClick={() => setMode('rag')}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'rag' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
+                    type="button"
+                    onClick={() => setModeMenuOpen((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition ${
+                      modeMenuOpen || mode !== 'rag'
+                        ? 'border-emerald-300 bg-emerald-50 text-brand-700'
+                        : 'border-emerald-200 text-slate-600 hover:bg-emerald-50 hover:text-brand-700'
+                    }`}
                   >
-                    知识库
-                  </button>
-                  <button
-                    onClick={() => setMode('web')}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'web' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
-                  >
-                    联网搜索
-                  </button>
-                  <button
-                    onClick={() => setMode('agent')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition ${mode === 'agent' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-brand-600'}`}
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+                    {/* 知识库图标 */}
+                    {mode === 'rag' && (
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                      </svg>
+                    )}
+                    {/* 联网搜索图标（地球） */}
+                    {mode === 'web' && (
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5a17.92 17.92 0 0 1-8.716-2.247m0 0A9 9 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
+                      </svg>
+                    )}
+                    {/* 智能推理图标（闪电） */}
+                    {mode === 'agent' && (
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+                      </svg>
+                    )}
+                    {mode === 'rag' ? '知识库' : mode === 'web' ? '联网搜索' : '智能推理'}
+                    <svg className={`w-3 h-3 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
                     </svg>
-                    智能推理
                   </button>
+                  {modeMenuOpen && (
+                    <div className="absolute bottom-full mb-2 left-0 w-52 rounded-xl border border-emerald-200 bg-white shadow-lg py-1 z-20">
+                      {[
+                        { key: 'rag' as const, label: '知识库', desc: '基于知识库内容回答', icon: 'book' },
+                        { key: 'web' as const, label: '联网搜索', desc: '从互联网搜索最新信息', icon: 'web' },
+                        { key: 'agent' as const, label: '智能推理', desc: '多步推理并自动调用工具', icon: 'agent' },
+                      ].map((opt) => {
+                        const active = mode === opt.key
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => {
+                              setMode(opt.key)
+                              setModeMenuOpen(false)
+                            }}
+                            className={`w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-emerald-50 transition ${active ? 'bg-emerald-50/60' : ''}`}
+                          >
+                            <span className={`flex-shrink-0 mt-0.5 ${active ? 'text-brand-600' : 'text-slate-400'}`}>
+                              {opt.icon === 'book' && (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                                </svg>
+                              )}
+                              {opt.icon === 'web' && (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5a17.92 17.92 0 0 1-8.716-2.247m0 0A9 9 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
+                                </svg>
+                              )}
+                              {opt.icon === 'agent' && (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z" />
+                                </svg>
+                              )}
+                            </span>
+                            <span className="flex-1 text-left">
+                              <span className={`block font-medium ${active ? 'text-brand-700' : 'text-slate-700'}`}>{opt.label}</span>
+                              <span className="block text-[11px] text-slate-400 mt-0.5">{opt.desc}</span>
+                            </span>
+                            {active && (
+                              <svg className="w-3.5 h-3.5 text-brand-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                              </svg>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-                {/* 图片 */}
-                <button className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-50 cursor-pointer transition" title="图片">
+                {/* 图片（M5-9：选文件 → 上传 → 多模态问答） */}
+                <button
+                  type="button"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={uploading !== null}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-50 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="上传图片（需多模态模型）"
+                >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H3.75A2.25 2.25 0 0 0 1.5 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
                   </svg>
                 </button>
-                {/* 附件 */}
-                <button className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-50 cursor-pointer transition" title="附件">
+                {/* 附件（M5-9：选文件 → 上传 → 一次性文档问答） */}
+                <button
+                  type="button"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  disabled={uploading !== null}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-brand-600 hover:bg-emerald-50 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="上传附件（pdf/docx/txt/md）"
+                >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.667 7.667" />
                   </svg>
@@ -874,33 +1118,44 @@ export default function ChatPage() {
               <div className="flex items-center gap-2">
                 {/* 模型选择（动态载入已配置模型，可切换） */}
                 {availableModels.length > 0 && (
-                  <div className="relative">
+                  <div className="relative" ref={modelMenuRef}>
                     <button
                       type="button"
                       onClick={() => setModelMenuOpen((v) => !v)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-slate-600 text-xs font-medium hover:bg-emerald-50 hover:text-brand-700 cursor-pointer transition"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-slate-600 text-xs font-medium hover:bg-emerald-50 hover:text-brand-700 cursor-pointer transition max-w-[180px]"
                     >
-                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                      {selectedModel || '选择模型'}
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+                      <span className="truncate">{selectedModel || '选择模型'}</span>
+                      <svg className={`w-3 h-3 flex-shrink-0 transition-transform ${modelMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
                       </svg>
                     </button>
                     {modelMenuOpen && (
-                      <div className="absolute bottom-full mb-2 right-0 w-44 rounded-xl border border-emerald-200 bg-white shadow-lg py-1 z-20">
-                        {availableModels.map((m) => (
-                          <button
-                            key={m}
-                            type="button"
-                            onClick={() => {
-                              setSelectedModel(m)
-                              setModelMenuOpen(false)
-                            }}
-                            className={`w-full text-left px-3 py-2 text-xs hover:bg-emerald-50 ${m === selectedModel ? 'text-brand-700 font-semibold' : 'text-slate-600'}`}
-                          >
-                            {m}
-                          </button>
-                        ))}
+                      <div className="absolute bottom-full mb-2 left-0 w-56 rounded-xl border border-emerald-200 bg-white shadow-xl shadow-emerald-100/60 py-1.5 z-20">
+                        <div className="px-3 pb-1.5 mb-0.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wide border-b border-slate-100">
+                          对话模型
+                        </div>
+                        {availableModels.map((m) => {
+                          const active = m === selectedModel
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => {
+                                setSelectedModel(m)
+                                setModelMenuOpen(false)
+                              }}
+                              className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs transition ${active ? 'bg-emerald-50/60 text-brand-700 font-semibold' : 'text-slate-600 hover:bg-emerald-50/40'}`}
+                            >
+                              <span className="truncate">{m}</span>
+                              {active && (
+                                <svg className="w-3.5 h-3.5 text-brand-600 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                                </svg>
+                              )}
+                            </button>
+                          )
+                        })}
                       </div>
                     )}
                   </div>

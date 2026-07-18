@@ -108,10 +108,12 @@ public class KnowledgeBaseController {
             originalFilename = new String(
                     originalFilename.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
         }
-        Path filePath = uploadDir.resolve(UUID.randomUUID() + "_" + originalFilename);
+        // 存盘：用纯 ASCII 文件名（UUID + 扩展名），避免中文文件名导致 Path 非法字符
+        String fileType = getFileExtension(originalFilename);
+        String safeFileName = UUID.randomUUID() + (fileType.isEmpty() ? "" : "." + fileType);
+        Path filePath = uploadDir.resolve(safeFileName);
         file.transferTo(filePath.toFile());
 
-        String fileType = getFileExtension(originalFilename);
         Long docId = documentService.uploadDocument(
                 kbId, loginUser.getTenantId(), loginUser,
                 originalFilename, fileType, file.getSize(), filePath.toString());

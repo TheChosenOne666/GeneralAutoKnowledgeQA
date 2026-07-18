@@ -373,6 +373,9 @@ export default function AIConfigPage() {
             <div className="space-y-3">
               <ProviderSelect label="提供商" value={form.llmProvider} options={LLM_PROVIDERS} onChange={applyLlmProviderDefaults} />
               <Field label="模型" value={form.llmModel} onChange={(v) => set({ llmModel: v })} placeholder="doubao-pro" />
+              <p className="text-[11px] text-slate-400 mt-1">
+                💡 如需在问答中上传图片（多模态），请填写支持 vision 的模型（如 gpt-4o、qwen-vl-max、glm-4v 等）
+              </p>
               <div className="pt-1">
                 <label className="block text-xs text-slate-500 mb-1">更多模型（可选，对话时可切换）</label>
                 <div className="flex gap-2">

@@ -19,6 +19,8 @@ import reactor.core.publisher.Flux;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import com.xiongda.model.entity.ChatAttachment;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
@@ -48,6 +50,9 @@ class ChatControllerTest {
     @Mock
     private com.xiongda.service.AiConfigService aiConfigService;
 
+    @Mock
+    private com.xiongda.service.ChatAttachmentService chatAttachmentService;
+
     private ChatController controller;
 
     @BeforeEach
@@ -57,6 +62,7 @@ class ChatControllerTest {
         ReflectionTestUtils.setField(controller, "aiServiceClient", aiServiceClient);
         ReflectionTestUtils.setField(controller, "userService", userService);
         ReflectionTestUtils.setField(controller, "aiConfigService", aiConfigService);
+        ReflectionTestUtils.setField(controller, "chatAttachmentService", chatAttachmentService);
     }
 
     /**
@@ -88,7 +94,7 @@ class ChatControllerTest {
         user.setTenantId(3L);
         when(userService.getLoginUser(any())).thenReturn(user);
         when(chatService.createConversation(3L, 7L, "你好吗")).thenReturn(1L);
-        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Flux.just(sseBuffer()));
 
         ChatRequest req = new ChatRequest();
@@ -121,7 +127,7 @@ class ChatControllerTest {
         // 只推 thinking 事件、无 token，回答聚合结果为空
         String raw = "event: thinking\ndata: {\"content\": \"正在思考...\"}\n\n";
         DataBuffer db = new DefaultDataBufferFactory().wrap(raw.getBytes(StandardCharsets.UTF_8));
-        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Flux.just(db));
 
         ChatRequest req = new ChatRequest();
@@ -164,7 +170,7 @@ class ChatControllerTest {
         DataBuffer db1 = new DefaultDataBufferFactory().wrap(java.util.Arrays.copyOfRange(bytes, 0, byteSplit));
         DataBuffer db2 = new DefaultDataBufferFactory().wrap(java.util.Arrays.copyOfRange(bytes, byteSplit, bytes.length));
 
-        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any()))
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Flux.just(db1, db2));
 
         ChatRequest req = new ChatRequest();
@@ -176,5 +182,93 @@ class ChatControllerTest {
         // 修复后「第」应完整保留，answer 不含 U+FFFD；旧逻辑会因边界截断产生乱码或丢字
         verify(chatService, timeout(3000)).saveAssistantMessage(
                 eq(9L), eq("第一时间修改初始密码"), eq("doubao"), any());
+    }
+
+    /**
+     * M5-9 多模态问答透传测试：前端传 imageIds / attachmentIds，
+     * ChatController 应调用 chatAttachmentService.listByIdsAndTenant 解析路径，
+     * 并将文件路径透传给 aiServiceClient.chatStream。
+     */
+    @Test
+    void chatStream_resolvesAttachmentPaths_andForwardsToAiService() {
+        User user = new User();
+        user.setId(7L);
+        user.setTenantId(3L);
+        when(userService.getLoginUser(any())).thenReturn(user);
+        when(chatService.createConversation(3L, 7L, "看这张图")).thenReturn(10L);
+
+        // 模拟 chatAttachmentService 返回两个附件（一个图片、一个文档）
+        ChatAttachment imgAtt = new ChatAttachment();
+        imgAtt.setId(100L);
+        imgAtt.setTenantId(3L);
+        imgAtt.setCategory("image");
+        imgAtt.setFilePath("/uploads/3/chat-attachments/image/abc.png");
+
+        ChatAttachment docAtt = new ChatAttachment();
+        docAtt.setId(200L);
+        docAtt.setTenantId(3L);
+        docAtt.setCategory("attachment");
+        docAtt.setFilePath("/uploads/3/chat-attachments/attachment/xyz.pdf");
+
+        when(chatAttachmentService.listByIdsAndTenant(eq(List.of(100L)), eq(3L), eq("image")))
+                .thenReturn(List.of(imgAtt));
+        when(chatAttachmentService.listByIdsAndTenant(eq(List.of(200L)), eq(3L), eq("attachment")))
+                .thenReturn(List.of(docAtt));
+
+        String raw = "event: token\ndata: {\"content\": \"这是一张图\"}\n\n"
+                + "event: done\ndata: {\"conversation_id\": \"10\", \"sources\": []}\n\n";
+        DataBuffer db = new DefaultDataBufferFactory().wrap(raw.getBytes(StandardCharsets.UTF_8));
+
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.argThat(list -> list != null && !list.isEmpty() && list.get(0).equals("/uploads/3/chat-attachments/image/abc.png")),
+                org.mockito.ArgumentMatchers.argThat(list -> list != null && !list.isEmpty() && list.get(0).equals("/uploads/3/chat-attachments/attachment/xyz.pdf"))
+        )).thenReturn(Flux.just(db));
+
+        ChatRequest req = new ChatRequest();
+        req.setContent("看这张图");
+        req.setModel("gpt-4o");
+        req.setImageIds(List.of(100L));
+        req.setAttachmentIds(List.of(200L));
+
+        controller.chatStream(req, null).collectList().block();
+
+        // 验证 chatAttachmentService 被调用了两次（一次 image、一次 attachment）
+        verify(chatAttachmentService).listByIdsAndTenant(eq(List.of(100L)), eq(3L), eq("image"));
+        verify(chatAttachmentService).listByIdsAndTenant(eq(List.of(200L)), eq(3L), eq("attachment"));
+
+        // 验证路径透传给了 aiServiceClient（通过 argThat 匹配器已隐式验证）
+        // 验证回答落库
+        verify(chatService, timeout(3000)).saveAssistantMessage(
+                eq(10L), eq("这是一张图"), eq("gpt-4o"), any());
+    }
+
+    /**
+     * M5-9 降级测试：imageIds / attachmentIds 为空时不应调用 chatAttachmentService，
+     * 透传给 aiServiceClient 的路径列表应为空。
+     */
+    @Test
+    void chatStream_noAttachments_doesNotResolvePaths() {
+        User user = new User();
+        user.setId(7L);
+        user.setTenantId(3L);
+        when(userService.getLoginUser(any())).thenReturn(user);
+        when(chatService.createConversation(3L, 7L, "普通问题")).thenReturn(11L);
+
+        String raw = "event: token\ndata: {\"content\": \"回答\"}\n\n"
+                + "event: done\ndata: {\"conversation_id\": \"11\", \"sources\": []}\n\n";
+        DataBuffer db = new DefaultDataBufferFactory().wrap(raw.getBytes(StandardCharsets.UTF_8));
+
+        when(aiServiceClient.chatStream(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(Flux.just(db));
+
+        ChatRequest req = new ChatRequest();
+        req.setContent("普通问题");
+
+        controller.chatStream(req, null).collectList().block();
+
+        // 没有附件时不应调用 chatAttachmentService
+        verify(chatAttachmentService, org.mockito.Mockito.never()).listByIdsAndTenant(any(), any(), any());
+        verify(chatService, timeout(3000)).saveAssistantMessage(
+                eq(11L), eq("回答"), any(), any());
     }
 }

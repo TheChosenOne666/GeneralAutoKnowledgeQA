@@ -975,6 +975,10 @@ Python（AI 服务）
   - `ChatPage.tsx`：模式切换从两档（普通问答/智能推理）改为三档（知识库/联网搜索/智能推理），placeholder 按模式动态切换。
   - `ChatMessage.mode` 类型扩展为 `'rag' | 'web' | 'agent'`。
   - `api/chat.ts`：`streamChat` 的 `mode` 参数类型扩展为 `'rag' | 'web' | 'agent'`。
+- **前端 UI 优化（2026-07-18）问答模式选择器改为下拉框**：
+  - 原输入框底部三档分段按钮（`bg-emerald-50` + `p-0.5` 容器内三按钮）横排占用空间大，模式名长（"联网搜索"、"智能推理"）易挤压图片/附件按钮与模型下拉。
+  - 改为单下拉框（`modeMenuOpen` state + `modeMenuRef` ref + 点击外侧自动关闭 effect），触发按钮按当前模式显示对应图标（书本/地球/闪电）+ 模式名 + 旋转的下拉箭头；下拉面板向上弹出（`bottom-full`），三项各带图标 + 名称 + 一句描述（"基于知识库内容回答"/"从互联网搜索最新信息"/"多步推理并自动调用工具"），选中项高亮并打勾。`mode` 状态类型、发送/事件流逻辑均无改动。
+  - **修复（2026-07-18）输入框外层去掉 `overflow-hidden`**：首版下拉弹出后只露半截/只显示最后一项的尾巴（如「智能推理 + 描述」），根因是输入框外层容器（`bg-white border ... rounded-2xl`）用了 `overflow-hidden` 把向上弹出的绝对定位下拉面板裁掉了。`overflow-hidden` 原本仅为圆角视觉效果而存在（textarea 自身已有 `max-h-[200px] overflow-y-auto` 限高，无需外层再裁），移除后下拉面板完整显示。
 - **Java**：无需改动——`ChatRequest.mode` 是 `String` 无校验，`AiServiceClient` 直接透传 `"web"` 到 Python。注释更新为 `rag / web / agent`。
 - **测试**：
   - 新增 `tests/test_web_search.py` — `WebSearchParseTest`（9 例：解析/裁剪/空HTML/无效链接/去重/URL归一化/HTML剥离）+ `WebSearchIntegrationTest`（3 例：搜索有结果/网络超时/空查询）+ `FormatResultsTest`（2 例：格式化有结果/空结果）。共 14 例全部通过。
@@ -1460,9 +1464,20 @@ Python（AI 服务）
     - **实测验证**：本地 ES 7.17.23——启动连接成功、惰性建索引 `xiongda_{tenant_id}`（dims=1536，7.x mapping 兼容）、`auto_reindex_on_empty` 将 3401 个 PG 块迁移入 ES；单测 22 例全过、集成测试（index→BM25 search→delete 不可见）全过。
     - **本地开发环境已启用（2026-07-18）**：新建 `ai-service/.env`（仅含 ES 段，`ELASTICSEARCH_ENABLED=true` / `ELASTICSEARCH_HOSTS=http://localhost:9200` / `ELASTICSEARCH_COMPAT_7=true` / `ELASTICSEARCH_TEXT_ANALYZER=ik_max_word`），重启 Python 服务后启动日志出现 `✅ Elasticsearch 检索引擎已就绪`；调 `POST /ai/admin/reindex-es` 从 PG 全量重建索引（返回 `migrated_chunks=3406`）。验证：Python 直连 ES 对真实索引 `xiongda_2075873177644326913` 查"入职指南"返回 62 命中、`ik_max_word` 中文 BM25 召回正常，Top3 为三份"新员工入职指南"文档。自此网页问答关键词路走 ES BM25 与 pgvector 向量 RRF 融合；其余 LLM 等配置仍走系统环境变量，`.env` 不覆盖。
 
-**M5 合计: ~11.5 天**
+### M5-9 多模态问答增强（图片 vision + 附件文本提取）[全栈] P2 · 2d ✅ 完成（2026-07-18）
 
-**实现顺序**：M5-1 → M5-2 → M5-3 → M5-4 → M5-5 → M5-6 → M5-7 → M5-8（先主流程健壮性，后可观测性与功能广度，**逐个实现**）。
+- **背景**：用户在问答输入框可上传图片（走 LLM vision 多模态调用）和通用文档附件（pdf/docx/txt/md，提取文本拼到本次 LLM 上下文），不入向量库、不跨会话。
+- **全栈实现**：
+  - **前端**：`ChatPage.tsx` 新增图片上传按钮（缩略图预览 + 移除）、附件上传按钮（文件名标签 + 移除）；知识库多选标签（绿色 + 号打开下拉菜单）；`streamChat` 参数扩展 `kbIds/imageIds/attachmentIds`；`AIConfigPage` LLM 模型字段下方加多模态 vision 提示（支持 vision 的模型白名单：gpt-4o/gpt-4o-mini/gpt-4-vision-preview/claude-3-5-sonnet/qwen-vl-max/qwen2.5-vl-72b-instruct/gemini-2.0-flash/glm-4v）。
+  - **后端 Java**：`ChatAttachment` 实体/Mapper/Service/Controller；`ChatRequest` 扩展 `imageIds/attachmentIds`；`ChatController.resolveAttachmentPaths` 按分类（image/attachment）解析附件 ID 为文件绝对路径，带租户隔离校验；`AiServiceClient.chatStream` 透传 `image_paths/attachment_paths`。
+  - **后端 Python**：`ChatStreamRequest` 扩展 `image_paths/attachment_paths`；`routers/chat.py` 提取附件文本拼到 context；`llm.py` 新增 `stream_generate_with_images` 多模态调用；`is_vision_model` 白名单判定，不支持 vision 的模型抛 `ModelConfigError`。
+  - **ID 类型修正**：前端 streamChat 参数改用 `string[]`（Jackson Long→String 序列化；`ChatAttachmentVO.id` 改为 string）。
+- **单测**：Python `test_llm.py` 覆盖 `is_vision_model` 白名单/黑名单、非 vision 模型抛错、不可读图片 fallback、vision messages 构造；Java `ChatControllerTest` 2 例（透传测试 + 降级测试），全量 5 例通过。
+- **依赖**：M3-3 模型配置、M4-4 Agent/问答模式
+
+**M5 合计: ~13.5 天**
+
+**实现顺序**：M5-1 → M5-2 → M5-3 → M5-4 → M5-5 → M5-6 → M5-7 → M5-8 → M5-9（先主流程健壮性，后可观测性与功能广度，最后多模态问答，**逐个实现**）。
 
 ---
 

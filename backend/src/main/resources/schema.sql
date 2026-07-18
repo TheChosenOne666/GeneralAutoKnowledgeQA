@@ -128,6 +128,22 @@ CREATE TABLE conversation (
     is_delete SMALLINT DEFAULT 0
 );
 
+-- 问答附件表（问答页输入框临时上传的图片 / 附件，不入向量库，仅本次问答用）
+CREATE TABLE chat_attachment (
+    id BIGINT PRIMARY KEY,
+    tenant_id BIGINT,
+    user_id BIGINT,
+    filename VARCHAR(500) NOT NULL,
+    file_type VARCHAR(20),
+    file_path VARCHAR(1000),
+    file_size BIGINT,
+    category VARCHAR(20),
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_chat_attachment_tenant ON chat_attachment(tenant_id);
+CREATE INDEX idx_chat_attachment_user ON chat_attachment(user_id);
+
+
 -- 消息表（无逻辑删除、无更新时间）
 CREATE TABLE message (
     id BIGINT PRIMARY KEY,

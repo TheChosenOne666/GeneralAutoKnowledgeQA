@@ -86,6 +86,9 @@ public class AiServiceClient {
 
     /**
      * 流式问答 — 调用 Python AI 服务的 SSE 接口，返回 Flux 供 Controller 透传。
+     *
+     * @param imagePaths       问答携带的图片绝对路径列表（M5-9 多模态，Python 转 base64 调 vision）
+     * @param attachmentPaths  问答携带的通用文档绝对路径列表（M5-9 一次性文档问答，Python 提取文本拼上下文）
      */
     public Flux<DataBuffer> chatStream(
             String question,
@@ -95,7 +98,9 @@ public class AiServiceClient {
             String mode,
             Long tenantId,
             List<Map<String, String>> history,
-            Map<String, Object> aiConfig
+            Map<String, Object> aiConfig,
+            List<String> imagePaths,
+            List<String> attachmentPaths
     ) {
         Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("question", question);
@@ -106,15 +111,21 @@ public class AiServiceClient {
         requestBody.put("tenant_id", tenantId != null ? String.valueOf(tenantId) : "");
         requestBody.put("history", history != null ? history : List.of());
         requestBody.put("ai_config", aiConfig);
+        // M5-9 多模态问答：图片 / 通用文档绝对路径透传给 Python
+        requestBody.put("image_paths", imagePaths != null ? imagePaths : List.of());
+        requestBody.put("attachment_paths", attachmentPaths != null ? attachmentPaths : List.of());
         if (aiConfig != null) {
             String llmKey = (String) aiConfig.get("llm_api_key");
             String embKey = (String) aiConfig.get("embedding_api_key");
             log.info("[M3-3诊断] 发往Python mode={} model={} llm_model={} embedding_model={} "
-                            + "llm_api_key尾4={} embedding_api_key尾4={} rerank_provider={}",
+                            + "llm_api_key尾4={} embedding_api_key尾4={} rerank_provider={} "
+                            + "imagePaths={} attachmentPaths={}",
                     mode, model, aiConfig.get("llm_model"), aiConfig.get("embedding_model"),
                     llmKey != null ? "***" + llmKey.substring(Math.max(0, llmKey.length() - 4)) : "null",
                     embKey != null ? "***" + embKey.substring(Math.max(0, embKey.length() - 4)) : "null",
-                    aiConfig.get("rerank_provider"));
+                    aiConfig.get("rerank_provider"),
+                    imagePaths != null ? imagePaths.size() : 0,
+                    attachmentPaths != null ? attachmentPaths.size() : 0);
         } else {
             log.warn("[M3-3诊断] 发往Python mode={} model={} ai_config=NULL，Python将走env兜底（易触发模型配置错误）",
                     mode, model);

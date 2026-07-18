@@ -2,8 +2,12 @@
 
 M3-3：取消静默降级（无 Key 不再回退模拟输出），未配置或调用失败时抛出可识别的
 :class:`ModelConfigError`，供 Java / 前端引导用户重新配置。
+
+M5-9：新增 stream_generate_with_images 多模态生成（OpenAI vision API 兼容），
+供问答页输入框上传图片走 LLM vision 问答。
 """
 
+import base64
 import json
 from typing import AsyncGenerator
 
@@ -12,6 +16,39 @@ from loguru import logger
 
 from core.config import settings
 from services.model_config import ModelConfig, ModelConfigError, ModelQuotaError, is_quota_error
+
+
+# 支持图片问答的多模态模型关键字白名单（M5-9）。
+# 模型名包含以下任一关键字视为支持 vision；未命中时 stream_generate_with_images 抛
+# ModelConfigError 引导用户在 AI 配置页切换模型，避免请求被 LLM 提供商拒绝。
+VISION_MODEL_KEYWORDS = (
+    "gpt-4o", "gpt-4-vision", "gpt-4-turbo", "gpt-4.1", "gpt-4.5",
+    "claude-3", "claude-4",
+    "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwenvl",
+    "gemini-1.5", "gemini-2", "gemini-3",
+    "glm-4v", "glm-4.5v", "glm-4.6v",
+    "doubao-vision", "doubao-1.5-vision",
+    "step-1v", "step-1.5v",
+    "yi-vision",
+)
+
+# 图片扩展名 → MIME 映射
+_IMAGE_MIME_MAP = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
+
+
+def is_vision_model(model_name: str | None) -> bool:
+    """按模型名关键字判定是否支持 vision 多模态（用于 stream_generate_with_images 前置校验）。"""
+    if not model_name:
+        return False
+    name = model_name.lower()
+    return any(kw in name for kw in VISION_MODEL_KEYWORDS)
 
 
 class LlmService:
@@ -70,6 +107,90 @@ class LlmService:
         )
         messages.append({"role": "user", "content": user_content})
 
+        async for token in self._stream(messages, model, cfg, client):
+            yield token
+
+    async def stream_generate_with_images(
+        self,
+        question: str,
+        image_paths: list[str],
+        context: str = "",
+        model: str | None = None,
+        history: list[dict] | None = None,
+        cfg: ModelConfig | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """带图片的多模态流式生成（OpenAI vision API 兼容，M5-9）。
+
+        把 image_paths 中的图片读为 base64 data URI，构造 OpenAI vision 格式的
+        ``user.content``（``[{type:"text"}, {type:"image_url"}...]``），调用 LLM
+        让其看图回答。若模型名不在 vision 白名单则抛 :class:`ModelConfigError`，
+        引导用户在 AI 配置页切换为 GPT-4o / Qwen-VL / Claude 等多模态模型。
+
+        Args:
+            question: 用户问题
+            image_paths: 图片绝对路径列表（由 Java 透传，已通过租户隔离校验）
+            context: 文本上下文（RAG 检索结果 / 联网搜索结果 / 附件提取文本）
+            model: 模型名（可选，覆盖配置）
+            history: 多轮对话历史
+            cfg: 运行时模型配置
+            client: 可选 httpx 客户端（测试注入）
+        """
+        cfg = cfg or ModelConfig.from_settings()
+        if not cfg.has_llm():
+            raise ModelConfigError("未配置 LLM API Key，请在 AI 配置页填写后重试")
+
+        # 前置校验：模型必须支持 vision，否则给清晰错误引导用户切换
+        model_name = model or cfg.llm_model or settings.llm_model
+        if not is_vision_model(model_name):
+            raise ModelConfigError(
+                f"当前模型「{model_name}」可能不支持图片问答（vision）。"
+                "请在 AI 配置页切换为 GPT-4o / Qwen-VL / Claude 3.5 / Gemini 等多模态模型后重试。"
+            )
+
+        # 读图为 base64 data URI，跳过读取失败的图片
+        image_parts: list[dict] = []
+        for path in image_paths:
+            try:
+                with open(path, "rb") as f:
+                    img_bytes = f.read()
+                ext = path.lower().rsplit(".", 1)[-1] if "." in path else "png"
+                mime = _IMAGE_MIME_MAP.get(ext, "image/png")
+                b64 = base64.b64encode(img_bytes).decode("ascii")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            except Exception as e:
+                logger.warning(f"[M5-9] 读取图片失败 path={path}: {e}")
+                continue
+
+        if not image_parts:
+            # 没有可用图片，降级为普通文本问答
+            logger.info("[M5-9] 无可用图片，降级为普通文本问答")
+            async for token in self.stream_generate(
+                question=question, context=context, model=model,
+                history=history, cfg=cfg, client=client,
+            ):
+                yield token
+            return
+
+        system_content = "你是熊答，一个企业知识问答助手。请基于用户提供的图片和问题，简洁准确地回答。"
+        if context:
+            system_content += f"\n\n参考信息:\n{context}"
+
+        messages: list[dict] = [{"role": "system", "content": system_content}]
+        for h in history or []:
+            role = h.get("role")
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": h.get("content", "")})
+
+        # OpenAI vision API：user.content 为多模态 parts 数组（text + 多张 image_url）
+        user_content = [{"type": "text", "text": question}] + image_parts
+        messages.append({"role": "user", "content": user_content})
+
+        logger.info(f"[M5-9] vision 多模态调用 model={model_name} images={len(image_parts)} "
+                    f"context_len={len(context)}")
         async for token in self._stream(messages, model, cfg, client):
             yield token
 
