@@ -6,7 +6,6 @@ import { aiConfigApi } from '@/api/aiConfig'
 import { useAuth } from '@/hooks/useAuth'
 import { useToast } from '@/components/Toast'
 import type { AIConfig, AIConfigUpdateRequest } from '@/types'
-import RetrievalConfigPanel from '@/components/RetrievalConfigPanel'
 
 const LLM_PROVIDERS = ['火山方舟', 'OpenAI', 'DeepSeek', '阿里云百炼']
 const EMBEDDING_PROVIDERS = ['火山方舟', 'OpenAI', 'BGE', '阿里云百炼']
@@ -444,8 +443,6 @@ export default function AIConfigPage() {
           </div>
         </div>
 
-        {/* M6-1 检索配置面板 */}
-        <RetrievalConfigPanel />
       </div>
     </div>
   )
