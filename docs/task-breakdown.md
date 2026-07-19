@@ -1863,36 +1863,30 @@ M3 全部 ──→ M4-9 部署
 
 > 方案设计文档：`docs/design-search-enhancement.md`
 
-### M6-1 RRF 参数可配置化 [后端/Java + 前端/React + AI服务/Python] P0 · 0.5d
+### M6-1 RRF 参数可配置化 [后端/Java + 前端/React + AI服务/Python] P0 · 0.5d ✅
 
 **目标**：把融合参数从 `config.py` 硬编码提升为租户级可配，存数据库，有默认值兜底。
 
-- [ ] `schema.sql`：`tenant` 表新增 `retrieval_config JSONB` 列，带默认值
-- [ ] `TenantController.java`：新增 `GET/PUT /api/tenant/retrieval-config` 接口
-- [ ] `AiServiceClient.java`：chat 请求 body 加 `retrievalConfig` 字段
-- [ ] `ai-service/api/routes.py`：`ChatRequest` 加 `retrieval_config: dict | None` 字段
-- [ ] `ai-service/services/rag.py`：`retrieve()` 读 `retrieval_config` 覆盖 `settings` 默认值
-- [ ] `frontend/src/pages/AIConfigPage.tsx`：新增「检索配置」卡片（8 个参数输入框 + 恢复默认按钮）
-- [ ] `frontend/src/types/index.ts`：新增 `RetrievalConfig` 类型
-- [ ] L1 缓存 key 纳入 `retrieval_config` 参数，确保参数变更后缓存失效
+- [x] `schema.sql`：`tenant` 表新增 `retrieval_config JSONB` 列
+- [x] `TenantController.java`：新增 `GET/PUT /api/tenant/retrieval-config` 接口（用 loginUser 获取 tenantId）
+- [x] `AiServiceClient.java`：chat 请求 body 加 `retrievalConfig` 字段
+- [x] `ai-service/routers/chat.py`：`ChatStreamRequest` 加 `retrieval_config: str | None` 字段
+- [x] `ai-service/services/rag.py`：`retrieve()` 读 `retrieval_config` 覆盖 `settings` 默认值（`_rc()` 辅助函数）
+- [x] `frontend/src/components/RetrievalConfigPanel.tsx`：新建组件（8 项参数编辑 + 恢复默认）
+- [x] `frontend/src/pages/AIConfigPage.tsx`：底部嵌入检索配置面板
+- [x] `frontend/src/types/index.ts`：新增 `RetrievalConfig` 类型
+- [x] `frontend/src/api/tenant.ts`：新增 getRetrievalConfig/updateRetrievalConfig API
+- [ ] L1 缓存 key 纳入 `retrieval_config` 参数（待后续优化）
 
 **验收**：修改租户 RRF 参数后检索结果排序变化；恢复默认后行为与当前一致。
 
-### M6-2 Chunk 文本匹配拼接 [AI服务/Python] P0 · 0.5d
+### M6-2 Chunk 文本匹配拼接 [AI服务/Python] P0 · 0.5d ✅
 
 **目标**：实现纯函数模块，按文本后缀匹配去除相邻块间的重叠，不依赖位置坐标。
 
-- [ ] `ai-service/services/chunk_merge.py`：新建，实现 `append_with_overlap()` + `merge_text_chunks()`
-- [ ] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增 `_merge_adjacent_chunks()` 调用
-- [ ] `ai-service/tests/test_chunk_merge.py`：新建，8 例单测
-  - `test_no_overlap`：无重叠→原样拼接
-  - `test_exact_overlap`：尾头完全重叠→去重
-  - `test_partial_overlap`：部分重叠→去重叠部分
-  - `test_table_header`：补写表头→跳过前缀匹配
-  - `test_html_entity`：HTML 实体→不受字符数偏差影响
-  - `test_empty`：空块→跳过
-  - `test_single_chunk`：单块→不拼接
-  - `test_non_adjacent`：不相邻→不拼接
+- [x] `ai-service/services/chunk_merge.py`：新建，实现 `append_with_overlap()` + `merge_text_chunks()`
+- [x] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增 `_merge_adjacent_chunks()` 调用
+- [x] `ai-service/tests/test_chunk_merge.py`：新建，8 例单测全部通过
 
 **验收**：相邻命中块拼接后无内容重复/断裂；单块/不相邻块不受影响。
 
