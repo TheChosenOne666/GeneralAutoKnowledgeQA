@@ -244,3 +244,15 @@ export interface AuditLog {
   ipAddress: string | null
   createTime: string
 }
+
+/** M6-1：租户级检索配置（RRF 参数等）。*/
+export interface RetrievalConfig {
+  rrf_k: number
+  rrf_vector_weight: number
+  rrf_keyword_weight: number
+  vector_min_relevance: number
+  bm25_min_relevance: number
+  rerank_min_relevance: number
+  relative_ratio: number
+  max_chunks_per_doc: number
+}

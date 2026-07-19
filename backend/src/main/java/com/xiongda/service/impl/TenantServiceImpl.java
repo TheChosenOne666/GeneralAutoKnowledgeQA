@@ -106,6 +106,37 @@ public class TenantServiceImpl extends ServiceImpl<TenantMapper, Tenant> impleme
         return toVO(tenant);
     }
 
+    // M6-1：检索配置默认 JSON（租户未配置时返回此值供前端展示）
+    private static final String DEFAULT_RETRIEVAL_CONFIG = "{"
+            + "\"rrf_k\":60,"
+            + "\"rrf_vector_weight\":0.7,"
+            + "\"rrf_keyword_weight\":0.3,"
+            + "\"vector_min_relevance\":0.30,"
+            + "\"bm25_min_relevance\":1.0,"
+            + "\"rerank_min_relevance\":0.40,"
+            + "\"relative_ratio\":0.80,"
+            + "\"max_chunks_per_doc\":5"
+            + "}";
+
+    @Override
+    public String getRetrievalConfig(Long tenantId) {
+        Tenant tenant = this.getById(tenantId);
+        ThrowUtils.throwIf(tenant == null, ErrorCode.NOT_FOUND_ERROR, "租户不存在");
+        String config = tenant.getRetrievalConfig();
+        return (config == null || config.isBlank()) ? DEFAULT_RETRIEVAL_CONFIG : config;
+    }
+
+    @Override
+    public void updateRetrievalConfig(Long tenantId, String configJson) {
+        Tenant tenant = this.getById(tenantId);
+        ThrowUtils.throwIf(tenant == null, ErrorCode.NOT_FOUND_ERROR, "租户不存在");
+        // 简单校验非空即可，JSON 格式由前端保证，Python 端做 fallback
+        ThrowUtils.throwIf(configJson == null || configJson.isBlank(),
+                ErrorCode.PARAMS_ERROR, "检索配置不能为空");
+        tenant.setRetrievalConfig(configJson);
+        this.updateById(tenant);
+    }
+
     /**
      * 转为 VO 并实时统计成员数 / 文档数（租户数量少，管理平台可接受）。
      */

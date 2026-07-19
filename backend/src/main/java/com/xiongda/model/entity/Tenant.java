@@ -37,6 +37,12 @@ public class Tenant implements Serializable {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private Date updateTime;
 
+    /**
+     * M6-1：检索配置 JSONB（rrf_k, rrf_vector_weight, rrf_keyword_weight 等）。
+     * NULL 表示用默认值，Python 端走 settings 兜底。
+     */
+    private String retrievalConfig;
+
     @TableLogic
     private Integer isDelete;
 }

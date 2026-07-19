@@ -63,6 +63,9 @@ public class ChatController {
     @Resource
     private ChatAttachmentService chatAttachmentService;
 
+    @Resource
+    private com.xiongda.service.TenantService tenantService;
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     /**
@@ -154,6 +157,9 @@ public class ChatController {
         List<String> imagePaths = resolveAttachmentPaths(req.getImageIds(), loginUser.getTenantId(), "image");
         List<String> attachmentPaths = resolveAttachmentPaths(req.getAttachmentIds(), loginUser.getTenantId(), "attachment");
 
+        // M6-1：获取租户级检索配置透传给 Python（NULL 走 Python settings 默认值）
+        String retrievalConfig = tenantService.getRetrievalConfig(loginUser.getTenantId());
+
         Flux<DataBuffer> upstream = aiServiceClient.chatStream(
                 req.getContent(),
                 convId,
@@ -164,7 +170,8 @@ public class ChatController {
                 req.getHistory(),
                 aiConfig,
                 imagePaths,
-                attachmentPaths
+                attachmentPaths,
+                retrievalConfig
         );
 
         StringBuilder rawBuf = new StringBuilder();

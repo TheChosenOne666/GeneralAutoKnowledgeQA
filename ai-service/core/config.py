@@ -172,6 +172,19 @@ class Settings(BaseSettings):
     enable_query_expansion: bool = True  # 主检索召回不足时用 LLM 生成扩展查询再检索并 RRF 合并
     retrieval_expansion_min: int = 3     # 主检索结果数 < 此值才触发 expansion（避免无谓额外调用）
 
+    # M6-2 相邻命中块文本匹配拼接：同文档 chunk_index 相邻的块按文本后缀匹配去重叠，
+    # 避免拼接后内容重复/断裂。在父块回溯之后执行，仅作用于同文档无父块归属的命中块。
+    enable_chunk_merge: bool = True
+
+    # M6-3 FAQ 负向问题过滤：QA 增强块 metadata 中的 negative_questions 字段，
+    # 检索后用户 query 精确匹配某负向问题 → 该 chunk 被剔除。
+    enable_negative_question_filter: bool = True
+
+    # M6-4 相邻块补全：检索命中后按 chunk_index ± 1 回溯前/后块上下文，
+    # 标记 is_context_expansion 不作为引用来源，与父子分块互补。
+    enable_neighbor_expansion: bool = True
+    neighbor_expansion_max_per_chunk: int = 2  # 每个命中块最多补全的前/后块总数
+
     # 检索无结果兜底策略（对标业界成熟方案）：知识库/文档为空或检索不匹配时
     #  - fixed：直接返回固定文案（不调用 LLM，省成本）
     #  - model（默认）：交给 LLM 用通用知识兜底，但须在回答中声明「知识库暂无相关内容」

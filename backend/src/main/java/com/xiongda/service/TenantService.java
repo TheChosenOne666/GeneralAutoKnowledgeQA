@@ -33,4 +33,14 @@ public interface TenantService extends IService<Tenant> {
      * 设置租户配额（成员数 / 文档数上限，<=0 视为不限）。
      */
     TenantVO setQuota(Long tenantId, TenantQuotaRequest request);
+
+    /**
+     * M6-1：获取指定租户的检索配置 JSON（RRF 参数等）。
+     */
+    String getRetrievalConfig(Long tenantId);
+
+    /**
+     * M6-1：更新指定租户的检索配置 JSON。
+     */
+    void updateRetrievalConfig(Long tenantId, String configJson);
 }

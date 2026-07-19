@@ -10,6 +10,8 @@
 | **M2 - 核心** | RAG 检索 + 流式回答 + 引用溯源 | RAG 检索 + SSE 流式 + 会话管理 |
 | **M3 - 管理** | 多角色权限 + 成员管理 + AI配置 | RBAC + 成员 + 配置 + 审计 |
 | **M4 - 增强** | Agent 推理 + 共享/个人库 + UI 精细化 | Agent + 权限细化 + 体验优化 |
+| **M5 - 进阶** | 持久化队列 + 重试/取消 + 多模态 + GraphRAG + 复合检索 | 队列 + 多模态 + GraphRAG + ES+pgvector |
+| **M6 - 检索增强** | RRF 参数可配 + Chunk 拼接 + FAQ 负向过滤 + 相邻块补全 | 参考腾讯 WeKnora 混合检索系统 |
 
 ---
 
@@ -1855,7 +1857,94 @@ M3 全部 ──→ M4-9 部署
 
 **关联**：M5-1（processing 成功判定）、上方「前端状态轮询修复」（7/18）、M5-4。
 
+---
 
+## M6 — 检索增强（参考腾讯 WeKnora）
 
+> 方案设计文档：`docs/design-search-enhancement.md`
 
+### M6-1 RRF 参数可配置化 [后端/Java + 前端/React + AI服务/Python] P0 · 0.5d
+
+**目标**：把融合参数从 `config.py` 硬编码提升为租户级可配，存数据库，有默认值兜底。
+
+- [ ] `schema.sql`：`tenant` 表新增 `retrieval_config JSONB` 列，带默认值
+- [ ] `TenantController.java`：新增 `GET/PUT /api/tenant/retrieval-config` 接口
+- [ ] `AiServiceClient.java`：chat 请求 body 加 `retrievalConfig` 字段
+- [ ] `ai-service/api/routes.py`：`ChatRequest` 加 `retrieval_config: dict | None` 字段
+- [ ] `ai-service/services/rag.py`：`retrieve()` 读 `retrieval_config` 覆盖 `settings` 默认值
+- [ ] `frontend/src/pages/AIConfigPage.tsx`：新增「检索配置」卡片（8 个参数输入框 + 恢复默认按钮）
+- [ ] `frontend/src/types/index.ts`：新增 `RetrievalConfig` 类型
+- [ ] L1 缓存 key 纳入 `retrieval_config` 参数，确保参数变更后缓存失效
+
+**验收**：修改租户 RRF 参数后检索结果排序变化；恢复默认后行为与当前一致。
+
+### M6-2 Chunk 文本匹配拼接 [AI服务/Python] P0 · 0.5d
+
+**目标**：实现纯函数模块，按文本后缀匹配去除相邻块间的重叠，不依赖位置坐标。
+
+- [ ] `ai-service/services/chunk_merge.py`：新建，实现 `append_with_overlap()` + `merge_text_chunks()`
+- [ ] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增 `_merge_adjacent_chunks()` 调用
+- [ ] `ai-service/tests/test_chunk_merge.py`：新建，8 例单测
+  - `test_no_overlap`：无重叠→原样拼接
+  - `test_exact_overlap`：尾头完全重叠→去重
+  - `test_partial_overlap`：部分重叠→去重叠部分
+  - `test_table_header`：补写表头→跳过前缀匹配
+  - `test_html_entity`：HTML 实体→不受字符数偏差影响
+  - `test_empty`：空块→跳过
+  - `test_single_chunk`：单块→不拼接
+  - `test_non_adjacent`：不相邻→不拼接
+
+**验收**：相邻命中块拼接后无内容重复/断裂；单块/不相邻块不受影响。
+
+### M6-3 FAQ 负向问题过滤 [AI服务/Python] P1 · 1d
+
+**目标**：FAQ chunk 支持 `negative_questions` 元数据，检索后精确匹配过滤。
+
+- [ ] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `negative_questions: list[str]` 字段，检索时从 metadata 解析
+- [ ] `ai-service/services/document_processor.py`：QA 生成 prompt 调整，支持生成负向问题，写入 metadata
+- [ ] `ai-service/services/augment_queue.py`：增强 worker 处理时传递 `negative_questions`
+- [ ] `ai-service/services/rag.py`：新增 `_filter_negative_questions()` 方法，rerank 之后调用
+- [ ] `ai-service/core/config.py`：新增 `enable_negative_question_filter: bool = True`
+- [ ] `ai-service/tests/test_negative_filter.py`：新建，单测
+
+**验收**：用户 query 精确匹配负向问题→对应 chunk 被剔除；无负向问题的 chunk 不受影响。
+
+### M6-4 相邻块补全 [AI服务/Python] P1 · 0.5d
+
+**目标**：检索命中某块后，补全同文档的前一块和后一块作为上下文，LLM 获得更完整语境。
+
+- [ ] `ai-service/services/vector_store.py`：新增 `get_adjacent_chunks()` 方法，按 doc_id + chunk_index±1 批量查询相邻块
+- [ ] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `is_context_expansion: bool = False` 字段
+- [ ] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增相邻块补全调用
+- [ ] `ai-service/core/config.py`：新增 `enable_adjacent_chunk_expansion: bool = True`
+- [ ] `ai-service/tests/test_adjacent_chunks.py`：新建，单测
+  - `test_has_prev_and_next`：命中中间块→补全前后各一块
+  - `test_first_chunk`：命中首块→仅补全后一块
+  - `test_last_chunk`：命中尾块→仅补全前一块
+  - `test_exclude_augment_blocks`：相邻块是增强块→排除
+  - `test_exclude_parent_blocks`：相邻块是 parent 块→排除
+  - `test_dedup`：相邻块已在 results 中→跳过
+  - `test_single_chunk_doc`：文档只有 1 个块→无补全
+
+**验收**：命中块有前/后块时补全到 results 中；文档首/尾块仅补全一侧；补全块不列入引用来源。
+
+### M6-5 集成验证 + 文档更新 [全栈] P0 · 0.5d
+
+- [ ] 4 项功能联合验证（按验收标准逐项测试）
+- [ ] `docs/design-search-enhancement.md` 更新实现状态
+- [ ] `docs/task-breakdown.md` 标记 M6 各项完成
+- [ ] `README.md` 更新检索增强功能说明
+
+---
+
+### M6 依赖关系
+
+```
+M6-1 (RRF 参数可配)  ──→ M6-5 (集成验证)
+M6-2 (Chunk 拼接)    ──→ M6-5
+M6-3 (FAQ 负向过滤)  ──→ M6-5
+M6-4 (迭代检索)      ──→ M6-5
+```
+
+M6-1 ~ M6-4 之间无代码依赖，可并行开发。
 

@@ -57,6 +57,7 @@ class RagService:
         top_n: int = 5,
         cfg: ModelConfig | None = None,
         enhance: bool = False,
+        retrieval_config: str | None = None,
     ) -> list[RetrievalResult]:
         """完整检索流程：混合检索 → RRF 融合 → Rerank 精排。
 
@@ -72,6 +73,8 @@ class RagService:
                 做 LLM 改写（rewrite），主检索召回不足时再做 LLM 扩展检索（expansion）
                 并 RRF 合并。仅 rag 模式开启；Agent 模式不传（避免二次改写 LLM 自生成
                 的子查询，画蛇添足）。
+            retrieval_config: M6-1 租户级检索配置 JSON 字符串，覆盖 settings 默认值。
+                None 时走 settings .env 默认值。
 
         Returns:
             精排后的检索结果列表
@@ -85,6 +88,19 @@ class RagService:
                 return [RetrievalResult(**d) for d in json.loads(cached)]
         except Exception as e:
             logger.warning(f"读取检索缓存失败，降级实时检索: {e}")
+
+        # M6-1：解析租户级检索配置，覆盖 settings 默认值
+        rc: dict = {}
+        if retrieval_config:
+            try:
+                rc = json.loads(retrieval_config)
+                logger.info(f"[M6-1] 租户检索配置已加载: {rc}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"[M6-1] 检索配置解析失败，走默认值: {e}")
+        # 辅助函数：优先用 rc 中的值，否则用 settings
+        def _rc(key: str, default):
+            v = rc.get(key)
+            return v if v is not None else default
 
         # A1 query rewrite：口语化问题改写为检索友好 query（仅 enhance 且开启开关时）
         search_query = query
@@ -154,7 +170,8 @@ class RagService:
             or (rerank_method == "api" and rerank_key)
         )
         rerank_pool = max(top_n, settings.retrieval_rerank_top_k) if will_rerank else top_n
-        if settings.retrieval_vector_dominant and vec_results and best_vec >= settings.retrieval_vector_min_relevance:
+        vec_min_rel = _rc("vector_min_relevance", settings.retrieval_vector_min_relevance)
+        if settings.retrieval_vector_dominant and vec_results and best_vec >= vec_min_rel:
             merged = self._merge_vector_dominant(vec_results, bm25_results, rerank_pool, search_query)
         else:
             merged = bm25_results[:rerank_pool]
@@ -185,9 +202,9 @@ class RagService:
                 )
         # 重排阈值过滤（对标业界成熟方案 rerank.go：低于阈值的跨主题块直接剔除，
         # 仅当最优分仍 >= 0.15 时保留 top1 兜底，避免全部误删）。未重排时直接截断 top_n。
+        rerank_th = _rc("rerank_min_relevance", settings.retrieval_rerank_min_relevance)
         if rerank_applied:
-            th = settings.retrieval_rerank_min_relevance
-            kept = [r for r in merged if r.score >= th]
+            kept = [r for r in merged if r.score >= rerank_th]
             if not kept and merged and merged[0].score >= 0.15:
                 kept = merged[:1]
             # 重排后只保留过门槛的块；不再回退到未过滤的 merged[:top_n]，
@@ -226,7 +243,8 @@ class RagService:
         # 大纲意图下保送 outline 块，跳过此过滤（避免短标题块被误剔除）
         if settings.retrieval_relevance_gate and merged and not is_outline:
             best = merged[0].score
-            floor = max(best * settings.retrieval_relative_ratio, settings.retrieval_vector_min_relevance)
+            rel_ratio = _rc("relative_ratio", settings.retrieval_relative_ratio)
+            floor = max(best * rel_ratio, _rc("vector_min_relevance", settings.retrieval_vector_min_relevance))
             filtered = [r for r in merged if r.score >= floor]
             if filtered:
                 merged = filtered
@@ -249,6 +267,14 @@ class RagService:
                 merged = await vector_store_module.vector_store_service.attach_parents(merged)
             except Exception as e:
                 logger.warning(f"[父子分块] 回溯父块内容失败，降级用子块内容: {e}")
+
+        # M6-2：相邻命中块文本匹配拼接 — 同文档 chunk_index 相邻的块按文本后缀匹配去重叠，
+        # 避免拼接后内容重复/断裂（在父块回溯之后执行，仅作用于同文档无父块归属的命中块）。
+        if settings.enable_chunk_merge and merged:
+            try:
+                merged = self._merge_adjacent_chunks(merged)
+            except Exception as e:
+                logger.warning(f"[M6-2 相邻拼接] 失败，降级用原始块: {e}")
 
         try:
             r = await get_redis()
@@ -453,6 +479,46 @@ class RagService:
     def _is_outline_query(query: str) -> bool:
         """判断问题是否属大纲/架构类意图（应优先召回章节标题 outline 块，方案C）。"""
         return any(kw in query for kw in OUTLINE_KEYWORDS)
+
+    @staticmethod
+    def _merge_adjacent_chunks(results: list[RetrievalResult]) -> list[RetrievalResult]:
+        """M6-2：同一文档中 chunk_index 相邻的命中块，用文本匹配拼接去除重叠。
+
+        按 doc_id 分组，每组内按 chunk_index 排序，检测相邻性（chunk_index 差 <= 1），
+        用 :func:`merge_text_chunks` 拼接 content。保留第一个块的元信息，
+        content 替换为拼接后的完整文本。非相邻或单块不受影响。
+        """
+        from services.chunk_merge import merge_text_chunks
+
+        by_doc: dict[str, list[RetrievalResult]] = {}
+        for r in results:
+            by_doc.setdefault(r.doc_id, []).append(r)
+
+        merged_results: list[RetrievalResult] = []
+        for doc_id, group in by_doc.items():
+            group.sort(key=lambda r: r.chunk_index)
+            if len(group) <= 1:
+                merged_results.extend(group)
+                continue
+
+            # 检测相邻性：chunk_index 连续或差 1
+            is_adjacent = all(
+                group[i + 1].chunk_index - group[i].chunk_index <= 1
+                for i in range(len(group) - 1)
+            )
+            if not is_adjacent:
+                merged_results.extend(group)
+                continue
+
+            # 拼接相邻块内容
+            contents = [r.content for r in group]
+            merged_content = merge_text_chunks(contents, gap_sep="\n")
+            # 保留第一个块的元信息，content 替换为拼接后的
+            first = group[0]
+            first.content = merged_content
+            merged_results.append(first)
+
+        return merged_results
 
     async def _rerank_with_llm(
         self,

@@ -19,6 +19,7 @@ CREATE TABLE tenant (
     status VARCHAR(20) DEFAULT 'active',
     max_members INTEGER DEFAULT 50,
     max_documents INTEGER DEFAULT 1000,
+    retrieval_config JSONB,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_delete SMALLINT DEFAULT 0

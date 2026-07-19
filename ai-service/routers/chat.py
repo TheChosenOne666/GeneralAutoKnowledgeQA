@@ -40,6 +40,8 @@ class ChatStreamRequest(BaseModel):
     image_paths: list[str] = []
     # M5-9 一次性文档问答：通用文档绝对路径列表（Python 提取文本拼到 LLM 上下文，不入向量库）
     attachment_paths: list[str] = []
+    # M6-1：租户级检索配置（RRF 参数等），JSON 字符串或 None
+    retrieval_config: str | None = None
 
 
 @router.post("/chat/stream")
@@ -125,7 +127,8 @@ async def chat_stream(body: ChatStreamRequest):
         if body.mode == "rag":
             try:
                 results = await rag_service.retrieve(
-                    body.question, body.kb_ids, body.tenant_id, top_n=5, cfg=cfg, enhance=True
+                    body.question, body.kb_ids, body.tenant_id, top_n=5, cfg=cfg, enhance=True,
+                    retrieval_config=body.retrieval_config,
                 )
                 sources = [asdict(r) for r in results]
                 if results:

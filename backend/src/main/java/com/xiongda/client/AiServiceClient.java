@@ -100,7 +100,8 @@ public class AiServiceClient {
             List<Map<String, String>> history,
             Map<String, Object> aiConfig,
             List<String> imagePaths,
-            List<String> attachmentPaths
+            List<String> attachmentPaths,
+            String retrievalConfig
     ) {
         Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("question", question);
@@ -114,6 +115,8 @@ public class AiServiceClient {
         // M5-9 多模态问答：图片 / 通用文档绝对路径透传给 Python
         requestBody.put("image_paths", imagePaths != null ? imagePaths : List.of());
         requestBody.put("attachment_paths", attachmentPaths != null ? attachmentPaths : List.of());
+        // M6-1：租户级检索配置 JSON 字符串透传给 Python（NULL 走 Python settings 默认值）
+        requestBody.put("retrieval_config", retrievalConfig);
         if (aiConfig != null) {
             String llmKey = (String) aiConfig.get("llm_api_key");
             String embKey = (String) aiConfig.get("embedding_api_key");

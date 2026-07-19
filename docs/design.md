@@ -834,3 +834,25 @@ data: {"conversation_id": "1234567890", "sources": [...]}
 | Java | Python | `/ai/cache/invalidate` | HTTP（文档变更清 L1） |
 | Python | 外部 AI | `/embeddings`、`/chat/completions`、`/rerank` | OpenAI 兼容（可选，未配则降级） |
 
+---
+
+## 10. 检索增强（M6，参考腾讯 WeKnora）
+
+> 详细方案设计见 `docs/design-search-enhancement.md`
+
+### 10.1 RRF 参数可配置化（M6-1）
+
+将融合参数（RRF k、向量/关键词权重、相关性门槛等）从 `config.py` 硬编码提升为**租户级配置**，存 `tenant.retrieval_config` JSONB 字段，有默认值兜底。Java 透传给 Python，Python 在检索时读取覆盖 `settings` 默认值。前端 AIConfigPage 新增「检索配置」卡片。
+
+### 10.2 Chunk 文本匹配拼接（M6-2）
+
+纯函数模块 `chunk_merge.py`，按文本后缀匹配去除相邻块间的重叠，不依赖位置坐标（StartAt/EndAt），能处理补写表头/HTML 实体导致的位置偏差。集成在 `attach_parents` 之后，对同一文档相邻 chunk_index 的命中块自动拼接。
+
+### 10.3 FAQ 负向问题过滤（M6-3）
+
+FAQ chunk 新增 `negative_questions` 元数据（JSONB metadata 已支持，不需改表）。QA 增强时 LLM 生成负向问题写入 metadata。检索后精确匹配：用户 query 完全等于负向问题 → 剔除该 chunk。
+
+### 10.4 相邻块补全（M6-4）
+
+检索命中某块后，按 `doc_id + chunk_index±1` 查询同文档的前/后一块，作为上下文补全注入 LLM。补全块标记 `is_context_expansion=True`，不作为引用来源展示。与父子分块（small-to-big）互补：父子分块提供更大范围上下文，相邻块补全提供精确的前后衔接。与 M6-2 Chunk 拼接协作：先补全相邻块，再拼接去重叠。
+

@@ -1,7 +1,7 @@
 /** 租户管理接口 — 仅平台超管可访问，对齐后端 TenantController。*/
 
 import { api } from './client'
-import type { BaseResponse, Page, Tenant, TenantCreateRequest, TenantQuotaRequest } from '@/types'
+import type { BaseResponse, Page, RetrievalConfig, Tenant, TenantCreateRequest, TenantQuotaRequest } from '@/types'
 
 export const tenantApi = {
   /** 分页列出所有租户（含实时成员数 / 文档数）。*/
@@ -29,6 +29,20 @@ export const tenantApi = {
   /** 设置租户配额（成员数 / 文档数上限）。*/
   setQuota: async (id: string | number, body: TenantQuotaRequest): Promise<Tenant> => {
     const res = await api.post<BaseResponse<Tenant>>(`/tenant/${id}/quota`, body)
+    return res.data.data
+  },
+
+  /** M6-1：获取当前租户的检索配置。*/
+  getRetrievalConfig: async (): Promise<RetrievalConfig> => {
+    const res = await api.get<BaseResponse<string>>('/tenant/retrieval-config')
+    return JSON.parse(res.data.data)
+  },
+
+  /** M6-1：更新当前租户的检索配置。*/
+  updateRetrievalConfig: async (config: RetrievalConfig): Promise<boolean> => {
+    const res = await api.put<BaseResponse<boolean>>('/tenant/retrieval-config', JSON.stringify(config), {
+      headers: { 'Content-Type': 'application/json' },
+    })
     return res.data.data
   },
 }
