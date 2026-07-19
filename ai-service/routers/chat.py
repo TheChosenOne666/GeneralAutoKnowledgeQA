@@ -130,7 +130,8 @@ async def chat_stream(body: ChatStreamRequest):
                     body.question, body.kb_ids, body.tenant_id, top_n=5, cfg=cfg, enhance=True,
                     retrieval_config=body.retrieval_config,
                 )
-                sources = [asdict(r) for r in results]
+                # M6-4：相邻块补全的上下文块不作为引用来源展示，但参与 LLM 上下文
+                sources = [asdict(r) for r in results if not r.is_context_expansion]
                 if results:
                     # M5-5 父子分块：喂 LLM 的上下文优先用回溯到的父块完整内容（更连贯），
                     # 引用来源（sources）仍用子块 content 精确定位命中片段。

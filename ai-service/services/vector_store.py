@@ -10,7 +10,7 @@
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from loguru import logger
 
@@ -22,6 +22,23 @@ from core.pg_client import get_pg_pool
 # 重建时把上一轮增强块当原文再生成，导致无限膨胀。含 qa（M4-8）与 M5-7 的
 # question/summary/wiki/entity。parent 父块单独排除（内容与子块重合）。
 AUGMENT_CHUNK_TYPES = ("qa", "question", "summary", "wiki", "entity", "ocr", "image_caption")
+
+
+def _parse_negative_questions(raw: str | None) -> list[str]:
+    """从 PG metadata JSONB 的 negative_questions 字段解析为 list[str]。
+
+    metadata 中存储格式为 JSON 数组字符串（如 ``'["什么是前端", "如何部署"]'``），
+    None 或空字符串返回空列表。
+    """
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [str(x) for x in val]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return []
 
 
 def _exclude_chunk_types_sql(types: tuple[str, ...]) -> str:
@@ -66,6 +83,12 @@ class RetrievalResult:
     M5-5 父子分块：``parent_id`` 为命中子块归属的父块 id；``parent_content`` 为回溯到的
     父块完整内容（供 LLM 上下文使用，small-to-big），检索时由 :func:`attach_parent_contents`
     填充。引用来源展示仍用 ``content``（精确定位命中片段）。
+
+    M6-3 负向问题过滤：``negative_questions`` 从 metadata 解析，仅 QA 类型块有值；
+    用户 query 精确匹配某负向问题时该块被剔除。
+
+    M6-4 相邻块补全：``is_context_expansion=True`` 标记由相邻块补全引入的上下文块，
+    不列入引用来源展示。
     """
 
     content: str
@@ -78,6 +101,8 @@ class RetrievalResult:
     chunk_type: str = ""
     parent_id: str = ""
     parent_content: str = ""
+    negative_questions: list[str] = field(default_factory=list)
+    is_context_expansion: bool = False
 
 
 class _ChunkRecord:
@@ -163,6 +188,7 @@ def _bm25_search(records: list[_ChunkRecord], query: str, top_k: int = 20) -> li
             chunk_index=r.metadata.get("chunk_index", 0),
             chunk_type=r.metadata.get("chunk_type", ""),
             parent_id=r.metadata.get("parent_id", "") or "",
+            negative_questions=r.metadata.get("negative_questions", []) if isinstance(r.metadata.get("negative_questions"), list) else [],
         )
         for s, r in scored[:top_k]
     ]
@@ -253,6 +279,7 @@ class InMemoryVectorStore:
                     chunk_index=r.metadata.get("chunk_index", 0),
                     chunk_type=r.metadata.get("chunk_type", ""),
                     parent_id=r.metadata.get("parent_id", "") or "",
+                    negative_questions=r.metadata.get("negative_questions", []) if isinstance(r.metadata.get("negative_questions"), list) else [],
                 )
             )
         results.sort(key=lambda x: x.score, reverse=True)
@@ -323,6 +350,47 @@ class InMemoryVectorStore:
     async def attach_parents(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
         """M5-5：为命中子块回溯并填充父块内容（small-to-big）。"""
         return await attach_parent_contents(self, results)
+
+    async def get_adjacent_chunks(
+        self, results: list[RetrievalResult]
+    ) -> list[RetrievalResult]:
+        """M6-4：从内存索引补全相邻块（用于单测）。"""
+        if not results:
+            return []
+        existing = {(r.doc_id, r.kb_id, r.chunk_index) for r in results}
+        wanted: dict[tuple[str, int], None] = {}
+        for r in results:
+            for delta in (-1, 1):
+                key = (r.doc_id, r.chunk_index + delta)
+                if key not in wanted:
+                    wanted[key] = None
+        adjacent: list[RetrievalResult] = []
+        for rec in self._records:
+            did = rec.metadata.get("doc_id", "")
+            cidx = rec.metadata.get("chunk_index", 0)
+            if (did, cidx) not in wanted:
+                continue
+            ct = rec.metadata.get("chunk_type", "")
+            if ct in AUGMENT_CHUNK_TYPES or ct in ("parent", "outline"):
+                continue
+            key = (did, rec.metadata.get("kb_id", ""), cidx)
+            if key in existing:
+                continue
+            adjacent.append(
+                RetrievalResult(
+                    content=rec.content,
+                    source=rec.metadata.get("source", ""),
+                    page=rec.metadata.get("page", 0),
+                    score=0.0,
+                    doc_id=did,
+                    kb_id=rec.metadata.get("kb_id", ""),
+                    chunk_index=cidx,
+                    chunk_type=ct,
+                    parent_id=rec.metadata.get("parent_id", "") or "",
+                    is_context_expansion=True,
+                )
+            )
+        return adjacent
 
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从内存分块按页重建文档文本（预览兜底，不依赖原文件是否存在）。
@@ -443,6 +511,7 @@ class PgVectorStore:
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
                               metadata->>'chunk_type' AS chunk_type,
                               metadata->>'parent_id' AS parent_id,
+                              metadata->>'negative_questions' AS negative_questions,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3 AND kb_id = ANY($4)
@@ -459,6 +528,7 @@ class PgVectorStore:
                     """SELECT content, source, page, doc_id, kb_id, chunk_index,
                               metadata->>'chunk_type' AS chunk_type,
                               metadata->>'parent_id' AS parent_id,
+                              metadata->>'negative_questions' AS negative_questions,
                               1 - (embedding <=> $1::halfvec) AS score
                        FROM embeddings
                        WHERE tenant_id = $2 AND dimension = $3
@@ -480,6 +550,7 @@ class PgVectorStore:
                 chunk_index=r["chunk_index"],
                 chunk_type=r["chunk_type"] or "",
                 parent_id=r["parent_id"] or "",
+                negative_questions=_parse_negative_questions(r["negative_questions"]),
             )
             for r in rows
         ]
@@ -597,6 +668,78 @@ class PgVectorStore:
     async def attach_parents(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
         """M5-5：为命中子块回溯并填充父块内容（small-to-big）。"""
         return await attach_parent_contents(self, results)
+
+    async def get_adjacent_chunks(
+        self, results: list[RetrievalResult]
+    ) -> list[RetrievalResult]:
+        """M6-4：为命中块补全同文档的前一块和后一块作为上下文。
+
+        按 ``doc_id + chunk_index ± 1`` 批量查询相邻块。排除增强块（qa/question/summary/
+        wiki/entity/ocr/image_caption）和 parent 父块。已在 results 中的块不重复补全。
+        补全块标记 ``is_context_expansion=True``，不列入引用来源。
+
+        Returns:
+            补全的相邻块列表（不含已有命中块），调用方负责合并到 results 中。
+        """
+        if not results:
+            return []
+
+        # 收集需要查询的 (doc_id, chunk_index±1) 对
+        wanted: dict[tuple[str, int], None] = {}
+        existing = {(r.doc_id, r.kb_id, r.chunk_index) for r in results}
+        for r in results:
+            for delta in (-1, 1):
+                key = (r.doc_id, r.chunk_index + delta)
+                if key not in wanted:
+                    wanted[key] = None
+
+        if not wanted:
+            return []
+
+        # 按文档分组查询
+        doc_ids = {r.doc_id for r in results if r.doc_id}
+        if not doc_ids:
+            return []
+
+        pool = await get_pg_pool()
+        adjacent: list[RetrievalResult] = []
+        async with pool.acquire() as conn:
+            for doc_id in doc_ids:
+                # 收集该文档需要的 chunk_index 集合
+                indices = {idx for (did, idx) in wanted if did == doc_id}
+                if not indices:
+                    continue
+                rows = await conn.fetch(
+                    f"""SELECT content, source, page, doc_id, kb_id, chunk_index,
+                              metadata->>'chunk_type' AS chunk_type,
+                              metadata->>'parent_id' AS parent_id
+                       FROM embeddings
+                       WHERE doc_id = $1
+                         AND chunk_index = ANY($2)
+                         {_exclude_chunk_types_sql(AUGMENT_CHUNK_TYPES + ('parent', 'outline'))}
+                    """,
+                    doc_id,
+                    list(indices),
+                )
+                for r in rows:
+                    key = (r["doc_id"], r["kb_id"], r["chunk_index"])
+                    if key in existing:
+                        continue
+                    adjacent.append(
+                        RetrievalResult(
+                            content=r["content"],
+                            source=r["source"] or "",
+                            page=r["page"] or 0,
+                            score=0.0,  # 上下文补全块无检索分数
+                            doc_id=r["doc_id"],
+                            kb_id=r["kb_id"],
+                            chunk_index=r["chunk_index"],
+                            chunk_type=r["chunk_type"] or "",
+                            parent_id=r["parent_id"] or "",
+                            is_context_expansion=True,
+                        )
+                    )
+        return adjacent
 
     async def get_document_pages(self, doc_id: str) -> list[dict]:
         """从 PG 向量库按页重建文档文本（预览兜底，不依赖原文件是否存在）。

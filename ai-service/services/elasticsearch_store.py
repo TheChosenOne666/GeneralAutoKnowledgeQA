@@ -198,6 +198,11 @@ class ElasticsearchStore:
             src = h["_source"]
             # 归一化：除以批次内 max 再乘基准，使量级接近自研 BM25，融合补充门槛行为一致
             norm = (h["_score"] / max_score) * settings.elasticsearch_bm25_scale
+            # M6-3：从 metadata 中解析 negative_questions
+            meta = src.get("metadata") or {}
+            nqs = meta.get("negative_questions", [])
+            if not isinstance(nqs, list):
+                nqs = []
             results.append(
                 RetrievalResult(
                     content=src.get("content", ""),
@@ -208,6 +213,7 @@ class ElasticsearchStore:
                     kb_id=src.get("kb_id", ""),
                     chunk_index=src.get("chunk_index", 0),
                     chunk_type=src.get("chunk_type", ""),
+                    negative_questions=nqs,
                 )
             )
         return results

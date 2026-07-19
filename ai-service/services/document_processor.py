@@ -839,6 +839,7 @@ class DocumentProcessor:
                         "chunk_index": c.metadata.get("chunk_index", 0),
                         "page": c.metadata.get("page", 0),
                         "chunk_type": "qa",
+                        "negative_questions": qa.get("negative_questions", []),
                     },
                     "embedding": vec,
                 }
@@ -1133,14 +1134,21 @@ class DocumentProcessor:
 
     @staticmethod
     async def _gen_one_qa(text: str, cfg: ModelConfig | None, client=None) -> dict | None:
-        """用 LLM 从文本生成一对问答，返回 ``{"question", "answer"}`` 或 ``None``。"""
+        """用 LLM 从文本生成一对问答，返回 ``{"question", "answer", "negative_questions"}`` 或 ``None``。
+
+        M6-3：同时生成 2~3 个负向问题（即容易与该知识点混淆但实际不相关的问题），
+        存入 metadata.negative_questions，检索时用于精确过滤。
+        """
         messages = [
             {
                 "role": "system",
                 "content": (
                     "你是知识库检索优化助手。阅读给定文本，生成一个最能用于检索该知识点的用户提问"
-                    "及其准确、简洁的答案。只输出一个 JSON 对象："
-                    '{"question": "...", "answer": "..."}，不要包含任何额外文字或代码块标记。'
+                    "及其准确、简洁的答案，以及 2~3 个容易混淆但实际不相关的负向问题。"
+                    "只输出一个 JSON 对象："
+                    '{"question": "...", "answer": "...", '
+                    '"negative_questions": ["容易混淆的问题1", "容易混淆的问题2"]}，'
+                    "不要包含任何额外文字或代码块标记。"
                 ),
             },
             {"role": "user", "content": text[:2000]},
@@ -1191,7 +1199,10 @@ class DocumentProcessor:
 
 
 def _parse_qa_json(raw: str) -> dict | None:
-    """从 LLM 输出中容错解析问答 JSON，返回 ``{"question", "answer"}`` 或 ``None``。"""
+    """从 LLM 输出中容错解析问答 JSON，返回 ``{"question", "answer", "negative_questions"}`` 或 ``None``。
+
+    M6-3：同时解析 negative_questions 字段（缺失或格式错误时默认空列表）。
+    """
     if not raw:
         return None
     text = raw.strip()
@@ -1204,7 +1215,7 @@ def _parse_qa_json(raw: str) -> dict | None:
     try:
         data = json.loads(text)
         if isinstance(data, dict) and data.get("question") and data.get("answer"):
-            return {"question": str(data["question"]).strip(), "answer": str(data["answer"]).strip()}
+            return _build_qa_result(data)
     except (json.JSONDecodeError, TypeError):
         pass
     # 2) 兜底：截取第一个 {...} 片段解析
@@ -1214,13 +1225,24 @@ def _parse_qa_json(raw: str) -> dict | None:
         try:
             data = json.loads(text[start : end + 1])
             if isinstance(data, dict) and data.get("question") and data.get("answer"):
-                return {
-                    "question": str(data["question"]).strip(),
-                    "answer": str(data["answer"]).strip(),
-                }
+                return _build_qa_result(data)
         except (json.JSONDecodeError, TypeError):
             pass
     return None
+
+
+def _build_qa_result(data: dict) -> dict:
+    """从解析后的 JSON dict 构建 QA 结果，包含 negative_questions。"""
+    result = {
+        "question": str(data["question"]).strip(),
+        "answer": str(data["answer"]).strip(),
+    }
+    nqs = data.get("negative_questions", [])
+    if isinstance(nqs, list):
+        result["negative_questions"] = [str(x).strip() for x in nqs if x]
+    else:
+        result["negative_questions"] = []
+    return result
 
 
 def _parse_ocr_caption_json(raw: str) -> dict | None:

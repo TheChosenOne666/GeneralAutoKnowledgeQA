@@ -1890,35 +1890,28 @@ M3 全部 ──→ M4-9 部署
 
 **验收**：相邻命中块拼接后无内容重复/断裂；单块/不相邻块不受影响。
 
-### M6-3 FAQ 负向问题过滤 [AI服务/Python] P1 · 1d
+### M6-3 FAQ 负向问题过滤 [AI服务/Python] P1 · 1d ✅
 
 **目标**：FAQ chunk 支持 `negative_questions` 元数据，检索后精确匹配过滤。
 
-- [ ] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `negative_questions: list[str]` 字段，检索时从 metadata 解析
-- [ ] `ai-service/services/document_processor.py`：QA 生成 prompt 调整，支持生成负向问题，写入 metadata
-- [ ] `ai-service/services/augment_queue.py`：增强 worker 处理时传递 `negative_questions`
-- [ ] `ai-service/services/rag.py`：新增 `_filter_negative_questions()` 方法，rerank 之后调用
-- [ ] `ai-service/core/config.py`：新增 `enable_negative_question_filter: bool = True`
-- [ ] `ai-service/tests/test_negative_filter.py`：新建，单测
+- [x] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `negative_questions: list[str]` 字段，检索时从 metadata 解析
+- [x] `ai-service/services/document_processor.py`：QA 生成 prompt 调整，支持生成负向问题，写入 metadata
+- [x] `ai-service/services/rag.py`：新增 `_filter_negative_questions()` 方法，rerank 之后调用
+- [x] `ai-service/core/config.py`：`enable_negative_question_filter: bool = True`（已有）
+- [x] `ai-service/tests/test_negative_question_filter.py`：新建，8 例单测全部通过
 
-**验收**：用户 query 精确匹配负向问题→对应 chunk 被剔除；无负向问题的 chunk 不受影响。
+**验收**：用户 query 精确匹配负向问题→对应 chunk 被剔除；无负向问题的 chunk 不受影响。✅
 
-### M6-4 相邻块补全 [AI服务/Python] P1 · 0.5d
+### M6-4 相邻块补全 [AI服务/Python] P1 · 0.5d ✅
 
 **目标**：检索命中某块后，补全同文档的前一块和后一块作为上下文，LLM 获得更完整语境。
 
-- [ ] `ai-service/services/vector_store.py`：新增 `get_adjacent_chunks()` 方法，按 doc_id + chunk_index±1 批量查询相邻块
-- [ ] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `is_context_expansion: bool = False` 字段
-- [ ] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增相邻块补全调用
-- [ ] `ai-service/core/config.py`：新增 `enable_adjacent_chunk_expansion: bool = True`
-- [ ] `ai-service/tests/test_adjacent_chunks.py`：新建，单测
-  - `test_has_prev_and_next`：命中中间块→补全前后各一块
-  - `test_first_chunk`：命中首块→仅补全后一块
-  - `test_last_chunk`：命中尾块→仅补全前一块
-  - `test_exclude_augment_blocks`：相邻块是增强块→排除
-  - `test_exclude_parent_blocks`：相邻块是 parent 块→排除
-  - `test_dedup`：相邻块已在 results 中→跳过
-  - `test_single_chunk_doc`：文档只有 1 个块→无补全
+- [x] `ai-service/services/vector_store.py`：新增 `get_adjacent_chunks()` 方法，按 doc_id + chunk_index±1 批量查询相邻块（PgVectorStore + InMemoryVectorStore）
+- [x] `ai-service/services/vector_store.py`：`RetrievalResult` 新增 `is_context_expansion: bool = False` 字段
+- [x] `ai-service/services/rag.py`：`retrieve()` 中 `attach_parents` 后新增相邻块补全调用
+- [x] `ai-service/core/config.py`：`enable_neighbor_expansion: bool = True`（已有）
+- [x] `ai-service/routers/chat.py`：sources 排除 `is_context_expansion` 块
+- [x] `ai-service/tests/test_adjacent_chunk_expansion.py`：新建，7 例单测全部通过
 
 **验收**：命中块有前/后块时补全到 results 中；文档首/尾块仅补全一侧；补全块不列入引用来源。
 

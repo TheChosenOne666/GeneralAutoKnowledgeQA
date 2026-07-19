@@ -260,6 +260,11 @@ class RagService:
             )
             merged = []
 
+        # M6-3 FAQ 负向问题过滤：用户 query 精确匹配某 QA 块的负向问题 → 剔除该块。
+        # 在相关性过滤后、父子分块前执行，确保被剔除的块不会被回溯父块。
+        if settings.enable_negative_question_filter and merged:
+            merged = self._filter_negative_questions(query, merged)
+
         # M5-5 父子分块：命中子块后回溯其父块完整内容（small-to-big），供 LLM 获得更连贯的上下文。
         # best-effort：回溯失败不影响已排好的检索结果。
         if settings.retrieval_parent_context and merged:
@@ -267,6 +272,17 @@ class RagService:
                 merged = await vector_store_module.vector_store_service.attach_parents(merged)
             except Exception as e:
                 logger.warning(f"[父子分块] 回溯父块内容失败，降级用子块内容: {e}")
+
+        # M6-4 相邻块补全：命中块的前一块和后一块作为上下文补全到 results 中，
+        # 标记 is_context_expansion=True 不列入引用来源。在父子分块后、文本拼接前执行。
+        if settings.enable_neighbor_expansion and merged:
+            try:
+                adjacent = await vector_store_module.vector_store_service.get_adjacent_chunks(merged)
+                if adjacent:
+                    merged = merged + adjacent
+                    logger.info(f"[M6-4 相邻块补全] 补全 {len(adjacent)} 个上下文块")
+            except Exception as e:
+                logger.warning(f"[M6-4 相邻块补全] 失败，降级用原始块: {e}")
 
         # M6-2：相邻命中块文本匹配拼接 — 同文档 chunk_index 相邻的块按文本后缀匹配去重叠，
         # 避免拼接后内容重复/断裂（在父块回溯之后执行，仅作用于同文档无父块归属的命中块）。
@@ -519,6 +535,43 @@ class RagService:
             merged_results.append(first)
 
         return merged_results
+
+    @staticmethod
+    def _filter_negative_questions(
+        query: str, results: list[RetrievalResult]
+    ) -> list[RetrievalResult]:
+        """M6-3：FAQ 负向问题过滤。
+
+        用户 query 精确匹配某 QA 增强块的 negative_questions 中的某条问题时，该块被剔除。
+        采用精确匹配（非模糊匹配），避免误伤。仅在 chunk_type == 'qa' 且有 negative_questions 时检查。
+        """
+        if not results or not query:
+            return results
+
+        query_lower = query.strip().lower()
+        if not query_lower:
+            return results
+
+        filtered: list[RetrievalResult] = []
+        removed = 0
+        for r in results:
+            # 仅 QA 类型块且有负向问题才检查
+            if r.chunk_type != "qa" or not r.negative_questions:
+                filtered.append(r)
+                continue
+            matched = any(query_lower == nq.strip().lower() for nq in r.negative_questions)
+            if not matched:
+                filtered.append(r)
+            else:
+                removed += 1
+                logger.info(
+                    f"[M6-3 负向过滤] 命中负向问题，剔除 chunk: "
+                    f"doc={r.doc_id} chunk_index={r.chunk_index}"
+                )
+
+        if removed:
+            logger.info(f"[M6-3 负向过滤] query={query!r} 共剔除 {removed} 个块")
+        return filtered
 
     async def _rerank_with_llm(
         self,
