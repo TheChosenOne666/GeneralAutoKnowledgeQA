@@ -102,6 +102,7 @@ function AppLayoutInner() {
   const outlet = useOutlet()
   const { currentTenantId, tenants, setTenant } = useTenant()
   const { conversations, activeId, setActiveId, refresh } = useChat()
+  const [searchQuery, setSearchQuery] = useState('')
   const isChat = location.pathname === '/chat' || location.pathname.startsWith('/chat/')
 
   // 平台超管可访问：自身专属菜单 + 租户管理员菜单（切进某租户后复用其知识库/成员/AI配置页）
@@ -112,17 +113,21 @@ function AppLayoutInner() {
       : []
   const visibleMenu = MENU.filter((item) => user && item.roles.some((r) => effectiveRoles.includes(r)))
 
-  // 按时间分组（仅展示有会话的分组，顺序见 HISTORY_GROUPS），7 天以上默认折叠
+  // 按时间分组（仅展示有会话的分组，顺序见 HISTORY_GROUPS），7 天以上默认折叠；支持搜索过滤
   const grouped = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    const filtered = q
+      ? conversations.filter((c) => c.title.toLowerCase().includes(q))
+      : conversations
     const map: Record<string, Conversation[]> = {}
-    for (const c of conversations) {
+    for (const c of filtered) {
       const g = historyGroupOf(c.updateTime)
       ;(map[g] ||= []).push(c)
     }
     return HISTORY_GROUPS.filter((grp) => (map[grp.key]?.length ?? 0) > 0).map(
       (grp) => [grp, map[grp.key]] as const,
     )
-  }, [conversations])
+  }, [conversations, searchQuery])
 
   const handleLogout = () => {
     // 记录登出审计（失败不影响登出）
@@ -229,9 +234,37 @@ function AppLayoutInner() {
                 </svg>
               </button>
             </div>
+            {/* 搜索框 */}
+            <div className="px-3 pb-2">
+              <div className="relative">
+                <svg className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                </svg>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="搜索会话..."
+                  className="w-full rounded-md border border-slate-200 bg-slate-50 pl-8 pr-7 py-1.5 text-xs text-slate-600 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 focus:bg-white transition"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center text-slate-400 hover:text-slate-600 rounded transition"
+                    title="清除"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="flex-1 overflow-y-auto px-3 pb-3">
               {conversations.length === 0 ? (
                 <p className="text-xs text-slate-400 px-2 pt-2">暂无对话，发送消息开始新会话</p>
+              ) : grouped.length === 0 ? (
+                <p className="text-xs text-slate-400 px-2 pt-2">未找到匹配的会话</p>
               ) : (
                 grouped.map(([grp, items]) => (
                   <HistoryGroup
