@@ -195,6 +195,18 @@ function AppLayoutInner() {
           </div>
         )}
 
+        {/* 全局搜索框（放在导航菜单上方） */}
+        <div className="px-3 py-2">
+          <GlobalSearch
+            conversations={conversations}
+            knowledgeBases={knowledgeBases}
+            onSelectConversation={(id) => setActiveId(id)}
+            onSelectKnowledgeBase={() => navigate('/knowledge')}
+            onSelectDocument={() => navigate('/knowledge')}
+            onSelectMessage={(m) => setActiveId(m.conversationId)}
+          />
+        </div>
+
         {/* 菜单 */}
         <nav className="p-2 space-y-1 flex-1">
           {visibleMenu.map((item) => (
@@ -236,17 +248,6 @@ function AppLayoutInner() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                 </svg>
               </button>
-            </div>
-            {/* 全局搜索框 */}
-            <div className="px-3 pb-2">
-              <GlobalSearch
-                conversations={conversations}
-                knowledgeBases={knowledgeBases}
-                onSelectConversation={(id) => setActiveId(id)}
-                onSelectKnowledgeBase={() => navigate('/knowledge')}
-                onSelectDocument={() => navigate('/knowledge')}
-                onSelectMessage={(m) => setActiveId(m.conversationId)}
-              />
             </div>
             <div className="flex-1 overflow-y-auto px-3 pb-3">
               {conversations.length === 0 ? (
