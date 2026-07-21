@@ -20,8 +20,10 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 全局搜索接口 — 搜索范围：文档 chunk（ES BM25）+ 聊天消息（ES BM25）。
+ * 全局搜索接口 — 搜索范围：文档 chunk（ES BM25 + 向量融合）+ 聊天消息（ES BM25 多字段）。
  *
+ * <p>支持搜索运算符：引号"精确短语"、-排除词、+必含词。
+ * <p>支持分页：from + topK。
  * <p>知识库名称和会话标题由前端本地过滤（数据量小，无需走后端搜索）。
  *
  * @author <a href="https://github.com/TheChosenOne666">小楼</a>
@@ -52,20 +54,22 @@ public class SearchController {
     }
 
     /**
-     * 全局搜索 — 文档 chunk + 聊天消息。
+     * 全局搜索 — 文档 chunk（BM25 + 向量融合）+ 聊天消息（BM25 多字段）。
      *
-     * <p>文档 chunk 搜索走 Python AI 服务（ES BM25）。
-     * 聊天消息搜索走 Python AI 服务（ES BM25），ES 不可用时回退到 PG ILIKE。
-     *
-     * @param query 搜索关键词
-     * @param kbIds 限定搜索的知识库范围（可选，null = 全部）
+     * @param query          搜索关键词（支持运算符：""精确、-排除、+必含）
+     * @param kbIds          限定搜索的知识库范围（可选）
+     * @param topK           每类返回条数（默认 10）
+     * @param from           分页偏移（默认 0）
+     * @param enableSemantic 是否启用向量语义召回（默认 true）
      */
     @GetMapping("/global")
     @AuthCheck
     public BaseResponse<Map<String, Object>> globalSearch(
             @RequestParam String query,
             @RequestParam(required = false) List<Long> kbIds,
-            @RequestParam(defaultValue = "10") int topK
+            @RequestParam(defaultValue = "10") int topK,
+            @RequestParam(defaultValue = "0") int from,
+            @RequestParam(defaultValue = "true") boolean enableSemantic
     ) {
         Long userId = (Long) httpRequest.getAttribute("userId");
         Long tenantId = (Long) httpRequest.getAttribute("tenantId");
@@ -74,7 +78,7 @@ public class SearchController {
 
         // 调用 Python AI 服务搜索
         Map<String, Object> aiResult = aiServiceClient.globalSearch(
-                query, tenantIdStr, userIdStr, kbIds, topK
+                query, tenantIdStr, userIdStr, kbIds, topK, from, enableSemantic
         );
 
         List<Map<String, Object>> documents = (List<Map<String, Object>>) aiResult.getOrDefault("documents", List.of());
@@ -88,6 +92,8 @@ public class SearchController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("documents", documents);
         result.put("messages", messages);
+        result.put("total_documents", aiResult.getOrDefault("total_documents", 0));
+        result.put("total_messages", aiResult.getOrDefault("total_messages", 0));
         return ResultUtils.success(result);
     }
 
@@ -95,7 +101,6 @@ public class SearchController {
      * PG ILIKE 消息搜索兜底（ES 不可用时使用）。
      */
     private List<Map<String, Object>> searchMessagesFromPg(String query, Long userId, Long tenantId, int topK) {
-        // 先查该用户的会话 ID 列表
         QueryWrapper<Conversation> convQuery = new QueryWrapper<>();
         convQuery.eq("user_id", userId);
         convQuery.select("id", "title");
@@ -106,7 +111,6 @@ public class SearchController {
         Map<Long, String> convTitleMap = convs.stream()
                 .collect(Collectors.toMap(Conversation::getId, Conversation::getTitle, (a, b) -> a));
 
-        // ILIKE 搜索消息
         QueryWrapper<Message> msgQuery = new QueryWrapper<>();
         msgQuery.in("conversation_id", convTitleMap.keySet());
         msgQuery.like("content", query);
@@ -141,7 +145,6 @@ public class SearchController {
         int start = Math.max(0, idx - 30);
         int end = Math.min(content.length(), idx + query.length() + 120);
         String snippet = content.substring(start, end);
-        // 在 snippet 中高亮关键词
         int relIdx = lowerContent.indexOf(lowerQuery, start) - start;
         if (relIdx >= 0 && relIdx + query.length() <= snippet.length()) {
             String before = snippet.substring(0, relIdx);

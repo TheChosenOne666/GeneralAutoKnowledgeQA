@@ -229,39 +229,154 @@ class ElasticsearchStore:
         )
         logger.info(f"[ES] 删除分块 doc_id={doc_id} pattern={index_pattern}")
 
-    async def search_documents(
-        self, query: str, tenant_id: str, kb_ids: list[str] | None = None, top_k: int = 10
-    ) -> list[dict]:
-        """未来「搜索功能」预留：文档级聚合查询（按 doc_id field collapsing + highlight）。
+    async def search_documents_enhanced(
+        self,
+        query: str,
+        tenant_id: str,
+        kb_ids: list[str] | None = None,
+        top_k: int = 10,
+        from_: int = 0,
+        embedding: list[float] | None = None,
+    ) -> dict:
+        """增强版文档搜索：BM25 多字段 + 向量 kNN 召回 + RRF 融合 + 高亮。
 
-        返回 ``[{"doc_id", "kb_id", "source", "highlight"}]``，不接 UI，仅落接口与单测。
+        搜索字段：``content`` (BM25) + ``source`` (文件名 BM25)。
+        若提供 ``embedding``，同时执行 kNN 向量召回，用 RRF 融合两路结果。
+
+        返回 ``{"total": int, "hits": [{"doc_id", "kb_id", "source", "content",
+        "highlight", "score", "doc_count"}]}``。
         """
         index = await self.ensure_index(tenant_id)
-        bool_q: dict[str, Any] = {
-            "must": [{"match": {"content": query}}],
-            "must_not": [{"terms": {"chunk_type": list(AUGMENT_CHUNK_TYPES + ("parent",))}}],
-        }
+        must_not = [{"terms": {"chunk_type": list(AUGMENT_CHUNK_TYPES + ("parent",))}}]
+        filters: list[dict] = []
         if kb_ids:
-            bool_q["filter"] = [{"terms": {"kb_id": list(kb_ids)}}]
-        body = {
-            "size": top_k,
-            "query": {"bool": bool_q},
-            "collapse": {"field": "doc_id"},
-            "highlight": {"fields": {"content": {}}},
+            filters.append({"terms": {"kb_id": list(kb_ids)}})
+
+        # --- BM25 多字段查询 ---
+        bm25_query: dict[str, Any] = {
+            "bool": {
+                "must": [
+                    {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["content^3", "source^2"],
+                            "type": "best_fields",
+                            "operator": "or",
+                        }
+                    }
+                ],
+                "filter": filters,
+                "must_not": must_not,
+            }
         }
-        resp = await self._client.search(index=index, body=body)
-        out: list[dict] = []
-        for h in resp["hits"]["hits"]:
-            src = h["_source"]
-            out.append(
-                {
+
+        # --- 向量 kNN 召回（可选） ---
+        use_knn = embedding is not None and len(embedding) == settings.embedding_dimension
+        if use_knn:
+            # ES 7.x 用 script_score 模拟 kNN（7.x 无原生 kNN search API）
+            knn_query: dict[str, Any] = {
+                "bool": {
+                    "must": [
+                        {
+                            "script_score": {
+                                "query": {"match_all": {}},
+                                "script": {
+                                    "source": "cosineSimilarity(params.query_vector, 'embedding') + 1.0",
+                                    "params": {"query_vector": embedding},
+                                },
+                            }
+                        }
+                    ],
+                    "filter": filters,
+                    "must_not": must_not,
+                }
+            }
+
+            # 分别查 BM25 和 kNN，然后 RRF 融合
+            bm25_size = min(top_k * 3, 50)
+            knn_size = min(top_k * 3, 50)
+
+            bm25_body = {
+                "size": bm25_size,
+                "query": bm25_query,
+                "highlight": {"fields": {"content": {"fragment_size": 150, "number_of_fragments": 2}}, "source": {"fragment_size": 80}},
+            }
+            knn_body = {
+                "size": knn_size,
+                "query": knn_query,
+            }
+
+            import asyncio
+            bm25_resp, knn_resp = await asyncio.gather(
+                self._client.search(index=index, body=bm25_body),
+                self._client.search(index=index, body=knn_body),
+            )
+
+            # RRF 融合
+            rrf_k = 60
+            rrf_scores: dict[str, float] = {}
+            src_map: dict[str, dict] = {}
+            highlight_map: dict[str, list] = {}
+
+            for rank, h in enumerate(bm25_resp["hits"]["hits"]):
+                eid = h["_id"]
+                rrf_scores[eid] = rrf_scores.get(eid, 0) + 1.0 / (rrf_k + rank + 1)
+                src_map[eid] = h["_source"]
+                hl = h.get("highlight", {})
+                highlight_map[eid] = hl.get("content", [])
+
+            for rank, h in enumerate(knn_resp["hits"]["hits"]):
+                eid = h["_id"]
+                rrf_scores[eid] = rrf_scores.get(eid, 0) + 1.0 / (rrf_k + rank + 1)
+                if eid not in src_map:
+                    src_map[eid] = h["_source"]
+
+            # 按 RRF 分数排序
+            ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+            total = len(ranked)
+            # 分页
+            ranked = ranked[from_ : from_ + top_k]
+
+            out: list[dict] = []
+            for eid, score in ranked:
+                src = src_map.get(eid, {})
+                hl_list = highlight_map.get(eid, [])
+                hl = hl_list[0] if hl_list else ""
+                out.append({
                     "doc_id": src.get("doc_id", ""),
                     "kb_id": src.get("kb_id", ""),
                     "source": src.get("source", ""),
-                    "highlight": h.get("highlight", {}).get("content", []),
-                }
-            )
-        return out
+                    "content": (src.get("content", ""))[:200],
+                    "highlight": hl,
+                    "score": round(score, 6),
+                })
+            return {"total": total, "hits": out}
+
+        else:
+            # 纯 BM25（无向量）
+            body = {
+                "size": top_k,
+                "from": from_,
+                "query": bm25_query,
+                "collapse": {"field": "doc_id"},
+                "highlight": {"fields": {"content": {"fragment_size": 150, "number_of_fragments": 2}, "source": {"fragment_size": 80}}},
+            }
+            resp = await self._client.search(index=index, body=body)
+            total = resp["hits"]["total"]["value"] if isinstance(resp["hits"]["total"], dict) else resp["hits"]["total"]
+            out: list[dict] = []
+            for h in resp["hits"]["hits"]:
+                src = h["_source"]
+                hl_list = h.get("highlight", {}).get("content", [])
+                hl = hl_list[0] if hl_list else ""
+                out.append({
+                    "doc_id": src.get("doc_id", ""),
+                    "kb_id": src.get("kb_id", ""),
+                    "source": src.get("source", ""),
+                    "content": (src.get("content", ""))[:200],
+                    "highlight": hl,
+                    "score": float(h["_score"] or 0),
+                })
+            return {"total": total, "hits": out}
 
     async def _pg_tenants_with_data(self) -> list[str]:
         """读 PG 中实际有分块（非增强 / 非父块）的租户列表（存量迁移用）。"""
@@ -408,26 +523,46 @@ class ElasticsearchStore:
         tenant_id: str,
         user_id: str | None = None,
         top_k: int = 10,
-    ) -> list[dict]:
-        """BM25 搜索聊天消息，返回 ``[{id, conversation_id, conversation_title, role, content, highlight, score}]``。"""
+        from_: int = 0,
+    ) -> dict:
+        """BM25 多字段搜索聊天消息（content + conversation_title），返回分页结果。
+
+        返回 ``{"total": int, "hits": [{id, conversation_id, conversation_title, role, content, highlight, score}]}``。
+        """
         index = await self.ensure_msg_index(tenant_id)
         filters: list[dict] = []
         if user_id:
             filters.append({"term": {"user_id": user_id}})
         body = {
             "size": top_k,
+            "from": from_,
             "query": {
                 "bool": {
-                    "must": [{"match": {"content": query}}],
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["content^3", "conversation_title^2"],
+                                "type": "best_fields",
+                                "operator": "or",
+                            }
+                        }
+                    ],
                     "filter": filters,
                 }
             },
-            "highlight": {"fields": {"content": {"fragment_size": 150, "number_of_fragments": 1}}},
+            "highlight": {
+                "fields": {
+                    "content": {"fragment_size": 150, "number_of_fragments": 1},
+                    "conversation_title": {"fragment_size": 80},
+                },
+            },
         }
         resp = await self._client.search(index=index, body=body)
         hits = resp["hits"]["hits"]
+        total = resp["hits"]["total"]["value"] if isinstance(resp["hits"]["total"], dict) else resp["hits"]["total"]
         if not hits:
-            return []
+            return {"total": total, "hits": []}
         out: list[dict] = []
         for h in hits:
             src = h["_source"]
@@ -440,12 +575,12 @@ class ElasticsearchStore:
                     "conversation_id": src.get("conversation_id", ""),
                     "conversation_title": src.get("conversation_title", ""),
                     "role": src.get("role", ""),
-                    "content": content[:200],  # 预览前 200 字
+                    "content": content[:200],
                     "highlight": highlight,
                     "score": float(h["_score"] or 0),
                 }
             )
-        return out
+        return {"total": total, "hits": out}
 
     async def delete_messages_by_conversation(self, conversation_id: str, tenant_id: str) -> None:
         """删除某会话的所有消息索引（会话删除时调用）。"""

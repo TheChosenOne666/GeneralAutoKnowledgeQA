@@ -309,17 +309,25 @@ public class AiServiceClient {
 
     /**
      * 全局搜索 — 调用 Python AI 服务的 /ai/search/global 接口。
-     * 返回 {documents: [...], messages: [...]}，ES 不可用时两列表均为空。
+     * 返回 {documents: [...], messages: [...], total_documents, total_messages}，ES 不可用时两列表均为空。
+     *
+     * @param query          搜索关键词（支持运算符："""精确、-排除、+必含）
+     * @param topK           每类返回条数
+     * @param from           分页偏移
+     * @param enableSemantic 是否启用向量语义召回
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> globalSearch(
-            String query, String tenantId, String userId, List<Long> kbIds, int topK
+            String query, String tenantId, String userId, List<Long> kbIds,
+            int topK, int from, boolean enableSemantic
     ) {
         Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("query", query);
         requestBody.put("tenant_id", tenantId);
         requestBody.put("user_id", userId);
         requestBody.put("top_k", topK);
+        requestBody.put("from_", from);
+        requestBody.put("enable_semantic", enableSemantic);
         requestBody.put("kb_ids", kbIds != null ? kbIds.stream().map(String::valueOf).toList() : List.of());
         try {
             Map<String, Object> resp = webClient.post()
@@ -327,15 +335,15 @@ public class AiServiceClient {
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
-                    .timeout(java.time.Duration.ofSeconds(10))
+                    .timeout(java.time.Duration.ofSeconds(15))
                     .block();
             if (resp == null) {
-                return Map.of("documents", List.of(), "messages", List.of());
+                return Map.of("documents", List.of(), "messages", List.of(), "total_documents", 0, "total_messages", 0);
             }
             return resp;
         } catch (Exception e) {
             log.warn("调 Python 全局搜索失败，返回空: {}", e.getMessage());
-            return Map.of("documents", List.of(), "messages", List.of());
+            return Map.of("documents", List.of(), "messages", List.of(), "total_documents", 0, "total_messages", 0);
         }
     }
 
