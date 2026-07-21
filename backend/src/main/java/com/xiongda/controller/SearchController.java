@@ -81,19 +81,37 @@ public class SearchController {
                 query, tenantIdStr, userIdStr, kbIds, topK, from, enableSemantic
         );
 
-        List<Map<String, Object>> documents = (List<Map<String, Object>>) aiResult.getOrDefault("documents", List.of());
-        List<Map<String, Object>> messages = (List<Map<String, Object>>) aiResult.getOrDefault("messages", List.of());
+        List<Map<String, Object>> documents = new ArrayList<>((List<Map<String, Object>>) aiResult.getOrDefault("documents", List.of()));
+        List<Map<String, Object>> messages = new ArrayList<>((List<Map<String, Object>>) aiResult.getOrDefault("messages", List.of()));
 
-        // ES 消息搜索结果为空时，回退到 PG ILIKE
-        if (messages.isEmpty()) {
-            messages = searchMessagesFromPg(query, userId, tenantId, topK);
+        int totalDocs = ((Number) aiResult.getOrDefault("total_documents", 0)).intValue();
+        int totalMsgs = ((Number) aiResult.getOrDefault("total_messages", 0)).intValue();
+        // （ES 可能因索引延迟/服务不可用只返回部分结果）
+        if (messages.size() < topK) {
+            List<Map<String, Object>> pgResults = searchMessagesFromPg(query, userId, tenantId, topK);
+            // 去重：合并 ES 和 PG 结果，按 id 去重
+            java.util.Set<String> seenIds = messages.stream()
+                    .map(m -> String.valueOf(m.get("id")))
+                    .collect(Collectors.toSet());
+            for (Map<String, Object> pgItem : pgResults) {
+                String pgId = String.valueOf(pgItem.get("id"));
+                if (!seenIds.contains(pgId)) {
+                    messages.add(pgItem);
+                    seenIds.add(pgId);
+                    if (messages.size() >= topK) break;
+                }
+            }
+            // 更新 total
+            if (total_msgs == 0) {
+                total_msgs = pgResults.size();
+            }
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("documents", documents);
         result.put("messages", messages);
-        result.put("total_documents", aiResult.getOrDefault("total_documents", 0));
-        result.put("total_messages", aiResult.getOrDefault("total_messages", 0));
+        result.put("total_documents", totalDocs);
+        result.put("total_messages", total_msgs);
         return ResultUtils.success(result);
     }
 

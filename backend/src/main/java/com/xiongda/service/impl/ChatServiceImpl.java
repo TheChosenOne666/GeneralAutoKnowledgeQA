@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -221,25 +222,28 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
      * 获取会话标题用于搜索结果展示。失败不阻塞主流程（AiServiceClient 内部已捕获异常）。
      */
     private void indexMessageToEs(Message message, Long conversationId, String content) {
-        try {
-            Conversation conv = this.getById(conversationId);
-            String convTitle = conv != null ? conv.getTitle() : "";
-            String tenantId = conv != null && conv.getTenantId() != null ? String.valueOf(conv.getTenantId()) : "";
-            String userId = conv != null && conv.getUserId() != null ? String.valueOf(conv.getUserId()) : "";
-            String createTime = message.getCreateTime() != null ? String.valueOf(message.getCreateTime().getTime()) : "";
-            aiServiceClient.indexMessage(
-                    String.valueOf(message.getId()),
-                    String.valueOf(conversationId),
-                    convTitle,
-                    message.getRole(),
-                    content,
-                    tenantId,
-                    userId,
-                    createTime
-            );
-        } catch (Exception e) {
-            log.warn("索引消息到 ES 失败，忽略: {}", e.getMessage());
-        }
+        // 真正异步执行，不阻塞消息保存主流程
+        CompletableFuture.runAsync(() -> {
+            try {
+                Conversation conv = this.getById(conversationId);
+                String convTitle = conv != null ? conv.getTitle() : "";
+                String tenantId = conv != null && conv.getTenantId() != null ? String.valueOf(conv.getTenantId()) : "";
+                String userId = conv != null && conv.getUserId() != null ? String.valueOf(conv.getUserId()) : "";
+                String createTime = message.getCreateTime() != null ? String.valueOf(message.getCreateTime().getTime()) : "";
+                aiServiceClient.indexMessage(
+                        String.valueOf(message.getId()),
+                        String.valueOf(conversationId),
+                        convTitle,
+                        message.getRole(),
+                        content,
+                        tenantId,
+                        userId,
+                        createTime
+                );
+            } catch (Exception e) {
+                log.warn("索引消息到 ES 失败，忽略: {}", e.getMessage());
+            }
+        });
     }
 
     private MessageVO toMessageVO(Message msg) {
