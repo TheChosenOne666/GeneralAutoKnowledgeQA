@@ -342,6 +342,122 @@ class ElasticsearchStore:
             logger.info(f"[ES] 启动补迁完成，租户数={migrated}")
         return migrated
 
+    # ==================== 聊天消息搜索（全局搜索） ====================
+
+    def _msg_index(self, tenant_id: str) -> str:
+        """消息索引名：``{prefix}_msg_{tenant_id}``，与 chunk 索引隔离。"""
+        safe = re.sub(r"[^a-z0-9]", "", (tenant_id or "").lower())
+        return f"{settings.elasticsearch_index_prefix}_msg_{safe or 'default'}"
+
+    def _msg_mapping(self) -> dict:
+        """消息索引 mappings。"""
+        return {
+            "mappings": {
+                "properties": {
+                    "content": {"type": "text", "analyzer": settings.elasticsearch_text_analyzer},
+                    "conversation_id": {"type": "keyword"},
+                    "conversation_title": {"type": "text", "analyzer": "standard"},
+                    "role": {"type": "keyword"},
+                    "tenant_id": {"type": "keyword"},
+                    "user_id": {"type": "keyword"},
+                    "create_time": {"type": "date"},
+                }
+            }
+        }
+
+    async def ensure_msg_index(self, tenant_id: str) -> str:
+        """确保租户消息索引存在（惰性创建），返回索引名。"""
+        index = self._msg_index(tenant_id)
+        if index in self._index_cache:
+            return index
+        exists = await self._client.indices.exists(index=index)
+        if not exists:
+            await self._client.indices.create(index=index, **self._msg_mapping())
+            logger.info(f"[ES] 已创建消息索引 index={index}")
+        self._index_cache.add(index)
+        return index
+
+    async def index_message(
+        self,
+        message_id: str,
+        conversation_id: str,
+        conversation_title: str,
+        role: str,
+        content: str,
+        tenant_id: str,
+        user_id: str,
+        create_time: str,
+    ) -> None:
+        """索引单条聊天消息到 ES（幂等：同 message_id 先删再插）。"""
+        index = await self.ensure_msg_index(tenant_id)
+        doc = {
+            "content": content,
+            "conversation_id": conversation_id,
+            "conversation_title": conversation_title,
+            "role": role,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "create_time": create_time,
+        }
+        await self._client.index(index=index, id=message_id, document=doc, refresh="wait_for")
+        logger.debug(f"[ES] 索引消息 msg_id={message_id} conv={conversation_id} index={index}")
+
+    async def search_messages(
+        self,
+        query: str,
+        tenant_id: str,
+        user_id: str | None = None,
+        top_k: int = 10,
+    ) -> list[dict]:
+        """BM25 搜索聊天消息，返回 ``[{id, conversation_id, conversation_title, role, content, highlight, score}]``。"""
+        index = await self.ensure_msg_index(tenant_id)
+        filters: list[dict] = []
+        if user_id:
+            filters.append({"term": {"user_id": user_id}})
+        body = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "must": [{"match": {"content": query}}],
+                    "filter": filters,
+                }
+            },
+            "highlight": {"fields": {"content": {"fragment_size": 150, "number_of_fragments": 1}}},
+        }
+        resp = await self._client.search(index=index, body=body)
+        hits = resp["hits"]["hits"]
+        if not hits:
+            return []
+        out: list[dict] = []
+        for h in hits:
+            src = h["_source"]
+            highlight_list = h.get("highlight", {}).get("content", [])
+            highlight = highlight_list[0] if highlight_list else ""
+            content = src.get("content", "")
+            out.append(
+                {
+                    "id": h["_id"],
+                    "conversation_id": src.get("conversation_id", ""),
+                    "conversation_title": src.get("conversation_title", ""),
+                    "role": src.get("role", ""),
+                    "content": content[:200],  # 预览前 200 字
+                    "highlight": highlight,
+                    "score": float(h["_score"] or 0),
+                }
+            )
+        return out
+
+    async def delete_messages_by_conversation(self, conversation_id: str, tenant_id: str) -> None:
+        """删除某会话的所有消息索引（会话删除时调用）。"""
+        index = self._msg_index(tenant_id)
+        await self._client.delete_by_query(
+            index=index,
+            body={"query": {"term": {"conversation_id": conversation_id}}},
+            conflicts="proceed",
+            refresh=True,
+        )
+        logger.info(f"[ES] 删除会话消息索引 conv_id={conversation_id} index={index}")
+
 
 _es_store: "ElasticsearchStore | None" = None
 

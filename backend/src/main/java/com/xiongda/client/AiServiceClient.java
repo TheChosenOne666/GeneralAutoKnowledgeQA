@@ -306,4 +306,84 @@ public class AiServiceClient {
             log.warn("清检索缓存失败，忽略: {}", e.getMessage());
         }
     }
+
+    /**
+     * 全局搜索 — 调用 Python AI 服务的 /ai/search/global 接口。
+     * 返回 {documents: [...], messages: [...]}，ES 不可用时两列表均为空。
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> globalSearch(
+            String query, String tenantId, String userId, List<Long> kbIds, int topK
+    ) {
+        Map<String, Object> requestBody = new LinkedHashMap<>();
+        requestBody.put("query", query);
+        requestBody.put("tenant_id", tenantId);
+        requestBody.put("user_id", userId);
+        requestBody.put("top_k", topK);
+        requestBody.put("kb_ids", kbIds != null ? kbIds.stream().map(String::valueOf).toList() : List.of());
+        try {
+            Map<String, Object> resp = webClient.post()
+                    .uri("/ai/search/global")
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .bodyToMono(new org.springframework.core.ParameterizedTypeReference<Map<String, Object>>() {})
+                    .timeout(java.time.Duration.ofSeconds(10))
+                    .block();
+            if (resp == null) {
+                return Map.of("documents", List.of(), "messages", List.of());
+            }
+            return resp;
+        } catch (Exception e) {
+            log.warn("调 Python 全局搜索失败，返回空: {}", e.getMessage());
+            return Map.of("documents", List.of(), "messages", List.of());
+        }
+    }
+
+    /**
+     * 索引单条聊天消息到 ES — 保存消息后异步调用（失败不阻塞主流程）。
+     */
+    public void indexMessage(
+            String messageId, String conversationId, String conversationTitle,
+            String role, String content, String tenantId, String userId, String createTime
+    ) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("message_id", messageId);
+        body.put("conversation_id", conversationId);
+        body.put("conversation_title", conversationTitle);
+        body.put("role", role);
+        body.put("content", content);
+        body.put("tenant_id", tenantId);
+        body.put("user_id", userId);
+        body.put("create_time", createTime);
+        try {
+            webClient.post()
+                    .uri("/ai/search/index-message")
+                    .bodyValue(body)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .block();
+        } catch (Exception e) {
+            log.warn("索引消息到 ES 失败，忽略: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 删除某会话的所有消息索引 — 删除会话时调用（失败不阻塞主流程）。
+     */
+    public void deleteConversationMessages(String conversationId, String tenantId) {
+        try {
+            webClient.delete()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/ai/search/messages/{conversationId}")
+                            .queryParam("tenant_id", tenantId)
+                            .build(conversationId))
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .block();
+        } catch (Exception e) {
+            log.warn("删除会话消息 ES 索引失败，忽略: {}", e.getMessage());
+        }
+    }
 }

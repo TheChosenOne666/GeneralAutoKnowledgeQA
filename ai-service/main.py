@@ -97,6 +97,7 @@ app.include_router(chat.router, prefix="/ai")
 app.include_router(document.router, prefix="/ai")
 app.include_router(cache.router, prefix="/ai")
 app.include_router(admin.router, prefix="/ai")
+app.include_router(search.router, prefix="/ai")
 
 
 @app.get("/health")

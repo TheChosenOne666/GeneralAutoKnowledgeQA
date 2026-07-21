@@ -3,6 +3,7 @@ package com.xiongda.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xiongda.client.AiServiceClient;
 import com.xiongda.common.ErrorCode;
 import com.xiongda.exception.BusinessException;
 import com.xiongda.mapper.ConversationMapper;
@@ -35,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversation> implements ChatService {
 
     private final MessageMapper messageMapper;
+    private final AiServiceClient aiServiceClient;
 
     @Resource(name = "stringRedisTemplate")
     private StringRedisTemplate redisTemplate;
@@ -45,8 +47,9 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
     private static final long CONV_CACHE_TTL = 1800; // 会话缓存 TTL：30min
     private static final int CONV_CACHE_MAX = 50;    // 会话缓存最多保留最近 50 条
 
-    public ChatServiceImpl(MessageMapper messageMapper) {
+    public ChatServiceImpl(MessageMapper messageMapper, AiServiceClient aiServiceClient) {
         this.messageMapper = messageMapper;
+        this.aiServiceClient = aiServiceClient;
     }
 
     @Override
@@ -121,18 +124,18 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
 
     @Override
     public void saveUserMessage(Long conversationId, String content) {
-        // 先写 Redis 会话缓存（带 TTL），再落库持久化
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole("user");
         message.setContent(content);
         messageMapper.insert(message);
         cacheMessage(conversationId, "user", content, null, null, message.getCreateTime());
+        // 异步索引到 ES（全局搜索用，失败不阻塞）
+        indexMessageToEs(message, conversationId, content);
     }
 
     @Override
     public void saveAssistantMessage(Long conversationId, String content, String model, String sources) {
-        // 先写 Redis 会话缓存（带 TTL），再落库持久化
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole("assistant");
@@ -141,6 +144,8 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
         message.setSources(sources);
         messageMapper.insert(message);
         cacheMessage(conversationId, "assistant", content, sources, model, message.getCreateTime());
+        // 异步索引到 ES（全局搜索用，失败不阻塞）
+        indexMessageToEs(message, conversationId, content);
     }
 
     @Override
@@ -168,6 +173,15 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
             redisTemplate.delete(CONV_CACHE_PREFIX + id);
         } catch (Exception e) {
             log.warn("清理会话 Redis 缓存失败，忽略: {}", e.getMessage());
+        }
+        // 清理 ES 消息索引（全局搜索用，失败不阻塞）
+        try {
+            aiServiceClient.deleteConversationMessages(
+                    String.valueOf(id),
+                    conv.getTenantId() != null ? String.valueOf(conv.getTenantId()) : ""
+            );
+        } catch (Exception e) {
+            log.warn("清理 ES 消息索引失败，忽略: {}", e.getMessage());
         }
     }
 
@@ -200,6 +214,32 @@ public class ChatServiceImpl extends ServiceImpl<ConversationMapper, Conversatio
         vo.setCreateTime(conv.getCreateTime());
         vo.setUpdateTime(conv.getUpdateTime());
         return vo;
+    }
+
+    /**
+     * 异步索引消息到 ES（全局搜索用）。
+     * 获取会话标题用于搜索结果展示。失败不阻塞主流程（AiServiceClient 内部已捕获异常）。
+     */
+    private void indexMessageToEs(Message message, Long conversationId, String content) {
+        try {
+            Conversation conv = this.getById(conversationId);
+            String convTitle = conv != null ? conv.getTitle() : "";
+            String tenantId = conv != null && conv.getTenantId() != null ? String.valueOf(conv.getTenantId()) : "";
+            String userId = conv != null && conv.getUserId() != null ? String.valueOf(conv.getUserId()) : "";
+            String createTime = message.getCreateTime() != null ? String.valueOf(message.getCreateTime().getTime()) : "";
+            aiServiceClient.indexMessage(
+                    String.valueOf(message.getId()),
+                    String.valueOf(conversationId),
+                    convTitle,
+                    message.getRole(),
+                    content,
+                    tenantId,
+                    userId,
+                    createTime
+            );
+        } catch (Exception e) {
+            log.warn("索引消息到 ES 失败，忽略: {}", e.getMessage());
+        }
     }
 
     private MessageVO toMessageVO(Message msg) {
