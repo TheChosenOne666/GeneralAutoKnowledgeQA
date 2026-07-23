@@ -202,7 +202,7 @@ function AppLayoutInner() {
             knowledgeBases={knowledgeBases}
             onSelectConversation={(id) => setActiveId(id)}
             onSelectKnowledgeBase={() => navigate('/knowledge')}
-            onSelectDocument={() => navigate('/knowledge')}
+            onSelectDocument={(d) => navigate('/knowledge', { state: { docId: d.docId, kbId: d.kbId, source: d.source, searchQuery: d.query } })}
             onSelectMessage={(m) => setActiveId(m.conversationId)}
           />
         </div>

@@ -26,7 +26,7 @@ interface GlobalSearchProps {
   knowledgeBases: KnowledgeBase[]
   onSelectConversation: (id: string) => void
   onSelectKnowledgeBase: (kbId: string) => void
-  onSelectDocument: (doc: { docId: string; kbId: string; source: string }) => void
+  onSelectDocument: (doc: { docId: string; kbId: string; source: string; query: string }) => void
   onSelectMessage: (msg: { conversationId: string; conversationTitle: string }) => void
 }
 
@@ -233,7 +233,7 @@ export function GlobalSearch({
     }
     push('conversations', localConversations, (i) => () => { onSelectConversation(localConversations[i].id); handleSearch(query); setFocused(false) })
     push('messages', msgs, (i) => () => { onSelectMessage({ conversationId: msgs[i].conversation_id, conversationTitle: msgs[i].conversation_title }); handleSearch(query); setFocused(false) })
-    push('documents', docs, (i) => () => { onSelectDocument({ docId: docs[i].doc_id, kbId: docs[i].kb_id, source: docs[i].source }); handleSearch(query); setFocused(false) })
+    push('documents', docs, (i) => () => { onSelectDocument({ docId: docs[i].doc_id, kbId: docs[i].kb_id, source: docs[i].source, query: query.trim() }); handleSearch(query); setFocused(false) })
     push('knowledgeBases', localKbs, (i) => () => { onSelectKnowledgeBase(localKbs[i].id); handleSearch(query); setFocused(false) })
     return items
   }, [activeTab, localConversations, msgs, docs, localKbs, onSelectConversation, onSelectMessage, onSelectDocument, onSelectKnowledgeBase, query])
@@ -419,7 +419,7 @@ export function GlobalSearch({
                 {showDocuments && (
                   <Section title="文档" extra={totalDocs > docs.length ? `${docs.length}/${totalDocs}` : undefined}>
                     {docs.map((d, i) => (
-                      <Item key={d.doc_id + i} highlighted={highlightIndex === docStart + i} onClick={() => { onSelectDocument({ docId: d.doc_id, kbId: d.kb_id, source: d.source }); handleSearch(query); setFocused(false) }}>
+                      <Item key={d.doc_id + i} highlighted={highlightIndex === docStart + i} onClick={() => { onSelectDocument({ docId: d.doc_id, kbId: d.kb_id, source: d.source, query: query.trim() }); handleSearch(query); setFocused(false) }}>
                         <div className="flex flex-col gap-0.5 min-w-0">
                           <span className="text-xs text-slate-700 truncate">📄 {d.source || d.doc_id}</span>
                           {d.highlight && <span className="text-[11px] text-slate-400 truncate pl-5" dangerouslySetInnerHTML={{ __html: safeHighlight(d.highlight) }} />}

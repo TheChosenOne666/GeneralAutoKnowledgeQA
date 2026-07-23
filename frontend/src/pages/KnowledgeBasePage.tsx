@@ -1,8 +1,8 @@
 /** 知识库管理页 — 按设计稿 03-knowledge-base.html 重写，保留后端 API 调用。*/
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import ReactMarkdown from 'react-markdown'
+import { Children as ReactChildren, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { knowledgeApi } from '@/api/knowledge'
 import { useAuth } from '@/hooks/useAuth'
@@ -36,6 +36,24 @@ function normalizeStages(raw: Document['processStages']): ProcessStage[] {
   } catch {
     return []
   }
+}
+
+/** 高亮搜索关键词：遍历子节点，在文本中用 <mark> 标记匹配。*/
+function highlightChildren(children: ReactNode, regex: RegExp): ReactNode {
+  return ReactChildren.map(children, (child) => {
+    if (typeof child === 'string') {
+      const parts = child.split(regex)
+      if (parts.length <= 1) return child
+      return parts.map((part, i) => {
+        // split 带捕获组后，奇数索引是匹配项
+        if (i % 2 === 1 && part) {
+          return <mark key={i} className="bg-emerald-200 text-emerald-900 rounded px-0.5">{part}</mark>
+        }
+        return part || null
+      })
+    }
+    return child
+  })
 }
 
 /** 文档处理阶段时间线（M5-4）：细粒度进度与失败定位。*/
@@ -140,6 +158,9 @@ export default function KnowledgeBasePage() {
   const [viewContent, setViewContent] = useState('')
   const [viewLoading, setViewLoading] = useState(false)
   const [viewError, setViewError] = useState('')
+  // 搜索高亮：从全局搜索跳转过来时携带的关键词
+  const [highlightQuery, setHighlightQuery] = useState('')
+  const location = useLocation()
   const navigate = useNavigate()
   const { user } = useAuth()
   const isAdmin = user?.role === 'tenant_admin' || user?.role === 'super_admin'
@@ -218,6 +239,58 @@ export default function KnowledgeBasePage() {
     // 切换知识库时清空批量删除选中，避免跨库残留
     setDeleteIds(new Set())
   }, [selectedKb, loadDocuments])
+
+  // 从全局搜索跳转过来：自动定位知识库 + 打开文档 + 高亮关键词
+  const searchState = location.state as { docId?: string; kbId?: string; source?: string; searchQuery?: string } | null
+  useEffect(() => {
+    if (!searchState?.docId || !searchState?.kbId) return
+    // 设置高亮关键词
+    if (searchState.searchQuery) setHighlightQuery(searchState.searchQuery)
+    // 如果知识库列表已加载，找到对应的 KB 并选中
+    if (kbList.length > 0) {
+      const targetKb = kbList.find((k) => k.id === searchState.kbId)
+      if (targetKb && (!selectedKb || selectedKb.id !== targetKb.id)) {
+        setSelectedKb(targetKb)
+      }
+      // 文档列表加载后自动打开文档预览
+      if (documents.length > 0) {
+        const targetDoc = documents.find((d) => d.id === searchState.docId)
+        if (targetDoc && !viewingDoc) {
+          handleView(targetDoc)
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchState?.docId, searchState?.kbId, searchState?.searchQuery, kbList, documents])
+
+  // 清除高亮：关闭文档预览时清除
+  const handleCloseView = () => {
+    setViewingDoc(null)
+    setHighlightQuery('')
+    // 清除 location state，避免刷新后重复触发
+    if (location.state) navigate('/knowledge', { replace: true })
+  }
+
+  // 高亮搜索关键词：将文本节点中的匹配词包裹在 <mark> 中
+  const markdownComponents = useMemo<Components>(() => {
+    if (!highlightQuery) return {}
+    // 提取搜索词：去掉运算符，拆分成多个关键词
+    const keywords = highlightQuery
+      .replace(/["+\-]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 2)
+      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) // 转义正则特殊字符
+      .filter(Boolean)
+    if (keywords.length === 0) return {}
+    const regex = new RegExp(`(${keywords.join('|')})`, 'gi')
+    return {
+      // ReactMarkdown 的 text 节点：在纯文本中高亮
+      p: ({ children }) => highlightChildren(children, regex),
+      li: ({ children }) => highlightChildren(children, regex),
+      td: ({ children }) => highlightChildren(children, regex),
+      th: ({ children }) => highlightChildren(children, regex),
+    }
+  }, [highlightQuery])
 
   const handleTabChange = (newTab: 'shared' | 'personal') => {
     setTab(newTab)
@@ -668,7 +741,7 @@ export default function KnowledgeBasePage() {
 
       {/* 文档内容查看弹窗 */}
       {viewingDoc && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setViewingDoc(null)}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={handleCloseView}>
           <div
             className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
@@ -679,7 +752,7 @@ export default function KnowledgeBasePage() {
                 <p className="text-xs text-slate-400 mt-0.5">文档内容预览</p>
               </div>
               <button
-                onClick={() => setViewingDoc(null)}
+                onClick={handleCloseView}
                 className="ml-4 flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
                 aria-label="关闭"
               >
@@ -695,7 +768,12 @@ export default function KnowledgeBasePage() {
                 <div className="px-4 py-3 rounded-lg bg-red-50 text-red-600 text-sm">{viewError}</div>
               ) : (
                 <div className="text-sm leading-relaxed text-slate-700 font-sans">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewContent}</ReactMarkdown>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={markdownComponents}
+                  >
+                    {viewContent}
+                  </ReactMarkdown>
                 </div>
               )}
             </div>
