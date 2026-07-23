@@ -283,6 +283,11 @@ export default function KnowledgeBasePage() {
   }
 
   const handleTabChange = (newTab: 'shared' | 'personal') => {
+    if (newTab === tab) {
+      // 点同一个 Tab：刷新当前知识库文档，不重置状态
+      if (selectedKb) loadDocuments(selectedKb.id)
+      return
+    }
     setTab(newTab)
     setKbList([])
     setSelectedKb(null)
@@ -444,34 +449,18 @@ export default function KnowledgeBasePage() {
         <div className="flex items-center gap-3">
           <h3 className="text-base font-bold text-slate-800">知识库管理</h3>
           {kbList.length > 0 && (
-            <div className="flex items-center gap-2">
-              <select
-                value={selectedKb?.id || ''}
-                onChange={(e) => {
-                  const kb = kbList.find((k) => k.id === e.target.value)
-                  if (kb) setSelectedKb(kb)
-                }}
-                className="px-3 py-1.5 rounded-lg border border-emerald-200 text-sm text-slate-600 bg-white cursor-pointer"
-              >
-                {kbList.map((kb) => (
-                  <option key={kb.id} value={kb.id}>{kb.name} ({kb.documentCount} 文档)</option>
-                ))}
-              </select>
-              <button
-                onClick={() => {
-                  if (selectedKb) {
-                    loadDocuments(selectedKb.id)
-                    loadKbList(tab)
-                  }
-                }}
-                className="px-2 py-1.5 rounded-lg border border-emerald-200 text-slate-500 hover:bg-emerald-50 hover:text-brand-600 transition"
-                title="刷新文档列表"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-              </button>
-            </div>
+            <select
+              value={selectedKb?.id || ''}
+              onChange={(e) => {
+                const kb = kbList.find((k) => k.id === e.target.value)
+                if (kb) setSelectedKb(kb)
+              }}
+              className="px-3 py-1.5 rounded-lg border border-emerald-200 text-sm text-slate-600 bg-white cursor-pointer"
+            >
+              {kbList.map((kb) => (
+                <option key={kb.id} value={kb.id}>{kb.name} ({kb.documentCount} 文档)</option>
+              ))}
+            </select>
           )}
         </div>
         {canWrite && (
