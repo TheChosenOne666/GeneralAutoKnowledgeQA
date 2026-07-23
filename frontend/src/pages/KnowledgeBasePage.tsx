@@ -1,8 +1,8 @@
 /** 知识库管理页 — 按设计稿 03-knowledge-base.html 重写，保留后端 API 调用。*/
 
-import { Children as ReactChildren, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { knowledgeApi } from '@/api/knowledge'
 import { useAuth } from '@/hooks/useAuth'
@@ -38,22 +38,29 @@ function normalizeStages(raw: Document['processStages']): ProcessStage[] {
   }
 }
 
-/** 高亮搜索关键词：遍历子节点，在文本中用 <mark> 标记匹配。*/
-function highlightChildren(children: ReactNode, regex: RegExp): ReactNode {
-  return ReactChildren.map(children, (child) => {
-    if (typeof child === 'string') {
-      const parts = child.split(regex)
-      if (parts.length <= 1) return child
-      return parts.map((part, i) => {
-        // split 带捕获组后，奇数索引是匹配项
-        if (i % 2 === 1 && part) {
-          return <mark key={i} className="bg-emerald-200 text-emerald-900 rounded px-0.5">{part}</mark>
-        }
-        return part || null
-      })
-    }
-    return child
-  })
+/** 高亮文件名中的搜索关键词 */
+function HighlightFilename({ filename, query }: { filename: string; query: string }) {
+  if (!query) return <>{filename}</>
+  const keywords = query
+    .replace(/["+\-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 2)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean)
+  if (keywords.length === 0) return <>{filename}</>
+  const regex = new RegExp(`(${keywords.join('|')})`, 'gi')
+  const parts = filename.split(regex)
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 && part ? (
+          <mark key={i} className="bg-emerald-200 text-emerald-900 rounded px-0.5">{part}</mark>
+        ) : (
+          part || null
+        ),
+      )}
+    </>
+  )
 }
 
 /** 文档处理阶段时间线（M5-4）：细粒度进度与失败定位。*/
@@ -240,8 +247,9 @@ export default function KnowledgeBasePage() {
     setDeleteIds(new Set())
   }, [selectedKb, loadDocuments])
 
-  // 从全局搜索跳转过来：自动定位知识库 + 打开文档 + 高亮关键词
+  // 从全局搜索跳转过来：自动定位知识库 + 高亮文件名
   const searchState = location.state as { docId?: string; kbId?: string; source?: string; searchQuery?: string } | null
+  const targetDocRef = useRef<HTMLTableRowElement | HTMLDivElement | null>(null)
   useEffect(() => {
     if (!searchState?.docId || !searchState?.kbId) return
     // 设置高亮关键词
@@ -252,45 +260,27 @@ export default function KnowledgeBasePage() {
       if (targetKb && (!selectedKb || selectedKb.id !== targetKb.id)) {
         setSelectedKb(targetKb)
       }
-      // 文档列表加载后自动打开文档预览
+      // 文档列表加载后滚动到目标文档
       if (documents.length > 0) {
         const targetDoc = documents.find((d) => d.id === searchState.docId)
-        if (targetDoc && !viewingDoc) {
-          handleView(targetDoc)
+        if (targetDoc) {
+          // 延迟一帧确保 DOM 已渲染
+          requestAnimationFrame(() => {
+            targetDocRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          })
         }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchState?.docId, searchState?.kbId, searchState?.searchQuery, kbList, documents])
 
-  // 清除高亮：关闭文档预览时清除
+  // 清除高亮
   const handleCloseView = () => {
     setViewingDoc(null)
     setHighlightQuery('')
     // 清除 location state，避免刷新后重复触发
     if (location.state) navigate('/knowledge', { replace: true })
   }
-
-  // 高亮搜索关键词：将文本节点中的匹配词包裹在 <mark> 中
-  const markdownComponents = useMemo<Components>(() => {
-    if (!highlightQuery) return {}
-    // 提取搜索词：去掉运算符，拆分成多个关键词
-    const keywords = highlightQuery
-      .replace(/["+\-]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length >= 2)
-      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) // 转义正则特殊字符
-      .filter(Boolean)
-    if (keywords.length === 0) return {}
-    const regex = new RegExp(`(${keywords.join('|')})`, 'gi')
-    return {
-      // ReactMarkdown 的 text 节点：在纯文本中高亮
-      p: ({ children }) => highlightChildren(children, regex),
-      li: ({ children }) => highlightChildren(children, regex),
-      td: ({ children }) => highlightChildren(children, regex),
-      th: ({ children }) => highlightChildren(children, regex),
-    }
-  }, [highlightQuery])
 
   const handleTabChange = (newTab: 'shared' | 'personal') => {
     setTab(newTab)
@@ -454,18 +444,34 @@ export default function KnowledgeBasePage() {
         <div className="flex items-center gap-3">
           <h3 className="text-base font-bold text-slate-800">知识库管理</h3>
           {kbList.length > 0 && (
-            <select
-              value={selectedKb?.id || ''}
-              onChange={(e) => {
-                const kb = kbList.find((k) => k.id === e.target.value)
-                if (kb) setSelectedKb(kb)
-              }}
-              className="px-3 py-1.5 rounded-lg border border-emerald-200 text-sm text-slate-600 bg-white cursor-pointer"
-            >
-              {kbList.map((kb) => (
-                <option key={kb.id} value={kb.id}>{kb.name} ({kb.documentCount} 文档)</option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedKb?.id || ''}
+                onChange={(e) => {
+                  const kb = kbList.find((k) => k.id === e.target.value)
+                  if (kb) setSelectedKb(kb)
+                }}
+                className="px-3 py-1.5 rounded-lg border border-emerald-200 text-sm text-slate-600 bg-white cursor-pointer"
+              >
+                {kbList.map((kb) => (
+                  <option key={kb.id} value={kb.id}>{kb.name} ({kb.documentCount} 文档)</option>
+                ))}
+              </select>
+              <button
+                onClick={() => {
+                  if (selectedKb) {
+                    loadDocuments(selectedKb.id)
+                    loadKbList(tab)
+                  }
+                }}
+                className="px-2 py-1.5 rounded-lg border border-emerald-200 text-slate-500 hover:bg-emerald-50 hover:text-brand-600 transition"
+                title="刷新文档列表"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+              </button>
+            </div>
           )}
         </div>
         {canWrite && (
@@ -768,12 +774,7 @@ export default function KnowledgeBasePage() {
                 <div className="px-4 py-3 rounded-lg bg-red-50 text-red-600 text-sm">{viewError}</div>
               ) : (
                 <div className="text-sm leading-relaxed text-slate-700 font-sans">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={markdownComponents}
-                  >
-                    {viewContent}
-                  </ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewContent}</ReactMarkdown>
                 </div>
               )}
             </div>
