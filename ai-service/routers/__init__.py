@@ -2,4 +2,4 @@
 
 from routers import chat, document, search
 
-__all__ = ["chat", "document"]
+__all__ = ["chat", "document", "search"]

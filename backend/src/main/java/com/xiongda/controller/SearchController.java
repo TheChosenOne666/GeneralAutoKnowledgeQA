@@ -10,6 +10,8 @@ import com.xiongda.mapper.MessageMapper;
 import com.xiongda.model.entity.Conversation;
 import com.xiongda.model.entity.KnowledgeBase;
 import com.xiongda.model.entity.Message;
+import com.xiongda.model.entity.User;
+import com.xiongda.service.UserService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
@@ -40,6 +42,8 @@ public class SearchController {
 
     @Resource
     private HttpServletRequest httpRequest;
+    @Resource
+    private UserService userService;
 
     public SearchController(
             AiServiceClient aiServiceClient,
@@ -71,10 +75,11 @@ public class SearchController {
             @RequestParam(defaultValue = "0") int from,
             @RequestParam(defaultValue = "true") boolean enableSemantic
     ) {
-        Long userId = (Long) httpRequest.getAttribute("userId");
-        Long tenantId = (Long) httpRequest.getAttribute("tenantId");
-        String tenantIdStr = tenantId != null ? String.valueOf(tenantId) : "";
-        String userIdStr = userId != null ? String.valueOf(userId) : "";
+        User loginUser = userService.getLoginUser(httpRequest);
+        Long userId = loginUser.getId();
+        Long tenantId = loginUser.getTenantId();
+        String tenantIdStr = String.valueOf(tenantId);
+        String userIdStr = String.valueOf(userId);
 
         // 调用 Python AI 服务搜索
         Map<String, Object> aiResult = aiServiceClient.globalSearch(
@@ -102,8 +107,8 @@ public class SearchController {
                 }
             }
             // 更新 total
-            if (total_msgs == 0) {
-                total_msgs = pgResults.size();
+            if (totalMsgs == 0) {
+                totalMsgs = pgResults.size();
             }
         }
 
@@ -111,7 +116,7 @@ public class SearchController {
         result.put("documents", documents);
         result.put("messages", messages);
         result.put("total_documents", totalDocs);
-        result.put("total_messages", total_msgs);
+        result.put("total_messages", totalMsgs);
         return ResultUtils.success(result);
     }
 

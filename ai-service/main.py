@@ -15,7 +15,7 @@ from loguru import logger
 
 from core.config import settings
 from core.pg_client import close_pg_pool, get_pg_pool
-from routers import admin, cache, chat, document
+from routers import admin, cache, chat, document, search
 from services.augment_queue import sweep_stale
 from services.document_processor import document_processor
 from services.process_queue import sweep_stale as sweep_process_stale
