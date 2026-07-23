@@ -27,7 +27,7 @@ interface GlobalSearchProps {
   onSelectConversation: (id: string) => void
   onSelectKnowledgeBase: (kbId: string) => void
   onSelectDocument: (doc: { docId: string; kbId: string; source: string; query: string }) => void
-  onSelectMessage: (msg: { conversationId: string; conversationTitle: string }) => void
+  onSelectMessage: (msg: { conversationId: string; conversationTitle: string; messageId: string; query: string }) => void
 }
 
 type Tab = 'all' | 'conversations' | 'messages' | 'documents' | 'knowledgeBases'
@@ -232,7 +232,7 @@ export function GlobalSearch({
       }
     }
     push('conversations', localConversations, (i) => () => { onSelectConversation(localConversations[i].id); handleSearch(query); setFocused(false) })
-    push('messages', msgs, (i) => () => { onSelectMessage({ conversationId: msgs[i].conversation_id, conversationTitle: msgs[i].conversation_title }); handleSearch(query); setFocused(false) })
+    push('messages', msgs, (i) => () => { onSelectMessage({ conversationId: msgs[i].conversation_id, conversationTitle: msgs[i].conversation_title, messageId: msgs[i].id, query: query.trim() }); handleSearch(query); setFocused(false) })
     push('documents', docs, (i) => () => { onSelectDocument({ docId: docs[i].doc_id, kbId: docs[i].kb_id, source: docs[i].source, query: query.trim() }); handleSearch(query); setFocused(false) })
     push('knowledgeBases', localKbs, (i) => () => { onSelectKnowledgeBase(localKbs[i].id); handleSearch(query); setFocused(false) })
     return items
@@ -400,7 +400,7 @@ export function GlobalSearch({
                 {showMessages && (
                   <Section title="聊天消息" extra={totalMsgs > msgs.length ? `${msgs.length}/${totalMsgs}` : undefined}>
                     {msgs.map((m, i) => (
-                      <Item key={m.id} highlighted={highlightIndex === msgStart + i} onClick={() => { onSelectMessage({ conversationId: m.conversation_id, conversationTitle: m.conversation_title }); handleSearch(query); setFocused(false) }}>
+                      <Item key={m.id} highlighted={highlightIndex === msgStart + i} onClick={() => { onSelectMessage({ conversationId: m.conversation_id, conversationTitle: m.conversation_title, messageId: m.id, query: query.trim() }); handleSearch(query); setFocused(false) }}>
                         <div className="flex flex-col gap-0.5 min-w-0">
                           <div className="flex items-center gap-1.5">
                             <span className="text-slate-400 text-xs">{m.role === 'user' ? '👤' : '🤖'}</span>

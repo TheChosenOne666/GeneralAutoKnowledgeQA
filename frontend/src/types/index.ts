@@ -121,6 +121,8 @@ export interface AgentStep {
 
 /** 问答页单条消息（含流式中间态），跨路由切换保留于 ChatContext 内存缓存。*/
 export interface ChatMessage {
+  /** 后端消息 ID（用于全局搜索跳转定位）*/
+  id?: string
   role: 'user' | 'assistant'
   content: string
   sources?: SourceItem[]

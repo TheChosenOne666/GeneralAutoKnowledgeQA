@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import 'highlight.js/styles/github.css'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { chatApi } from '@/api/chat'
 import { api } from '@/api/client'
@@ -41,6 +41,29 @@ function formatTime(input: string | number | Date): string {
   if (isNaN(d.getTime())) return ''
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 高亮搜索关键词（用于从全局搜索跳转过来时在消息内容中标记匹配文本）。*/
+function highlightSearchTerms(text: string, query: string): React.ReactNode {
+  if (!query || !text) return text
+  // 提取搜索词：去掉运算符前缀（+/-/""），拆分为多个关键词
+  const terms = query
+    .split(/\s+/)
+    .map((t) => t.replace(/^[+\-]/, '').replace(/^"|"$/g, ''))
+    .filter((t) => t.length >= 2)
+  if (terms.length === 0) return text
+  // 构建正则：所有关键词用 | 连接，不区分大小写
+  const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const regex = new RegExp(`(${pattern})`, 'gi')
+  const parts = text.split(regex)
+  // split 带捕获组后，匹配项在奇数索引位置
+  return parts.map((part, idx) =>
+    idx % 2 === 1 ? (
+      <mark key={idx} className="bg-emerald-200 text-emerald-900 rounded px-0.5">{part}</mark>
+    ) : (
+      part
+    ),
+  )
 }
 
 /** AI 思考时动态省略号：1 个点 → 2 个点 → 3 个点循环，避免气泡宽度跳动。*/
@@ -401,6 +424,11 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const navigate = useNavigate()
+  const location = useLocation()
+  // 从全局搜索跳转过来时携带的目标消息 ID 和搜索关键词
+  const [highlightMessageId, setHighlightMessageId] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const messageRefMap = useRef<Record<number, HTMLDivElement | null>>({})
   // 自动滚动：发送后跳到底部、流式回复时跟随底部动态加载
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
@@ -409,6 +437,18 @@ export default function ChatPage() {
   // M5-9 问答时携带的图片 / 附件（临时上下文，发送后清空）
   const [images, setImages] = useState<ChatAttachmentVO[]>([])
   const [attachments, setAttachments] = useState<ChatAttachmentVO[]>([])
+  // 从全局搜索跳转：读取 location.state 并设置高亮目标
+  useEffect(() => {
+    const state = location.state as { conversationId?: string; messageId?: string; searchQuery?: string } | null
+    if (state?.messageId) {
+      setHighlightMessageId(state.messageId)
+      setSearchQuery(state.searchQuery || '')
+    } else {
+      setHighlightMessageId('')
+      setSearchQuery('')
+    }
+  }, [location.state])
+
   // 图片缩略图 blob URL 映射（<img src> 无法带 JWT header，用 blob URL 替代）
   const [imageBlobUrls, setImageBlobUrls] = useState<Record<string, string>>({})
 
@@ -592,7 +632,19 @@ export default function ChatPage() {
       // 切回时跳到底部并跟随流式 token，保持「实时跟随 AI 回复」的体验
       followRef.current = true
       atBottomRef.current = true
-      scrollToBottom('auto')
+      // 如果从全局搜索跳转过来且有高亮目标，滚动到目标消息
+      if (highlightMessageId) {
+        requestAnimationFrame(() => {
+          const el = scrollRef.current?.querySelector(`[data-msg-id="${highlightMessageId}"]`)
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          } else {
+            scrollToBottom('auto')
+          }
+        })
+      } else {
+        scrollToBottom('auto')
+      }
       return
     }
     const token = ++loadToken.current
@@ -603,6 +655,7 @@ export default function ChatPage() {
         if (token !== loadToken.current) return
         setMessages(
           msgs.map((m) => ({
+            id: m.id,
             role: m.role as 'user' | 'assistant',
             content: m.content,
             sources: parseSources(m.sources),
@@ -611,7 +664,22 @@ export default function ChatPage() {
         )
         markLoaded(activeId)
         atBottomRef.current = true
-        scrollToBottom('auto')
+        // 如果从全局搜索跳转过来且有高亮目标，滚动到目标消息
+        if (highlightMessageId) {
+          requestAnimationFrame(() => {
+            // 后端消息列表按时间正序，找到目标消息的索引
+            // 由于后端消息有 id，但我们前端 ChatMessage 没有存 id，用 content 匹配也可以
+            // 更好的做法：在 listMessages 返回中查找 messageId
+            const el = scrollRef.current?.querySelector(`[data-msg-id="${highlightMessageId}"]`)
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            } else {
+              scrollToBottom('auto')
+            }
+          })
+        } else {
+          scrollToBottom('auto')
+        }
       })
       .catch(() => {
         if (token !== loadToken.current) return
@@ -867,8 +935,14 @@ export default function ChatPage() {
             {messages.map((msg, i) => {
               const isUser = msg.role === 'user'
               const displayName = isUser ? user?.name || '我' : '熊答AI'
+              const isHighlight = highlightMessageId && msg.id === highlightMessageId
               return (
-                <div key={i} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  key={i}
+                  data-msg-id={msg.id}
+                  ref={(el) => { messageRefMap.current[i] = el }}
+                  className={`flex ${isUser ? 'justify-end' : 'justify-start'} ${isHighlight ? 'ring-2 ring-emerald-300 rounded-xl' : ''}`}
+                >
                   {!isUser && (
                     <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-teal-400 flex items-center justify-center text-white text-sm font-bold mr-3 flex-shrink-0">熊</div>
                   )}
@@ -876,7 +950,7 @@ export default function ChatPage() {
                     <span className="text-xs text-slate-400 mb-1 px-1">{displayName}</span>
                     <div className={`${isUser ? 'bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-2xl rounded-tr-sm' : 'bg-emerald-50 text-slate-700 rounded-2xl rounded-tl-sm'} px-4 py-3`}>
                       {isUser ? (
-                        <span className="text-sm whitespace-pre-wrap">{msg.content}</span>
+                        <span className="text-sm whitespace-pre-wrap">{highlightSearchTerms(msg.content, searchQuery)}</span>
                       ) : (
                         <div className="text-sm leading-relaxed break-words">
                           {msg.content ? (
